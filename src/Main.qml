@@ -524,11 +524,36 @@ ApplicationWindow {
         }
     }
 
+    function resolveSavedDraftForChat(chatGuid) {
+        if (!chatGuid || chatGuid.length === 0) return ""
+        var drafts = root.chatDrafts || ({})
+        if (drafts[chatGuid] !== undefined && drafts[chatGuid].length > 0) {
+            return drafts[chatGuid]
+        }
+        var keys = Object.keys(drafts)
+        for (var i = 0; i < keys.length; ++i) {
+            var k = keys[i]
+            if (k !== "" && k !== chatGuid && drafts[k] !== undefined && drafts[k].length > 0 && backend.isSameConversation(k, chatGuid)) {
+                var val = drafts[k]
+                drafts[chatGuid] = val
+                delete drafts[k]
+                root.chatDrafts = drafts
+                return val
+            }
+        }
+        return (drafts[chatGuid] !== undefined) ? drafts[chatGuid] : ""
+    }
+
     Component.onCompleted: {
+        var initialGuid = backend.selectedChatGuid || ""
+        if (initialGuid.length > 0) {
+            root.lastDraftChatGuid = initialGuid
+        }
         backend.registerWindow(root)
-        if (backend.selectedChatGuid && backend.selectedChatGuid.length > 0) {
-            root.lastDraftChatGuid = backend.selectedChatGuid
-            var savedDraft = (root.chatDrafts && root.chatDrafts[backend.selectedChatGuid] !== undefined) ? root.chatDrafts[backend.selectedChatGuid] : ""
+        var currentGuid = backend.selectedChatGuid || ""
+        if (currentGuid.length > 0) {
+            root.lastDraftChatGuid = currentGuid
+            var savedDraft = root.resolveSavedDraftForChat(currentGuid)
             if (savedDraft.length > 0 && composerInput.text !== savedDraft) {
                 composerInput.text = savedDraft
             }
@@ -543,19 +568,30 @@ ApplicationWindow {
             toastTimer.restart()
         }
         function onSelectedChatChanged() {
-            root.clearActionMenu()
-            root.replyTargetGuid = ""
-            root.replyTargetSender = ""
-            root.replyTargetText = ""
             var newGuid = backend.selectedChatGuid || ""
+            var sameConv = (root.lastDraftChatGuid === newGuid) || (root.lastDraftChatGuid !== "" && newGuid !== "" && backend.isSameConversation(root.lastDraftChatGuid, newGuid))
+            if (!sameConv) {
+                root.clearActionMenu()
+                root.replyTargetGuid = ""
+                root.replyTargetSender = ""
+                root.replyTargetText = ""
+            }
             if (root.lastDraftChatGuid !== "" && root.lastDraftChatGuid !== newGuid) {
                 var drafts = root.chatDrafts || ({})
-                drafts[root.lastDraftChatGuid] = composerInput.text
+                var canonPrev = backend.resolveCanonicalChatGuid(root.lastDraftChatGuid) || root.lastDraftChatGuid
+                if (sameConv && composerInput.text !== "") {
+                    drafts[newGuid] = composerInput.text
+                    if (drafts[root.lastDraftChatGuid] !== undefined) delete drafts[root.lastDraftChatGuid]
+                    if (canonPrev !== newGuid && drafts[canonPrev] !== undefined) delete drafts[canonPrev]
+                } else {
+                    drafts[canonPrev] = composerInput.text
+                    if (canonPrev !== root.lastDraftChatGuid && drafts[root.lastDraftChatGuid] !== undefined) delete drafts[root.lastDraftChatGuid]
+                }
                 root.chatDrafts = drafts
             }
             if (root.lastDraftChatGuid !== newGuid) {
                 root.lastDraftChatGuid = newGuid
-                var savedDraft = (root.chatDrafts && newGuid !== "" && root.chatDrafts[newGuid] !== undefined) ? root.chatDrafts[newGuid] : ""
+                var savedDraft = root.resolveSavedDraftForChat(newGuid)
                 if (composerInput.text !== savedDraft) {
                     composerInput.text = savedDraft
                 }
