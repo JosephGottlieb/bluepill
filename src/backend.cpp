@@ -1375,6 +1375,9 @@ void Backend::setTailscaleScanState(const QVariantList &relays, const QString &s
 
 void Backend::discoverTailscaleRelays() {
     if (m_tailscaleScanning) return;
+    // Lets the test suite (and anyone who wants it off) skip running `tailscale`
+    // and probing peers when Settings opens.
+    if (qEnvironmentVariableIntValue("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY") == 1) return;
     const QString exe = QStandardPaths::findExecutable(QStringLiteral("tailscale"));
     if (exe.isEmpty()) {
         setTailscaleScanState({}, QStringLiteral("not-installed"), false);

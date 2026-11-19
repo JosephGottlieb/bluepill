@@ -34,6 +34,7 @@ Example `~/.config/bluepill/config.json`:
 | `BLUEPILL_SECONDARY_URL` | `IMSG_SECONDARY_URL`, `BLUEBUBBLES_SECONDARY_URL` | Optional failover relay URL |
 | `BLUEPILL_PASSWORD` | `IMSG_PASSWORD`, `BLUEBUBBLES_PASSWORD` | Relay API password / token |
 | `BLUEPILL_CONFIG_PATH` | `IMSG_CONFIG_PATH` | Override path to `config.json` |
+| `BLUEPILL_DISABLE_TAILSCALE_DISCOVERY` | — | Set to `1` to stop Settings from running `tailscale status` and probing tailnet peers |
 
 ---
 

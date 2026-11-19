@@ -22,6 +22,12 @@ class ImsgTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase() {
+        // Keep the suite hermetic: Settings opens on first run in QML tests and
+        // would otherwise run `tailscale status` and probe real tailnet peers.
+        qputenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY", "1");
+    }
+
     void testThemeParsing() {
         Theme theme;
         theme.loadFromTomlString(QStringLiteral(R"(
