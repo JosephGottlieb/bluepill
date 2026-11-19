@@ -3049,14 +3049,13 @@ ApplicationWindow {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: (!backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0) ? Qt.PointingHandCursor : Qt.ArrowCursor
+                            // The name is the way into Add/Edit Contact (no separate button)
+                            ToolTip.visible: containsMouse && !backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0
+                            ToolTip.text: backend.selectedChatHasContact ? i18n.tr("Edit contact") : i18n.tr("Add contact")
+                            ToolTip.delay: 400
                             onClicked: {
                                 if (!backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0) {
-                                    var parts = backend.selectedChatTitle.split(" ")
-                                    root.contactModalFirstName = parts[0] || ""
-                                    root.contactModalLastName = parts.slice(1).join(" ") || ""
-                                    root.contactModalPhone = backend.selectedChatAddress
-                                    root.contactModalEmail = ""
-                                    root.showContactModal = true
+                                    root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)
                                 }
                             }
                         }
@@ -3073,34 +3072,6 @@ ApplicationWindow {
                                ? 62
                                : Math.round((activeChatHeader.height - height) / 2)
                         spacing: activeChatHeader.compactActionButtons ? 5 : 8
-
-                        // Add / Edit Contact Button
-                        Rectangle {
-                            visible: !backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0
-                            height: 32
-                            radius: 8
-                            width: contactBtnLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: backend.selectedChatHasContact ? theme.lighterBackground : Qt.rgba(10/255, 132/255, 255/255, 0.18)
-                            border.width: 1
-                            border.color: backend.selectedChatHasContact ? theme.muted : theme.accent
-
-                            Text {
-                                id: contactBtnLbl
-                                anchors.centerIn: parent
-                                text: activeChatHeader.ultraCompactActionButtons
-                                          ? (backend.selectedChatHasContact ? ("✎ " + i18n.tr("Contact")) : ("＋ " + i18n.tr("Contact")))
-                                          : (backend.selectedChatHasContact ? ("✎ " + i18n.tr("Edit Contact")) : ("＋ " + i18n.tr("Add Contact")))
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: !backend.selectedChatHasContact
-                                color: backend.selectedChatHasContact ? theme.foreground : theme.accent
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)
-                            }
-                        }
 
                         // Scroll to Top Button
                         Rectangle {

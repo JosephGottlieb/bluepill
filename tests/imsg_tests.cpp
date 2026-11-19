@@ -2389,6 +2389,13 @@ private slots:
         QObject *rows = win->findChild<QObject *>(QStringLiteral("contactDetailRows"));
         QVERIFY(rows);
         QTRY_COMPARE(rows->property("count").toInt(), labels.size());
+
+        // The header name opens the dialog; there's no separate Edit Contact button
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+        QVERIFY(!qml.contains(QStringLiteral("i18n.tr(\"Edit Contact\")")));
+        QCOMPARE(qml.count(QStringLiteral("root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)")), 1);
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
