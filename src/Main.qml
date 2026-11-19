@@ -9527,7 +9527,8 @@ ApplicationWindow {
         property int targetUnreadCount: 0
         property bool targetIsMuted: false
         property bool targetIsGroup: false
-        property bool targetIsPinned: false
+        // Live: a Mac-pin refresh while the menu is open updates the label it acts on
+        property bool targetIsPinned: (void(backend.pinnedChats), backend.isChatPinned(targetChatGuid))
         property real menuX: 100
         property real menuY: 100
 
@@ -9539,7 +9540,6 @@ ApplicationWindow {
             targetIsMuted = chatObj.isMuted || false
             targetIsGroup = chatObj.isGroup || false
             menuX = Math.min(Math.max(12, gx), root.width - 252)
-            targetIsPinned = backend.isChatPinned(targetChatGuid)
             menuY = Math.min(Math.max(12, gy), root.height - 266)
             visible = true
         }
