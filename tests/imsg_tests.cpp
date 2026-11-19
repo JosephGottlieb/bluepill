@@ -2457,7 +2457,13 @@ private slots:
         QCOMPARE(composer->property("text").toString(), QStringLiteral("Final wording"));
         QVERIFY(!effectBtn->property("visible").toBool());
         QVERIFY(!scheduleBtn->property("visible").toBool());
-        QMetaObject::invokeMethod(win, "cancelEditing");
+        // Esc cancels the edit first; a staged attachment (hidden meanwhile) survives it
+        QMetaObject::invokeMethod(win, "stageAttachment", Q_ARG(QVariant, QStringLiteral("/tmp/example.png")),
+                                  Q_ARG(QVariant, QStringLiteral("example.png")), Q_ARG(QVariant, chatGuid));
+        QMetaObject::invokeMethod(win, "handleEscapePostVoiceFallback");
+        QCOMPARE(win->property("editTargetGuid").toString(), QString());
+        QCOMPARE(win->property("stagedAttachmentPath").toString(), QStringLiteral("/tmp/example.png"));
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
         QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
         QVERIFY(effectBtn->property("visible").toBool());
         QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
@@ -2543,31 +2549,44 @@ private slots:
         };
         const QByteArray okJson = R"({"status":200,"data":{}})";
 
-        // Edit A, then B before A answers; B succeeds, then A fails: B must stay
+        // Edits to one message go out one at a time, in order; only the newest waiting one is kept
         b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit A"));
         b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit B"));
-        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 2, 3000);
-        answer(QStringLiteral("Edit B"), 200, okJson);
-        QTRY_COMPARE_WITH_TIMEOUT(textOf(QStringLiteral("m-1")), QStringLiteral("Edit B"), 3000);
-        answer(QStringLiteral("Edit A"), 502, R"({"status":502,"message":"refused"})");
-        QTest::qWait(300);
-        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit B"));
-
-        // Both fail (older first): the newest failure rolls back to the last confirmed text
         b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit C"));
-        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit D"));
-        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 2, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QVERIFY(pendingEdits.contains(QStringLiteral("Edit A")));
+        QTest::qWait(150);
+        QCOMPARE(pendingEdits.size(), 1);  // B was superseded by C, and C waits for A
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit C"));
+        int processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit A"), 200, okJson);
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QVERIFY(pendingEdits.contains(QStringLiteral("Edit C")));
+        // C fails: back to A, the last text the Mac confirmed
+        processed = b.editRepliesProcessedForTest();
         answer(QStringLiteral("Edit C"), 502, R"({"status":502,"message":"refused"})");
-        QTest::qWait(200);
-        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit D"));  // D still outstanding
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit A"));
+
+        // A failure doesn't overwrite text a sync brought in meanwhile
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit D"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QJsonObject synced = mine("m-1", "From another device");
+        b.ingestMessagesForTest(QJsonArray{synced}, false);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("From another device"));
+        processed = b.editRepliesProcessedForTest();
         answer(QStringLiteral("Edit D"), 502, R"({"status":502,"message":"refused"})");
-        QTRY_COMPARE_WITH_TIMEOUT(textOf(QStringLiteral("m-1")), QStringLiteral("Edit B"), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("From another device"));
 
         // A 200 that isn't JSON (proxy login page) is not a confirmation
         b.editMessage(QStringLiteral("m-2"), QStringLiteral("Proxy edit"));
         QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        processed = b.editRepliesProcessedForTest();
         answer(QStringLiteral("Proxy edit"), 200, "<html><body>Sign in to continue</body></html>");
-        QTRY_COMPARE_WITH_TIMEOUT(textOf(QStringLiteral("m-2")), QStringLiteral("Second original"), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-2")), QStringLiteral("Second original"));
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {

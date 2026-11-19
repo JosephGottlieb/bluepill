@@ -290,6 +290,7 @@ public:
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void editMessage(const QString &messageGuid, const QString &newText);
     static constexpr int kMessageEditWindowMs = 2 * 60 * 1000;
+    int editRepliesProcessedForTest() const { return m_editRepliesProcessed; }
     int messageEditWindowMs() const { return kMessageEditWindowMs; }
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
@@ -550,11 +551,25 @@ private:
     // The chat a message actually belongs to on the Mac (not the merged canonical chat).
     static QString messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid);
     void applyLocalUnsend(const QString &messageGuid, const QString &chatGuid);
-    // Edits to one message can overlap; only the newest outstanding edit may
-    // roll back, and it rolls back to the last text the Mac confirmed.
-    struct EditSnapshot { QString text; QJsonValue dateEdited; QJsonValue attributed; quint64 seq = 0; };
-    struct EditTracking { quint64 latestSeq = 0; int pending = 0; EditSnapshot confirmed; };
+    // Edits to one message go to the Mac one at a time, in order: while one is
+    // in flight only the newest further edit waits behind it. A failure rolls
+    // back to the last text the Mac confirmed, unless a sync changed it meanwhile.
+    struct EditSnapshot { QString text; QJsonValue dateEdited; QJsonValue attributed; };
+    struct EditTracking {
+        bool inFlight = false;
+        bool hasQueued = false;
+        QString queuedText;
+        QString shownText;      // what this client last put on screen
+        QString chatKey;
+        QString sendChatGuid;
+        int partIndex = 0;
+        EditSnapshot confirmed;
+    };
     QHash<QString, EditTracking> m_editTracking;
+    int m_editRepliesProcessed = 0;
+    void sendEditRequest(const QString &msgGuid, const QString &text);
+    void applyEditedText(const QString &chatKey, const QString &msgGuid, const QString &text,
+                         const QJsonValue &dateEdited, const QJsonValue &attributed);
     static bool parseJsonReplyObject(const QByteArray &bytes, QJsonObject *out);
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
     QNetworkRequest makeSocketIoRequest(const QList<QPair<QString, QString>> &extraQueryItems = {}, int timeoutMs = 85000) const;

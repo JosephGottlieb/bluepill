@@ -8220,82 +8220,99 @@ void Backend::editMessage(const QString &messageGuid, const QString &newText) {
     }
     const QJsonValue oldDateEdited = msgObj.value(QStringLiteral("dateEdited"));
     const QJsonValue oldAttributed = msgObj.value(QStringLiteral("attributedBody"));
-    const int partIndex = computeTextPartIndex(msgObj);
     const bool online = !(m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || msgGuid.startsWith(QStringLiteral("temp-")));
-    quint64 editSeq = 0;
-    if (online) {
-        EditTracking &track = m_editTracking[msgGuid];
-        if (track.pending == 0) track.confirmed = EditSnapshot{oldText, oldDateEdited, oldAttributed, track.latestSeq};
-        editSeq = ++track.latestSeq;
-        ++track.pending;
-    }
-
-    auto applyText = [this, chatKey, msgGuid](const QString &t, const QJsonValue &dateEdited, const QJsonValue &attributed) {
-        auto chatIt = m_chatMessagesCache.find(chatKey);
-        if (chatIt == m_chatMessagesCache.end()) return;
-        auto msgIt = chatIt.value().find(msgGuid);
-        if (msgIt == chatIt.value().end()) return;
-        QJsonObject m = msgIt.value();
-        m.insert(QStringLiteral("text"), t);
-        if (dateEdited.isUndefined()) m.remove(QStringLiteral("dateEdited"));
-        else m.insert(QStringLiteral("dateEdited"), dateEdited);
-        if (attributed.isUndefined()) m.remove(QStringLiteral("attributedBody"));
-        else m.insert(QStringLiteral("attributedBody"), attributed);
-        msgIt.value() = m;
-        if (!m_selectedChatGuid.isEmpty() &&
-            (chatKey == m_selectedChatGuid || isSameConversation(chatKey, m_selectedChatGuid))) {
-            rebuildSelectedChatMessages();
-        }
-        refreshChatPreviewFromCache(chatKey);
-        saveMessagesCache();
-    };
     // Show the edit right away (the old attributed body would override the new text)
-    applyText(text, QJsonValue(QDateTime::currentMSecsSinceEpoch()), QJsonValue(QJsonValue::Undefined));
-
+    applyEditedText(chatKey, msgGuid, text, QJsonValue(QDateTime::currentMSecsSinceEpoch()), QJsonValue(QJsonValue::Undefined));
     if (!online) return;
-    const QJsonValue newDateEdited = QJsonValue(QDateTime::currentMSecsSinceEpoch());
+
+    EditTracking &track = m_editTracking[msgGuid];
+    if (!track.inFlight && !track.hasQueued) {
+        track.confirmed = EditSnapshot{oldText, oldDateEdited, oldAttributed};
+        track.chatKey = chatKey;
+        track.sendChatGuid = messageOwnChatGuid(msgObj, chatKey);
+        track.partIndex = computeTextPartIndex(msgObj);
+    }
+    track.shownText = text;
+    if (track.inFlight) {
+        // Sent after the one in flight finishes, so the Mac applies them in order
+        track.hasQueued = true;
+        track.queuedText = text;
+        return;
+    }
+    sendEditRequest(msgGuid, text);
+}
+
+void Backend::applyEditedText(const QString &chatKey, const QString &msgGuid, const QString &t,
+                              const QJsonValue &dateEdited, const QJsonValue &attributed) {
+    auto chatIt = m_chatMessagesCache.find(chatKey);
+    if (chatIt == m_chatMessagesCache.end()) return;
+    auto msgIt = chatIt.value().find(msgGuid);
+    if (msgIt == chatIt.value().end()) return;
+    QJsonObject m = msgIt.value();
+    m.insert(QStringLiteral("text"), t);
+    if (dateEdited.isUndefined()) m.remove(QStringLiteral("dateEdited"));
+    else m.insert(QStringLiteral("dateEdited"), dateEdited);
+    if (attributed.isUndefined()) m.remove(QStringLiteral("attributedBody"));
+    else m.insert(QStringLiteral("attributedBody"), attributed);
+    msgIt.value() = m;
+    if (!m_selectedChatGuid.isEmpty() &&
+        (chatKey == m_selectedChatGuid || isSameConversation(chatKey, m_selectedChatGuid))) {
+        rebuildSelectedChatMessages();
+    }
+    refreshChatPreviewFromCache(chatKey);
+    saveMessagesCache();
+}
+
+void Backend::sendEditRequest(const QString &msgGuid, const QString &text) {
+    auto trackIt = m_editTracking.find(msgGuid);
+    if (trackIt == m_editTracking.end()) return;
+    trackIt->inFlight = true;
     QJsonObject body;
-    body.insert(QStringLiteral("chatGuid"), messageOwnChatGuid(msgObj, chatKey));
+    body.insert(QStringLiteral("chatGuid"), trackIt->sendChatGuid);
     body.insert(QStringLiteral("editedMessage"), text);
     body.insert(QStringLiteral("backwardsCompatibilityMessage"), QStringLiteral("Edited to “%1”").arg(text));
-    body.insert(QStringLiteral("partIndex"), partIndex);
+    body.insert(QStringLiteral("partIndex"), trackIt->partIndex);
     const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(msgGuid));
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/message/%1/edit").arg(encoded));
     req.setPriority(QNetworkRequest::HighPriority);
     QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, applyText, msgGuid, text, newDateEdited, editSeq]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, msgGuid, text]() {
         reply->deleteLater();
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         QJsonObject root;
         const bool jsonOk = parseJsonReplyObject(reply->readAll(), &root);
         const bool ok = reply->error() == QNetworkReply::NoError && httpStatus == 200 && jsonOk;
+        ++m_editRepliesProcessed;
         auto trackIt = m_editTracking.find(msgGuid);
         if (trackIt == m_editTracking.end()) return;
         EditTracking &track = trackIt.value();
-        --track.pending;
-        if (ok && editSeq > track.confirmed.seq) {
-            track.confirmed = EditSnapshot{text, newDateEdited, QJsonValue(QJsonValue::Undefined), editSeq};
-        }
-        // A newer edit is still outstanding or already shown: it decides what the message says
-        const bool newest = editSeq == track.latestSeq;
-        if (!ok && newest) {
-            const EditSnapshot back = track.confirmed;
-            applyText(back.text, back.dateEdited, back.attributed);
-            QString why = root.value(QStringLiteral("message")).toString().trimmed();
+        track.inFlight = false;
+        // Requests are sequential, so a success is the Mac's current text
+        if (ok) track.confirmed = EditSnapshot{text, QJsonValue(QDateTime::currentMSecsSinceEpoch()), QJsonValue(QJsonValue::Undefined)};
+        QString why;
+        if (!ok) {
+            why = root.value(QStringLiteral("message")).toString().trimmed();
             if (why.isEmpty()) why = (reply->error() == QNetworkReply::NoError && !jsonOk)
                                          ? QStringLiteral("unexpected reply from the server")
                                          : reply->errorString();
-            emit toastMessage(QStringLiteral("⚠ Couldn't edit: %1").arg(why));
-        } else if (!ok) {
-            emit toastMessage(QStringLiteral("⚠ An earlier edit didn't go through"));
         }
-        if (track.pending <= 0) {
-            // All settled: show what the Mac confirmed last (a later success may have
-            // landed before an earlier one failed)
-            const EditSnapshot settled = track.confirmed;
-            m_editTracking.erase(trackIt);
-            if (!newest) applyText(settled.text, settled.dateEdited, settled.attributed);
+        if (track.hasQueued) {
+            track.hasQueued = false;
+            const QString next = track.queuedText;
+            if (!ok) emit toastMessage(QStringLiteral("⚠ An earlier edit didn't go through: %1").arg(why));
+            sendEditRequest(msgGuid, next);
+            return;
         }
+        const EditTracking settled = track;
+        m_editTracking.erase(trackIt);
+        if (ok) return;
+        // Roll back only if the message still shows our edit (a sync from another
+        // device may have replaced it with something newer)
+        const QString nowShown = findCachedMessage(msgGuid).value(QStringLiteral("text")).toString();
+        if (nowShown == settled.shownText) {
+            applyEditedText(settled.chatKey, msgGuid, settled.confirmed.text, settled.confirmed.dateEdited, settled.confirmed.attributed);
+        }
+        emit toastMessage(QStringLiteral("⚠ Couldn't edit: %1").arg(why));
     });
 }
 

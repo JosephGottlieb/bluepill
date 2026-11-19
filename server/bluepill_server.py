@@ -4823,28 +4823,28 @@ class BluePillEngine:
             return chat_guid
         return found  # the message's real (sibling) chat, or "" -> 404
 
-    def _message_action_landed(self, action: str, msg_guid: str, since_ns: int) -> bool:
-        """After a helper timeout, check chat.db for the edit/unsend having happened."""
+    def _message_action_date(self, action: str, msg_guid: str) -> Optional[int]:
+        """The message's date_retracted (unsend) or date_edited (edit) in chat.db, or None."""
         column = "date_retracted" if action == "unsend-message" else "date_edited"
         mg = (msg_guid or "").strip()
         norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
         if not mg or not os.path.exists(self.db_path):
-            return False
+            return None
         try:
             conn = self._open_chat_db()
             try:
                 cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
                 if column not in cols:
-                    return False
+                    return None
                 row = conn.execute(
                     f"SELECT MAX(COALESCE({column}, 0)) FROM message WHERE guid = ? OR guid = ?",
                     (mg, norm_mg),
                 ).fetchone()
             finally:
                 conn.close()
-            return bool(row and int(row[0] or 0) >= since_ns)
+            return int(row[0] or 0) if row else None
         except Exception:
-            return False
+            return None
 
     def _run_message_action(self, action: str, data: Dict[str, Any]) -> Tuple[int, str]:
         """Send an edit/unsend to the Messages helper. Returns (http_status, error).
@@ -4852,8 +4852,9 @@ class BluePillEngine:
         200 only once the helper confirms it, or (after a timeout) chat.db shows it
         happened. An unconfirmed timeout is 504 and is never retried here: the
         helper may still apply it, and the next sync shows the real state."""
-        # chat.db dates are nanoseconds since 2001-01-01
-        since_ns = int((time.time() - 978307200 - 5) * 1_000_000_000)
+        # Recorded before dispatch: after a timeout only a *newer* edit/retract date
+        # counts, so an earlier edit can't confirm this one
+        before = self._message_action_date(action, data.get("messageGuid", ""))
         sent, _ = self._send_helper_payload_with_tx(action, data, wait_timeout=3.0)
         state = getattr(self._tx_local, "last_state", "")
         if state == "disconnected":
@@ -4862,7 +4863,8 @@ class BluePillEngine:
             return 502, "Messages refused the request"
         if state == "timeout":
             for _ in range(4):
-                if self._message_action_landed(action, data.get("messageGuid", ""), since_ns):
+                after = self._message_action_date(action, data.get("messageGuid", ""))
+                if before is not None and after is not None and after > before:
                     return 200, ""
                 time.sleep(0.5)
             return 504, "Messages didn't confirm in time; it may still go through"
@@ -10363,15 +10365,39 @@ def run_selftest(engine: BluePillEngine) -> int:
         try:
             st, _, err = act_eng.unsend_message("known-msg", {"chatGuid": "iMessage;-;+15555550100"})
             assert st == 504 and "confirm" in err, f"unconfirmed unsend timeout: {st} {err}"
-            c = sqlite3.connect(act_db)
-            c.execute("UPDATE message SET date_retracted = ? WHERE guid = 'known-msg'",
-                      (int((time.time() - 978307200) * 1_000_000_000),))
-            c.commit()
-            c.close()
+            timeout_send = act_eng._send_helper_payload_with_tx
+            def _retract_then_timeout(a, d, wait_timeout=0.8):
+                c1 = sqlite3.connect(act_db)
+                c1.execute("UPDATE message SET date_retracted = ? WHERE guid = 'known-msg'",
+                           (int((time.time() - 978307200) * 1_000_000_000),))
+                c1.commit()
+                c1.close()
+                return timeout_send(a, d, wait_timeout)
+            act_eng._send_helper_payload_with_tx = _retract_then_timeout
             st, _, err = act_eng.unsend_message("known-msg", {"chatGuid": "iMessage;-;+15555550100"})
             assert st == 200, f"unsend confirmed by chat.db after timeout: {st} {err}"
+            act_eng._send_helper_payload_with_tx = timeout_send
             st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "x"})
             assert st == 504, f"unconfirmed edit timeout: {st} {err}"
+            # An edit from a second ago is already in chat.db: it doesn't confirm this one
+            c = sqlite3.connect(act_db)
+            c.execute("UPDATE message SET date_edited = ? WHERE guid = 'known-msg'",
+                      (int((time.time() - 978307200 - 1) * 1_000_000_000),))
+            c.commit()
+            c.close()
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "B"})
+            assert st == 504, f"earlier edit confirmed a timed-out one: {st} {err}"
+            # ...but a date_edited written after dispatch does
+            orig_send = act_eng._send_helper_payload_with_tx
+            def _send_then_land(a, d, wait_timeout=0.8):
+                c2 = sqlite3.connect(act_db)
+                c2.execute("UPDATE message SET date_edited = date_edited + 1000 WHERE guid = 'known-msg'")
+                c2.commit()
+                c2.close()
+                return orig_send(a, d, wait_timeout)
+            act_eng._send_helper_payload_with_tx = _send_then_land
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "C"})
+            assert st == 200, f"edit landed after timeout: {st} {err}"
         finally:
             time.sleep = _real_sleep
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")

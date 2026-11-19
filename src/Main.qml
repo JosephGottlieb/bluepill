@@ -1214,11 +1214,12 @@ ApplicationWindow {
         }
     }
     function handleEscapePostVoiceFallback() {
-        if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+        // Editing first: the staged attachment is hidden meanwhile and must survive
+        if (root.editTargetGuid !== "") {
+            root.cancelEditing()
+        } else if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
             root.clearStagedAttachment()
             root.showToast("✕ " + i18n.tr("Attachment cancelled"))
-        } else if (root.editTargetGuid !== "") {
-            root.cancelEditing()
         } else if (root.replyTargetGuid !== "") {
             root.replyTargetGuid = ""
             root.replyTargetSender = ""
