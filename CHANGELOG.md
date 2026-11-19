@@ -4,13 +4,18 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
-### Changed
-- **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
-
 ### Added
+- **Edit sent iMessages:** right-click a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back, and your unsent draft is restored when you finish or cancel the edit.
 - **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
 
+### Changed
+- **Message actions open on right-click:** hovering a message no longer outlines it or pops up the tapback / Reply / Copy / Delete bar. Right-click a message or photo to open the bar, and left-click elsewhere or press Esc to close it. Right-click used to copy the message; that's now the bar's **Copy** button.
+- **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
+
 ### Fixed
+- **Unsend works:** the client now tells the Mac which chat the message is in. Previously the Messages helper got an empty chat, so nothing was unsent, yet the message vanished locally and was deleted from the Mac. The message is now removed only after the Mac confirms (a helper that times out without confirming leaves it in place). Otherwise a toast says why, such as the Private API helper not being connected.
+- **Edit and Unsend are offered only within 2 minutes of sending,** and only for your own iMessages. The buttons disappear once a message is older than that.
+- **`bluepill-server` edit/unsend endpoints report failures:** they look up the message's chat in `chat.db` when none is given. They answer `503` when the Messages helper isn't connected, `502` when it refuses, and `404` for an unknown message, instead of always answering `200`.
 - **Opening or scrolling a chat with photos no longer rebuilds the whole conversation per photo:** each photo that finished loading from the cache reset the message list, so every message was recreated and the scroll position restored again (14 times while opening one chat with 10 photos). Photos now update in place.
 - **Link previews no longer save HTML pages as thumbnails:** when a site answered an `og:image` or oEmbed thumbnail URL with an HTML error or consent page, the page was saved as `*_thumb.jpg`. The preview showed an empty image area and logged "Unsupported image format" on every repaint. Thumbnails are now saved only if they decode as an image.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.

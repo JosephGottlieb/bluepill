@@ -4784,32 +4784,124 @@ class BluePillEngine:
             "dateCreated": now_ms,
         }
 
-    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+    def _chat_guid_for_message(self, msg_guid: str) -> Optional[str]:
+        """Chat a message belongs to in chat.db: "" when chat.db says it isn't
+        there, None when chat.db can't be read (so absence isn't known)."""
+        mg = (msg_guid or "").strip()
+        if not mg:
+            return ""
+        if not os.path.exists(self.db_path):
+            return None
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        try:
+            conn = self._open_chat_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT c.guid
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    JOIN chat c ON c.ROWID = cmj.chat_id
+                    WHERE m.guid = ? OR m.guid = ?
+                    LIMIT 1
+                    """,
+                    (mg, norm_mg),
+                ).fetchone()
+            finally:
+                conn.close()
+            return str(row[0] or "").strip() if row else ""
+        except Exception:
+            return None
+
+    def _message_action_chat_guid(self, msg_guid: str, body: Dict[str, Any]) -> str:
         chat_guid = (body.get("chatGuid") or "").strip()
+        if chat_guid and self._message_exists_in_chat(msg_guid, chat_guid):
+            return chat_guid
+        found = self._chat_guid_for_message(msg_guid)
+        if found is None:
+            # chat.db unreadable: trust the client's chat rather than refusing
+            return chat_guid
+        return found  # the message's real (sibling) chat, or "" -> 404
+
+    def _message_action_date(self, action: str, msg_guid: str) -> Optional[int]:
+        """The message's date_retracted (unsend) or date_edited (edit) in chat.db, or None."""
+        column = "date_retracted" if action == "unsend-message" else "date_edited"
+        mg = (msg_guid or "").strip()
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        if not mg or not os.path.exists(self.db_path):
+            return None
+        try:
+            conn = self._open_chat_db()
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+                if column not in cols:
+                    return None
+                row = conn.execute(
+                    f"SELECT MAX(COALESCE({column}, 0)) FROM message WHERE guid = ? OR guid = ?",
+                    (mg, norm_mg),
+                ).fetchone()
+            finally:
+                conn.close()
+            return int(row[0] or 0) if row else None
+        except Exception:
+            return None
+
+    def _run_message_action(self, action: str, data: Dict[str, Any]) -> Tuple[int, str]:
+        """Send an edit/unsend to the Messages helper. Returns (http_status, error).
+
+        200 only once the helper confirms it, or (after a timeout) chat.db shows it
+        happened. An unconfirmed timeout is 504 and is never retried here: the
+        helper may still apply it, and the next sync shows the real state."""
+        # Recorded before dispatch: after a timeout only a *newer* edit/retract date
+        # counts, so an earlier edit can't confirm this one
+        before = self._message_action_date(action, data.get("messageGuid", ""))
+        sent, _ = self._send_helper_payload_with_tx(action, data, wait_timeout=3.0)
+        state = getattr(self._tx_local, "last_state", "")
+        if state == "disconnected":
+            return 503, "The Messages helper (Private API) isn't connected on the Mac"
+        if not sent:
+            return 502, "Messages refused the request"
+        if state == "timeout":
+            for _ in range(4):
+                after = self._message_action_date(action, data.get("messageGuid", ""))
+                if before is not None and after is not None and after > before:
+                    return 200, ""
+                time.sleep(0.5)
+            return 504, "Messages didn't confirm in time; it may still go through"
+        return 200, ""
+
+    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], str]:
+        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+        if not edited:
+            return 400, {}, "editedMessage is required"
+        chat_guid = self._message_action_chat_guid(msg_guid, body)
+        if not chat_guid:
+            return 404, {}, "Message not found"
         part_index = int(body.get("partIndex", 0) or 0)
-        self._send_helper_payload(
+        status, err = self._run_message_action(
             "edit-message",
             {
                 "chatGuid": chat_guid,
                 "messageGuid": msg_guid,
                 "editedMessage": edited,
-                "backwardsCompatibilityMessage": edited,
+                "backwardsCompatibilityMessage": (body.get("backwardsCompatibilityMessage") or edited),
                 "partIndex": part_index,
             },
         )
         now_ms = int(time.time() * 1000)
-        return {"guid": msg_guid, "text": edited, "dateEdited": now_ms}
+        return status, ({"guid": msg_guid, "text": edited, "dateEdited": now_ms} if status == 200 else {}), err
 
-    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], str]:
+        chat_guid = self._message_action_chat_guid(msg_guid, body)
+        if not chat_guid:
+            return 404, {}, "Message not found"
         part_index = int(body.get("partIndex", 0) or 0)
-        chat_guid = (body.get("chatGuid") or "").strip()
-        self._send_helper_payload(
+        status, err = self._run_message_action(
             "unsend-message",
             {"chatGuid": chat_guid, "messageGuid": msg_guid, "partIndex": part_index},
         )
         now_ms = int(time.time() * 1000)
-        return {"guid": msg_guid, "text": "", "dateRetracted": now_ms}
+        return status, ({"guid": msg_guid, "text": "", "dateRetracted": now_ms} if status == 200 else {}), err
 
     def mark_chat_read(self, chat_guid: str, read: bool = True) -> Dict[str, Any]:
         guids_to_mark = [chat_guid]
@@ -10022,13 +10114,15 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         m_edit = re.match(r"^/api/v1/message/([^/]+)/edit$", path)
         if m_edit:
             guid = urllib.parse.unquote(m_edit.group(1))
-            self._send_json(200, self.engine.edit_message(guid, body))
+            status, data, err = self.engine.edit_message(guid, body)
+            self._send_json(status, data if status == 200 else None, err or "Success")
             return
 
         m_unsend = re.match(r"^/api/v1/message/([^/]+)/unsend$", path)
         if m_unsend:
             guid = urllib.parse.unquote(m_unsend.group(1))
-            self._send_json(200, self.engine.unsend_message(guid, body))
+            status, data, err = self.engine.unsend_message(guid, body)
+            self._send_json(status, data if status == 200 else None, err or "Success")
             return
 
         m_read = re.match(r"^/api/v1/chat/([^/]+)/(read|unread)$", path)
@@ -10238,6 +10332,74 @@ def run_selftest(engine: BluePillEngine) -> int:
         enable_background_daemons=False,
     )
     test_eng.photos_library_path = os.path.join(test_eng._config_dir, "Photos Library.photoslibrary")
+    # Edit/unsend report failures instead of always answering 200
+    st, _, err = test_eng.unsend_message("selftest-msg", {"chatGuid": "iMessage;-;+15555550100"})
+    assert st == 503 and "helper" in err, f"unsend without helper: {st} {err}"
+    st, _, _ = test_eng.edit_message("selftest-msg", {"chatGuid": "iMessage;-;+15555550100"})
+    assert st == 400, f"edit without text: {st}"
+    st, _, _ = test_eng.unsend_message("selftest-msg", {})
+    assert st == 404, f"unsend with unknown chat: {st}"
+    # With a readable chat.db, an unknown message is 404 even when the client names a chat;
+    # a helper timeout is 504 unless chat.db shows the unsend/edit landed
+    with tempfile.TemporaryDirectory() as act_dir:
+        act_db = os.path.join(act_dir, "chat.db")
+        c = sqlite3.connect(act_db)
+        c.executescript(
+            "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT);"
+            "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, date_edited INTEGER, date_retracted INTEGER);"
+            "CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);"
+            "INSERT INTO chat VALUES (1, 'iMessage;-;+15555550100');"
+            "INSERT INTO message VALUES (1, 'known-msg', 0, 0);"
+            "INSERT INTO chat_message_join VALUES (1, 1);"
+        )
+        c.commit()
+        c.close()
+        act_eng = BluePillEngine(db_path=act_db, password="selftest-secret", enable_background_daemons=False)
+        st, _, _ = act_eng.unsend_message("ghost-msg", {"chatGuid": "iMessage;-;+15555550100"})
+        assert st == 404, f"unsend of unknown message with a chatGuid: {st}"
+        act_eng._send_helper_payload_with_tx = lambda a, d, wait_timeout=0.8: (
+            setattr(act_eng._tx_local, "last_state", "timeout") or (True, "")
+        )
+        _real_sleep = time.sleep
+        time.sleep = lambda _s: None
+        try:
+            st, _, err = act_eng.unsend_message("known-msg", {"chatGuid": "iMessage;-;+15555550100"})
+            assert st == 504 and "confirm" in err, f"unconfirmed unsend timeout: {st} {err}"
+            timeout_send = act_eng._send_helper_payload_with_tx
+            def _retract_then_timeout(a, d, wait_timeout=0.8):
+                c1 = sqlite3.connect(act_db)
+                c1.execute("UPDATE message SET date_retracted = ? WHERE guid = 'known-msg'",
+                           (int((time.time() - 978307200) * 1_000_000_000),))
+                c1.commit()
+                c1.close()
+                return timeout_send(a, d, wait_timeout)
+            act_eng._send_helper_payload_with_tx = _retract_then_timeout
+            st, _, err = act_eng.unsend_message("known-msg", {"chatGuid": "iMessage;-;+15555550100"})
+            assert st == 200, f"unsend confirmed by chat.db after timeout: {st} {err}"
+            act_eng._send_helper_payload_with_tx = timeout_send
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "x"})
+            assert st == 504, f"unconfirmed edit timeout: {st} {err}"
+            # An edit from a second ago is already in chat.db: it doesn't confirm this one
+            c = sqlite3.connect(act_db)
+            c.execute("UPDATE message SET date_edited = ? WHERE guid = 'known-msg'",
+                      (int((time.time() - 978307200 - 1) * 1_000_000_000),))
+            c.commit()
+            c.close()
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "B"})
+            assert st == 504, f"earlier edit confirmed a timed-out one: {st} {err}"
+            # ...but a date_edited written after dispatch does
+            orig_send = act_eng._send_helper_payload_with_tx
+            def _send_then_land(a, d, wait_timeout=0.8):
+                c2 = sqlite3.connect(act_db)
+                c2.execute("UPDATE message SET date_edited = date_edited + 1000 WHERE guid = 'known-msg'")
+                c2.commit()
+                c2.close()
+                return orig_send(a, d, wait_timeout)
+            act_eng._send_helper_payload_with_tx = _send_then_land
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "C"})
+            assert st == 200, f"edit landed after timeout: {st} {err}"
+        finally:
+            time.sleep = _real_sleep
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
     launchctl_calls: List[List[str]] = []
     test_eng._run_launchctl = lambda args: (
