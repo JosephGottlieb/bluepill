@@ -319,6 +319,8 @@ public:
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setFilterMode(const QString &mode);
     Q_INVOKABLE void refreshAll();
+    // file:// URL of an attachment already on disk, or "".
+    Q_INVOKABLE QString cachedAttachmentUrl(const QString &attachmentGuid) const;
     Q_INVOKABLE void selectChat(const QString &chatGuid);
     Q_INVOKABLE bool isSameConversation(const QString &guidA, const QString &guidB) const;
     Q_INVOKABLE QString resolveCanonicalChatGuid(const QString &chatGuid) const;
@@ -434,6 +436,7 @@ public:
         m_lastSoundPresetPlayed.clear();
     }
     void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
+    void downloadAttachmentForTest(const QString &guid, const QString &transferName) { downloadAttachment(guid, transferName, false); }
     bool tailnetCheckPendingForTest() const { return tailnetCheckPending(); }
 
     // Pure testable helpers
