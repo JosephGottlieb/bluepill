@@ -1228,7 +1228,7 @@ void Backend::checkServerAndLoad() {
     }
 }
 
-static QString normalizeServerEndpointUrl(const QString &rawUrl) {
+QString Backend::normalizeServerEndpointUrl(const QString &rawUrl) {
     QString url = rawUrl.trimmed();
     while (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
@@ -1237,13 +1237,26 @@ static QString normalizeServerEndpointUrl(const QString &rawUrl) {
     if (url.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) {
         return QStringLiteral("ssh://") + url.mid(6);
     }
-    if (!url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) &&
-        !url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
+    const bool hasHttp = url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive);
+    const bool hasHttps = url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive);
+    if (!hasHttp && !hasHttps) {
         if (url.contains(QLatin1Char('@')) && !url.contains(QLatin1Char('/'))) {
-            url = QStringLiteral("ssh://") + url;
-        } else {
-            url = QStringLiteral("https://") + url;
+            return QStringLiteral("ssh://") + url;
         }
+        // The BluePill relay serves plain HTTP unless it was started with
+        // --tls-cert/--tls-key, so a bare host means http://. Anyone behind
+        // TLS (reverse proxy, Tailscale Serve, BlueBubbles) types https://.
+        url = QStringLiteral("http://") + url;
+    }
+    if (hasHttps) return url;
+
+    // http:// without an explicit port -> the relay's default port (1235).
+    QUrl parsed(url, QUrl::StrictMode);
+    if (parsed.isValid() && !parsed.host().isEmpty() && parsed.port() == -1) {
+        parsed.setPort(kDefaultRelayPort);
+        QString out = parsed.toString();
+        while (out.endsWith(QLatin1Char('/'))) out.chop(1);
+        return out;
     }
     return url;
 }
@@ -1251,7 +1264,7 @@ static QString normalizeServerEndpointUrl(const QString &rawUrl) {
 QString Backend::webUiUrl() const {
     QString base = m_serverUrl.trimmed();
     if (base.isEmpty() || base.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) {
-        base = QStringLiteral("http://127.0.0.1:1235");
+        base = QStringLiteral("http://127.0.0.1:%1").arg(kDefaultRelayPort);
     }
     while (base.endsWith(QLatin1Char('/'))) {
         base.chop(1);
@@ -1263,6 +1276,129 @@ void Backend::openWebUi() {
     const QString urlStr = webUiUrl();
     QDesktopServices::openUrl(QUrl(urlStr));
     emit toastMessage(QStringLiteral("🌐 Opening BluePill Web UI (%1)").arg(urlStr));
+}
+
+QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState) {
+    QVariantList out;
+    const QJsonObject root = QJsonDocument::fromJson(statusJson).object();
+    if (backendState) *backendState = root.value(QStringLiteral("BackendState")).toString();
+    const QJsonObject peers = root.value(QStringLiteral("Peer")).toObject();
+    for (auto it = peers.constBegin(); it != peers.constEnd(); ++it) {
+        const QJsonObject peer = it.value().toObject();
+        if (peer.value(QStringLiteral("OS")).toString().compare(QStringLiteral("macOS"), Qt::CaseInsensitive) != 0) continue;
+        if (!peer.value(QStringLiteral("Online")).toBool()) continue;
+
+        QString dnsName = peer.value(QStringLiteral("DNSName")).toString().trimmed();
+        while (dnsName.endsWith(QLatin1Char('.'))) dnsName.chop(1);
+        QString ip;
+        for (const QJsonValue &v : peer.value(QStringLiteral("TailscaleIPs")).toArray()) {
+            const QString candidate = v.toString();
+            if (!candidate.contains(QLatin1Char(':'))) { ip = candidate; break; }
+        }
+        const QString host = !dnsName.isEmpty() ? dnsName : ip;
+        if (host.isEmpty()) continue;
+
+        QString name = peer.value(QStringLiteral("HostName")).toString().trimmed();
+        if (name.isEmpty()) name = host.section(QLatin1Char('.'), 0, 0);
+
+        QVariantMap entry;
+        entry.insert(QStringLiteral("name"), name);
+        entry.insert(QStringLiteral("host"), host);
+        entry.insert(QStringLiteral("ip"), ip);
+        entry.insert(QStringLiteral("url"), QStringLiteral("http://%1:%2").arg(host).arg(kDefaultRelayPort));
+        entry.insert(QStringLiteral("probeState"), QStringLiteral("pending"));
+        out.append(entry);
+    }
+    std::sort(out.begin(), out.end(), [](const QVariant &a, const QVariant &b) {
+        return a.toMap().value(QStringLiteral("name")).toString().compare(
+                   b.toMap().value(QStringLiteral("name")).toString(), Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
+void Backend::setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning) {
+    m_tailscaleRelays = relays;
+    m_tailscaleStatus = status;
+    m_tailscaleScanning = scanning;
+    emit tailscaleRelaysChanged();
+}
+
+void Backend::discoverTailscaleRelays() {
+    if (m_tailscaleScanning) return;
+    const QString exe = QStandardPaths::findExecutable(QStringLiteral("tailscale"));
+    if (exe.isEmpty()) {
+        setTailscaleScanState({}, QStringLiteral("not-installed"), false);
+        return;
+    }
+    setTailscaleScanState({}, QStringLiteral("scanning"), true);
+
+    auto *proc = new QProcess(this);
+    auto *killTimer = new QTimer(proc);
+    killTimer->setSingleShot(true);
+    connect(killTimer, &QTimer::timeout, proc, [proc]() { proc->kill(); });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart) return;
+        setTailscaleScanState({}, QStringLiteral("error"), false);
+        proc->deleteLater();
+    });
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, proc](int exitCode, QProcess::ExitStatus exitStatus) {
+        proc->deleteLater();
+        const QByteArray out = proc->readAllStandardOutput();
+        QString backendState;
+        QVariantList relays = parseTailscaleMacPeers(out, &backendState);
+        if (exitStatus != QProcess::NormalExit || (exitCode != 0 && backendState.isEmpty())) {
+            setTailscaleScanState({}, QStringLiteral("error"), false);
+            return;
+        }
+        if (backendState != QStringLiteral("Running")) {
+            setTailscaleScanState({}, QStringLiteral("stopped"), false);
+            return;
+        }
+        if (relays.isEmpty()) {
+            setTailscaleScanState({}, QStringLiteral("no-macs"), false);
+            return;
+        }
+        setTailscaleScanState(relays, QStringLiteral("probing"), true);
+
+        // Probe each Mac's relay port. The relay answers unauthenticated
+        // requests with 401 JSON, which is enough to know it's listening.
+        m_tailscalePendingProbes = relays.size();
+        for (int i = 0; i < relays.size(); ++i) {
+            const QString url = relays[i].toMap().value(QStringLiteral("url")).toString();
+            QNetworkRequest req(QUrl(url + QStringLiteral("/api/v1/ping")));
+            req.setTransferTimeout(3000);
+            QNetworkReply *reply = m_nam.get(req);
+            connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
+                reply->deleteLater();
+                const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                QString state;
+                if (httpStatus == 200 || httpStatus == 401 || httpStatus == 403) state = QStringLiteral("relay");
+                else if (httpStatus > 0) state = QStringLiteral("other");
+                else state = QStringLiteral("unreachable");
+
+                QVariantList updated = m_tailscaleRelays;
+                for (QVariant &v : updated) {
+                    QVariantMap m = v.toMap();
+                    if (m.value(QStringLiteral("url")).toString() == url) {
+                        m.insert(QStringLiteral("probeState"), state);
+                        v = m;
+                    }
+                }
+                // Relays that answered first, then the rest.
+                std::stable_sort(updated.begin(), updated.end(), [](const QVariant &a, const QVariant &b) {
+                    const bool ar = a.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
+                    const bool br = b.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
+                    return ar && !br;
+                });
+                m_tailscalePendingProbes = qMax(0, m_tailscalePendingProbes - 1);
+                const bool done = m_tailscalePendingProbes == 0;
+                setTailscaleScanState(updated, done ? QStringLiteral("done") : QStringLiteral("probing"), !done);
+            });
+        }
+    });
+    proc->start(exe, {QStringLiteral("status"), QStringLiteral("--json")});
+    killTimer->start(5000);
 }
 
 void Backend::saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password) {

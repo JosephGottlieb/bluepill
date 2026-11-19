@@ -2859,12 +2859,12 @@ private slots:
             QStringLiteral("https://backup.example.com///"),
             QStringLiteral("super-secret-token"));
 
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://relay.example.com"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("http://relay.example.com:1235"));
         QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.example.com"));
         QCOMPARE(b.hasPasswordConfigured(), true);
         QCOMPARE(b.needsSetup(), false);
         QCOMPARE(b.candidateUrls(), (QStringList{
-            QStringLiteral("https://relay.example.com"),
+            QStringLiteral("http://relay.example.com:1235"),
             QStringLiteral("https://backup.example.com")
         }));
 
@@ -2972,6 +2972,61 @@ private slots:
         QCOMPARE(failItem.value(QStringLiteral("isFailed")).toBool(), true);
         QCOMPARE(failItem.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
         QVERIFY(failItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("⚠ Not Delivered")));
+    }
+
+    void testServerUrlDefaultsToHttpAndRelayPort() {
+        auto n = [](const char *s) { return Backend::normalizeServerEndpointUrl(QString::fromUtf8(s)); };
+        // Bare host -> http:// + default relay port
+        QCOMPARE(n("mbp.tail1234.ts.net"), QStringLiteral("http://mbp.tail1234.ts.net:1235"));
+        QCOMPARE(n("  100.64.0.7/ "), QStringLiteral("http://100.64.0.7:1235"));
+        QCOMPARE(n("my-mac"), QStringLiteral("http://my-mac:1235"));
+        // Explicit port is kept
+        QCOMPARE(n("my-mac:1234"), QStringLiteral("http://my-mac:1234"));
+        QCOMPARE(n("http://my-mac:8080"), QStringLiteral("http://my-mac:8080"));
+        // Explicit http:// without port -> default relay port
+        QCOMPARE(n("http://my-mac"), QStringLiteral("http://my-mac:1235"));
+        // https:// is left alone (reverse proxy / Tailscale Serve on 443)
+        QCOMPARE(n("https://relay.example.com"), QStringLiteral("https://relay.example.com"));
+        QCOMPARE(n("HTTPS://relay.example.com:8443/"), QStringLiteral("HTTPS://relay.example.com:8443"));
+        // SSH forms unchanged
+        QCOMPARE(n("user@mac.local"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(n("ssh://user@mac.local"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(n(""), QString());
+    }
+
+    void testParseTailscaleMacPeers() {
+        const QByteArray json = R"({
+          "BackendState": "Running",
+          "Self": {"OS": "linux", "HostName": "laptop", "DNSName": "laptop.tail-x.ts.net.", "Online": true},
+          "Peer": {
+            "k1": {"OS": "macOS", "HostName": "Studio", "DNSName": "studio.tail-x.ts.net.",
+                   "TailscaleIPs": ["fd7a:115c:a1e0::1", "100.64.0.9"], "Online": true},
+            "k2": {"OS": "macOS", "HostName": "Old MBP", "DNSName": "old-mbp.tail-x.ts.net.",
+                   "TailscaleIPs": ["100.64.0.10"], "Online": false},
+            "k3": {"OS": "linux", "HostName": "nas", "DNSName": "nas.tail-x.ts.net.",
+                   "TailscaleIPs": ["100.64.0.11"], "Online": true},
+            "k4": {"OS": "macOS", "HostName": "Air", "DNSName": "",
+                   "TailscaleIPs": ["100.64.0.12"], "Online": true}
+          }
+        })";
+        QString state;
+        const QVariantList peers = Backend::parseTailscaleMacPeers(json, &state);
+        QCOMPARE(state, QStringLiteral("Running"));
+        QCOMPARE(peers.size(), 2);
+        // Sorted by name: Air, Studio
+        const QVariantMap air = peers[0].toMap();
+        QCOMPARE(air.value("name").toString(), QStringLiteral("Air"));
+        QCOMPARE(air.value("url").toString(), QStringLiteral("http://100.64.0.12:1235"));
+        const QVariantMap studio = peers[1].toMap();
+        QCOMPARE(studio.value("host").toString(), QStringLiteral("studio.tail-x.ts.net"));
+        QCOMPARE(studio.value("ip").toString(), QStringLiteral("100.64.0.9"));
+        QCOMPARE(studio.value("url").toString(), QStringLiteral("http://studio.tail-x.ts.net:1235"));
+        QCOMPARE(studio.value("probeState").toString(), QStringLiteral("pending"));
+
+        QString stopped;
+        QVERIFY(Backend::parseTailscaleMacPeers(R"({"BackendState":"Stopped","Peer":{}})", &stopped).isEmpty());
+        QCOMPARE(stopped, QStringLiteral("Stopped"));
+        QVERIFY(Backend::parseTailscaleMacPeers("not json").isEmpty());
     }
 
     void testBluePillSshUrlAndConfigMigration() {

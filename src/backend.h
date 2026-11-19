@@ -75,6 +75,9 @@ class Backend : public QObject {
     Q_PROPERTY(QString serverPassword READ serverPassword NOTIFY configChanged)
     Q_PROPERTY(bool hasPasswordConfigured READ hasPasswordConfigured NOTIFY configChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY configChanged)
+    Q_PROPERTY(QVariantList tailscaleRelays READ tailscaleRelays NOTIFY tailscaleRelaysChanged)
+    Q_PROPERTY(QString tailscaleStatus READ tailscaleStatus NOTIFY tailscaleRelaysChanged)
+    Q_PROPERTY(bool tailscaleScanning READ tailscaleScanning NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY filterChanged)
     Q_PROPERTY(QString filterMode READ filterMode WRITE setFilterMode NOTIFY filterChanged)
     Q_PROPERTY(QString selectedChatGuid READ selectedChatGuid NOTIFY selectedChatChanged)
@@ -144,6 +147,9 @@ public:
     QString serverPassword() const { return m_password; }
     bool hasPasswordConfigured() const { return !m_password.isEmpty(); }
     bool needsSetup() const { return !m_demoMode && (m_serverUrl.isEmpty() || (!m_serverUrl.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) && m_password.isEmpty())); }
+    QVariantList tailscaleRelays() const { return m_tailscaleRelays; }
+    QString tailscaleStatus() const { return m_tailscaleStatus; }
+    bool tailscaleScanning() const { return m_tailscaleScanning; }
     QString searchQuery() const { return m_searchQuery; }
     QString filterMode() const { return m_filterMode; }
     QString selectedChatGuid() const { return m_selectedChatGuid; }
@@ -233,6 +239,13 @@ public:
     void checkServerAndLoad();
     Q_INVOKABLE void saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password);
     Q_INVOKABLE QString webUiUrl() const;
+    // Default relay port used when a scheme-less or http:// URL omits one.
+    static constexpr int kDefaultRelayPort = 1235;
+    static QString normalizeServerEndpointUrl(const QString &rawUrl);
+    // Parses `tailscale status --json` into online macOS peers:
+    // [{name, host, ip, url}] (url = http://<MagicDNS name>:1235).
+    static QVariantList parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState = nullptr);
+    Q_INVOKABLE void discoverTailscaleRelays();
     Q_INVOKABLE void openWebUi();
     Q_INVOKABLE void setHistorySyncDays(int days);
     Q_INVOKABLE void cycleHistorySyncDays();
@@ -427,6 +440,7 @@ signals:
     void sendingMessageChanged();
     void statusChanged();
     void configChanged();
+    void tailscaleRelaysChanged();
     void loadingChanged();
     void filterChanged();
     void selectedChatChanged();
@@ -506,6 +520,11 @@ private:
     QNetworkAccessManager m_sendNam;
     QNetworkAccessManager m_mediaNam;
     QNetworkAccessManager m_socketNam;
+    QVariantList m_tailscaleRelays;
+    QString m_tailscaleStatus;
+    bool m_tailscaleScanning = false;
+    int m_tailscalePendingProbes = 0;
+    void setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning);
     QPointer<QNetworkReply> m_activeMessagesReply;
     QPointer<QNetworkReply> m_activeEnrichReply;
     QPointer<QNetworkReply> m_activeSocketPollReply;

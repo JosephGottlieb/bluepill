@@ -2,6 +2,14 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [Unreleased]
+
+### Changed
+- **Server URL defaults match the relay:** A scheme-less server URL now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`), and `http://` URLs without a port default to the relay's port `1235`. `https://` URLs are unchanged.
+
+### Added
+- **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
+
 ## [1.2.2] - 2026-11-18
 
 ### Fixed

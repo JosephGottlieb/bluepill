@@ -241,6 +241,7 @@ ApplicationWindow {
         root.showServerPassword = false
         root.showServerConfigModal = true
         serverUrlInput.forceActiveFocus()
+        backend.discoverTailscaleRelays()
     }
 
     Timer {
@@ -8113,10 +8114,153 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
+                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). A bare host name connects over http:// on port 1235. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap
+                }
+
+                // Tailscale relay discovery
+                ColumnLayout {
+                    id: tailscaleDiscoverySection
+                    objectName: "tailscaleDiscoverySection"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    visible: backend.tailscaleStatus !== "" && backend.tailscaleStatus !== "not-installed"
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Macs on your Tailscale network")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            id: tailscaleRescanBtn
+                            objectName: "tailscaleRescanBtn"
+                            height: 24
+                            implicitWidth: rescanTxt.implicitWidth + 16
+                            radius: 6
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            opacity: backend.tailscaleScanning ? 0.5 : 1.0
+                            Text {
+                                id: rescanTxt
+                                anchors.centerIn: parent
+                                text: backend.tailscaleScanning ? i18n.tr("Scanning…") : i18n.tr("Rescan")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                enabled: !backend.tailscaleScanning
+                                onClicked: backend.discoverTailscaleRelays()
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: text.length > 0
+                        text: backend.tailscaleStatus === "stopped"
+                              ? i18n.tr("Tailscale is installed but not connected. Run `tailscale up`, then Rescan.")
+                              : backend.tailscaleStatus === "no-macs"
+                                ? i18n.tr("No online Macs found on your tailnet. Make sure the relay Mac is signed in to Tailscale.")
+                                : backend.tailscaleStatus === "error"
+                                  ? i18n.tr("Couldn't read Tailscale status.")
+                                  : backend.tailscaleStatus === "scanning"
+                                    ? i18n.tr("Looking for Macs…")
+                                    : ""
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.darkForeground
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Connections {
+                        target: backend
+                        function onTailscaleRelaysChanged() {
+                            // First run: a single responding relay on the tailnet is
+                            // almost certainly the one to use, so pre-fill it.
+                            if (backend.tailscaleScanning || serverUrlInput.text.trim().length > 0) return
+                            var found = backend.tailscaleRelays.filter(function(r) { return r.probeState === "relay" })
+                            if (found.length === 1) {
+                                serverUrlInput.text = found[0].url
+                                serverPasswordInput.forceActiveFocus()
+                            }
+                        }
+                    }
+
+                    Repeater {
+                        model: backend.tailscaleRelays
+                        delegate: Rectangle {
+                            readonly property bool isRelay: modelData.probeState === "relay"
+                            readonly property bool isSelected: serverUrlInput.text === modelData.url
+                            objectName: "tailscaleRelayRow"
+                            Layout.fillWidth: true
+                            implicitHeight: relayRowCol.implicitHeight + 14
+                            radius: 6
+                            color: isSelected ? theme.selection : theme.lighterBackground
+                            border.width: 1
+                            border.color: isSelected ? theme.accent : theme.muted
+                            ColumnLayout {
+                                id: relayRowCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                spacing: 2
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.name
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        text: modelData.probeState === "relay" ? i18n.tr("● Relay found")
+                                              : modelData.probeState === "pending" ? i18n.tr("Checking…")
+                                              : modelData.probeState === "other" ? i18n.tr("Port 1235 in use (not BluePill?)")
+                                              : i18n.tr("No relay on :1235")
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: modelData.probeState === "relay" ? theme.green : theme.darkForeground
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.url
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                    elide: Text.ElideMiddle
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: modelData.probeState === "unreachable"
+                                    text: i18n.tr("Is bluepill-server running with --host 0.0.0.0 (or this Mac's Tailscale IP)? By default it only listens on 127.0.0.1.")
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    serverUrlInput.text = modelData.url
+                                    serverPasswordInput.forceActiveFocus()
+                                }
+                            }
+                        }
+                    }
                 }
 
                 // Primary Server URL
@@ -8159,7 +8303,7 @@ ApplicationWindow {
                                 root.showServerConfigModal = false
                             }
                             Text {
-                                text: "https://bluebubbles.example.com"
+                                text: "my-mac.tailnet.ts.net  (or https://relay.example.com)"
                                 color: theme.darkForeground
                                 visible: !serverUrlInput.text && !serverUrlInput.activeFocus
                                 anchors.verticalCenter: parent.verticalCenter
