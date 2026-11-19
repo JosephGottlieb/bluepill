@@ -6629,7 +6629,45 @@ QVariantList Backend::buildMessageListFromApi(
         out.append(item);
     }
 
+    // "N Replies" under messages that started a thread (iOS-style)
+    QHash<QString, int> replyCounts;
+    for (const QVariant &v : std::as_const(out)) {
+        const QString r = v.toMap().value(QStringLiteral("replyToGuid")).toString();
+        if (!r.isEmpty()) ++replyCounts[r];
+    }
+    if (!replyCounts.isEmpty()) {
+        for (int i = 0; i < out.size(); ++i) {
+            QVariantMap m = out[i].toMap();
+            const int n = replyCounts.value(m.value(QStringLiteral("guid")).toString(), 0);
+            if (n > 0) {
+                m.insert(QStringLiteral("replyCount"), n);
+                out[i] = m;
+            }
+        }
+    }
     return out;
+}
+
+QVariantList Backend::threadMessages(const QString &rootGuid) const {
+    QVariantList thread;
+    const QString root = normalizeAssociatedGuid(rootGuid);
+    if (root.isEmpty()) return thread;
+    for (const QVariant &v : m_messages) {
+        const QVariantMap m = v.toMap();
+        if (m.value(QStringLiteral("guid")).toString() == root ||
+            m.value(QStringLiteral("replyToGuid")).toString() == root) {
+            thread.append(m);
+        }
+    }
+    return thread;
+}
+
+int Backend::messageIndexForGuid(const QString &guid) const {
+    const QString g = normalizeAssociatedGuid(guid);
+    for (int i = 0; i < m_messages.size(); ++i) {
+        if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == g) return i;
+    }
+    return -1;
 }
 
 static void normalizeOutgoingReceipts(QVariantList &msgs) {

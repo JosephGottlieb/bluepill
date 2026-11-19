@@ -5,6 +5,12 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Added
+- **Threads, like Messages on iOS and macOS:**
+  - Clicking a quoted reply opens a thread view with the original message and every reply to it.
+  - Choosing the original (**Show in conversation**) scrolls the timeline to it and briefly outlines it.
+  - Messages that have replies show **N Replies** underneath, which opens the same view.
+  - A reply box at the bottom adds a reply to the thread without leaving it (Enter sends, Shift+Enter adds a line).
+  - Esc closes it.
 - **Edit Contact shows the whole Mac contact:** the dialog now fills the name, phone and email from the contact on the Mac, instead of splitting the chat title. The separate **Edit Contact** button is gone.
 - **Contact / conversation info:** clicking the name in the conversation header opens a read-only card over the conversation.
   - **Details:** everything the Mac has for the contact, with **✎ Edit**, or **＋ Add Contact** for an unknown number.
