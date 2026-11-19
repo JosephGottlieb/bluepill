@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QBuffer>
 #include <QImageReader>
 #include <QImageWriter>
 #include <cmath>
@@ -7592,6 +7593,27 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
     });
 }
 
+bool Backend::isDecodableImageData(const QByteArray &bytes) {
+    // og:image / oEmbed thumbnails sometimes answer with an HTML error or
+    // consent page; saving that as *_thumb.jpg left a blank card and a
+    // "Unsupported image format" warning on every repaint.
+    // Decode fully: a valid header with corrupt pixel data passes canRead().
+    if (bytes.isEmpty()) return false;
+    QBuffer buf;
+    buf.setData(bytes);
+    if (!buf.open(QIODevice::ReadOnly)) return false;
+    QImageReader reader(&buf);
+    if (!reader.canRead()) return false;
+    const QImage img = reader.read();
+    return !img.isNull() && reader.error() == QImageReader::UnknownError;
+}
+
+bool Backend::isDecodableImageFile(const QString &path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    return isDecodableImageData(f.readAll());
+}
+
 void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
     if (url.isEmpty()) return;
 
@@ -7621,7 +7643,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
             QJsonObject obj = QJsonDocument::fromJson(jf.readAll()).object();
             jf.close();
             QVariantMap previewData = obj.toVariantMap();
-            if (QFileInfo::exists(thumbPath) && QFileInfo(thumbPath).size() > 64 && QImageReader(thumbPath).canRead()) {
+            if (isDecodableImageFile(thumbPath)) {
                 previewData.insert(QStringLiteral("thumbnail"), QUrl::fromLocalFile(thumbPath).toString());
             }
             applyPreview(previewData);
@@ -7666,7 +7688,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
                     thumbReply->deleteLater();
                     if (thumbReply->error() == QNetworkReply::NoError) {
                         const QByteArray tb = thumbReply->readAll();
-                        if (!tb.isEmpty()) {
+                        if (isDecodableImageData(tb)) {
                             QFile tf(thumbPath);
                             if (tf.open(QIODevice::WriteOnly)) {
                                 tf.write(tb);
@@ -7750,7 +7772,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
                     imgReply->deleteLater();
                     if (imgReply->error() == QNetworkReply::NoError) {
                         const QByteArray tb = imgReply->readAll();
-                        if (!tb.isEmpty()) {
+                        if (isDecodableImageData(tb)) {
                             QFile tf(thumbPath);
                             if (tf.open(QIODevice::WriteOnly)) {
                                 tf.write(tb);
