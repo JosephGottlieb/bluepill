@@ -452,6 +452,7 @@ ApplicationWindow {
                 list.push({
                     guid: it.guid || "",
                     name: it.name || ("Photo " + (i + 1)),
+                    mimeType: it.mimeType || "",
                     localUrl: it.localUrl || "",
                     previewUrl: it.previewUrl || "",
                     sourceUrl: it.sourceUrl || "",
@@ -829,6 +830,7 @@ ApplicationWindow {
                     updated.push({
                         guid: item.guid,
                         name: item.name,
+                        mimeType: item.mimeType || "",
                         localUrl: localUrl,
                         previewUrl: item.previewUrl || "",
                         sourceUrl: item.sourceUrl || "",
@@ -875,6 +877,7 @@ ApplicationWindow {
                     updated.push({
                         guid: item.guid,
                         name: item.name,
+                        mimeType: item.mimeType || "",
                         localUrl: nextUrl,
                         previewUrl: item.previewUrl || "",
                         sourceUrl: item.sourceUrl || "",
@@ -4310,7 +4313,8 @@ ApplicationWindow {
                                                 id: inlineImageCard
                                                 objectName: "inlineImageAttachmentCard"
                                                 readonly property string resolvedImgUrl: msgDelegate.resolveAttachmentUrl(modelData.guid || "", modelData.localUrl || "")
-                                                readonly property bool isAnimated: backend.isAnimatedImageAttachment(modelData.mimeType || "", modelData.name || resolvedImgUrl)
+                                                readonly property bool isAnimated: backend.isAnimatedImageAttachment(modelData.mimeType || "", modelData.name || "")
+                                                                                 || backend.isAnimatedImageAttachment("", resolvedImgUrl)
                                                 readonly property var media: isAnimated ? inlineGif : inlineImg
                                                 readonly property bool mediaReady: media.status === Image.Ready && media.implicitWidth > 0 && media.implicitHeight > 0
                                                 // Keep the image's own aspect ratio: scale it down to fit the
@@ -4318,8 +4322,12 @@ ApplicationWindow {
                                                 readonly property real maxImageW: Math.min(msgDelegate.isBubblelessMedia ? 360 : 320, bubbleContent.maxTextW + (msgDelegate.isBubblelessMedia ? 0 : 28))
                                                 readonly property real maxImageH: 360
                                                 readonly property real fitScale: mediaReady ? Math.min(1, maxImageW / media.implicitWidth, maxImageH / media.implicitHeight) : 1
-                                                width: mediaReady ? Math.max(48, Math.round(media.implicitWidth * fitScale)) : Math.min(240, maxImageW)
-                                                height: mediaReady ? Math.max(48, Math.round(media.implicitHeight * fitScale)) : 170
+                                                // Media is drawn at its fitted size (never enlarged); the card
+                                                // keeps a 48px minimum only as a click target.
+                                                readonly property real fittedW: mediaReady ? Math.max(1, Math.round(media.implicitWidth * fitScale)) : Math.min(240, maxImageW)
+                                                readonly property real fittedH: mediaReady ? Math.max(1, Math.round(media.implicitHeight * fitScale)) : 170
+                                                width: Math.max(48, fittedW)
+                                                height: Math.max(48, fittedH)
                                                 radius: msgDelegate.isBubblelessMedia ? 16 : 8
                                                 color: mediaReady ? "transparent" : theme.darkBackground
                                                 clip: true
@@ -4337,14 +4345,22 @@ ApplicationWindow {
                                                 // GIFs play only on screen: ListView keeps delegates up to its
                                                 // cacheBuffer away alive (and "visible") too. Still images skip
                                                 // the check so scrolling doesn't re-evaluate it for every photo.
-                                                readonly property bool inView: isAnimated
-                                                                               && msgDelegate.y + msgDelegate.height > messageListView.contentY
-                                                                               && msgDelegate.y < messageListView.contentY + messageListView.height
+                                                readonly property bool inView: {
+                                                    if (!isAnimated) return false
+                                                    // This card's own rectangle, re-checked when the list
+                                                    // scrolls or the delegate or card moves.
+                                                    void (msgDelegate.y + y)  // dependencies for mapToItem()
+                                                    const top = mapToItem(messageListView.contentItem, 0, 0).y
+                                                    return top + height > messageListView.contentY
+                                                        && top < messageListView.contentY + messageListView.height
+                                                }
 
                                                 Image {
                                                     id: inlineImg
                                                     objectName: "inlineStillImage"
-                                                    anchors.fill: parent
+                                                    anchors.centerIn: parent
+                                                    width: parent.fittedW
+                                                    height: parent.fittedH
                                                     source: parent.isAnimated ? "" : parent.resolvedImgUrl
                                                     asynchronous: true
                                                     cache: true
@@ -4358,10 +4374,14 @@ ApplicationWindow {
                                                 AnimatedImage {
                                                     id: inlineGif
                                                     objectName: "inlineAnimatedImage"
-                                                    anchors.fill: parent
+                                                    anchors.centerIn: parent
+                                                    width: parent.fittedW
+                                                    height: parent.fittedH
                                                     source: parent.isAnimated ? parent.resolvedImgUrl : ""
                                                     asynchronous: true
-                                                    cache: true
+                                                    // Don't keep every decoded frame: a large GIF would hold
+                                                    // them all at native size. (The photo viewer still caches.)
+                                                    cache: false
                                                     smooth: true
                                                     fillMode: Image.PreserveAspectFit
                                                     // No sourceSize: AnimatedImage scales small GIFs *up* to it.
@@ -4414,6 +4434,7 @@ ApplicationWindow {
                                                             resolvedList.push({
                                                                 guid: eg,
                                                                 name: entry.name || ("Photo " + (k + 1)),
+                                                                mimeType: entry.mimeType || "",
                                                                 localUrl: msgDelegate.resolveAttachmentUrl(eg, entry.localUrl || ""),
                                                                 previewUrl: entry.previewUrl || "",
                                                                 sourceUrl: entry.sourceUrl || ""
@@ -10303,7 +10324,8 @@ ApplicationWindow {
             }
 
             readonly property string fullPhotoSource: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || photoViewerModal.currentPhoto.sourceUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
-            readonly property bool fullPhotoIsAnimated: backend.isAnimatedImageAttachment(photoViewerModal.currentPhoto.mimeType || "", photoViewerModal.currentPhoto.name || photoViewerModal.currentPhoto.localUrl || "")
+            readonly property bool fullPhotoIsAnimated: backend.isAnimatedImageAttachment(photoViewerModal.currentPhoto.mimeType || "", photoViewerModal.currentPhoto.name || "")
+                                                        || backend.isAnimatedImageAttachment("", photoViewerModal.currentPhoto.localUrl || "")
             readonly property bool fullPhotoReady: fullPhotoIsAnimated ? fullPhotoAnimated.status === Image.Ready : fullPhotoImage.status === Image.Ready
 
             // GIF / WebP: same geometry as fullPhotoImage, but animated

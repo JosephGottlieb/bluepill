@@ -20,7 +20,8 @@ SOURCES += \
 HEADERS += \
     $$PWD/../src/theme.h \
     $$PWD/../src/translator.h \
-    $$PWD/../src/backend.h
+    $$PWD/../src/backend.h \
+    $$PWD/../src/emoji_ranges.h
 
 RESOURCES += \
     $$PWD/../src/resources.qrc

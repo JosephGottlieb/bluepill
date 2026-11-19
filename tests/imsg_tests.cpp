@@ -14,6 +14,7 @@
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <QtTest>
 
 #include "backend.h"
@@ -2792,6 +2793,13 @@ private slots:
         QCOMPARE(n("1"), 0);
         QCOMPARE(n("©"), 0);              // no VS16: text
         QCOMPARE(n("☺︎"), 0);             // explicit text presentation (FE0E)
+        // Exact Unicode emoji properties, not whole blocks
+        QCOMPARE(n("⌚"), 1);             // U+231A Emoji_Presentation
+        QCOMPARE(n("⌘"), 0);              // U+2318 sits in an emoji-heavy block but isn't an emoji
+        QCOMPARE(n("★"), 0);              // U+2605 isn't an emoji
+        QCOMPARE(n("✓"), 0);              // U+2713 isn't an emoji (✔ U+2714 is, as text)
+        QCOMPARE(n("☺"), 0);              // text-default emoji without VS16 stays text
+        QCOMPARE(n("☺️"), 1);
         QCOMPARE(n("📷 Photo"), 0);
         QCOMPARE(n(""), 0);
 
@@ -2916,8 +2924,10 @@ private slots:
             QVERIFY(card->width() <= 360.0 && card->width() > 200.0);
             QVERIFY2(qAbs(card->width() / card->height() - 1600.0 / 600.0) < 0.05,
                      qPrintable(QStringLiteral("%1x%2").arg(card->width()).arg(card->height())));
-            // Offscreen tests use the software renderer: the corner mask must stay off
-            QVERIFY(!card->property("layer").value<QObject *>()->property("enabled").toBool());
+            // The corner mask is on only with a GPU scene graph and QtQuick.Effects
+            const bool gpu = win->rendererInterface()->graphicsApi() != QSGRendererInterface::Software;
+            const bool maskLoaded = card->property("cornerMask").value<QObject *>() != nullptr;
+            QCOMPARE(card->property("layer").value<QObject *>()->property("enabled").toBool(), gpu && maskLoaded);
             QQuickItem *still = findIn(card, QStringLiteral("inlineStillImage"));
             QVERIFY(still->isVisible());
             // Decoded at display size, not the source's 1600px
@@ -2942,7 +2952,11 @@ private slots:
         QVERIFY(gif->isVisible());
         QVERIFY(gif->property("playing").toBool());
         QCOMPARE(gif->property("frameCount").toInt(), 2);
-        QCOMPARE(qRound(gifCard->width()), 48);   // 40x20 GIF, floored at the 48px minimum
+        QCOMPARE(qRound(gifCard->width()), 48);   // 40x20 GIF: the card keeps a 48px click target...
+        QCOMPARE(qRound(gif->width()), 40);       // ...but the GIF paints at its native size
+        QCOMPARE(qRound(gif->height()), 20);
+        QCOMPARE(qRound(gif->property("paintedWidth").toReal()), 40);
+        QVERIFY(!gif->property("cache").toBool());  // frames aren't all kept in memory
         QVERIFY(!findIn(gifCard, QStringLiteral("inlineStillImage"))->isVisible());
         const int firstFrame = gif->property("currentFrame").toInt();
         QTRY_VERIFY_WITH_TIMEOUT(gif->property("currentFrame").toInt() != firstFrame, 2000);
@@ -2960,6 +2974,15 @@ private slots:
         timeline->setProperty("height", savedH);
         timeline->setProperty("contentY", savedY);
         QTRY_VERIFY(gif->property("playing").toBool());
+
+        // The photo viewer keeps the GIF type even with an extensionless name
+        QVariantMap viewerItem{{"guid", "att-anim-viewer"}, {"name", "animation"}, {"mimeType", "image/gif"},
+                               {"localUrl", QUrl::fromLocalFile(gifPath).toString()}};
+        QMetaObject::invokeMethod(win, "openPhotoViewer", Q_ARG(QVariant, QVariant(QVariantList{viewerItem})), Q_ARG(QVariant, 0));
+        QObject *viewer = win->findChild<QObject *>(QStringLiteral("photoViewerModal"));
+        QVERIFY(viewer);
+        QTRY_VERIFY(viewer->property("visible").toBool());
+        QCOMPARE(viewer->property("currentPhoto").toMap().value(QStringLiteral("mimeType")).toString(), QStringLiteral("image/gif"));
     }
 
     void testOrphanSmsVerificationCodeWithoutChatJoin() {

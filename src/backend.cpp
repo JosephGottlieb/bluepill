@@ -137,6 +137,7 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <QSslSocket>
 #include <QStandardPaths>
 #include <QTextBoundaryFinder>
+#include "emoji_ranges.h"
 #include <QThreadPool>
 #include <QUrl>
 #include <QUrlQuery>
@@ -1958,21 +1959,16 @@ bool Backend::isAnimatedImageAttachment(const QString &mimeType, const QString &
 }
 
 namespace {
-// Code points that are emoji on their own (emoji presentation by default, or
-// rendered as emoji by color emoji fonts when used alone).
-bool isStrongEmojiCodePoint(char32_t cp) {
-    return (cp >= 0x1F000 && cp <= 0x1FAFF)   // pictographs, emoticons, transport, flags, skin tones...
-        || (cp >= 0x2600 && cp <= 0x27BF)     // misc symbols, dingbats
-        || (cp >= 0x2300 && cp <= 0x23FF)     // watch, hourglass, media controls...
-        || cp == 0x2B50 || cp == 0x2B55 || cp == 0x2B1B || cp == 0x2B1C;
+template <size_t N>
+bool inEmojiRanges(const EmojiRange (&ranges)[N], char32_t cp) {
+    const EmojiRange *it = std::upper_bound(std::begin(ranges), std::end(ranges), cp,
+                                            [](char32_t v, const EmojiRange &r) { return v < r.lo; });
+    return it != std::begin(ranges) && cp <= (it - 1)->hi;
 }
-// Symbols that are text by default and only count as emoji with U+FE0F.
-bool isTextDefaultEmojiCodePoint(char32_t cp) {
-    return cp == 0x00A9 || cp == 0x00AE || cp == 0x203C || cp == 0x2049 || cp == 0x2122 ||
-           cp == 0x2139 || (cp >= 0x2194 && cp <= 0x21AA) || cp == 0x24C2 ||
-           (cp >= 0x25AA && cp <= 0x25FE) || cp == 0x2934 || cp == 0x2935 ||
-           (cp >= 0x2B05 && cp <= 0x2B07) || cp == 0x3030 || cp == 0x303D || cp == 0x3297 || cp == 0x3299;
-}
+// Emoji shown as emoji on their own (Unicode Emoji_Presentation).
+bool isStrongEmojiCodePoint(char32_t cp) { return inEmojiRanges(kEmojiPresentationRanges, cp); }
+// Emoji that are text by default and only count with U+FE0F.
+bool isTextDefaultEmojiCodePoint(char32_t cp) { return inEmojiRanges(kTextDefaultEmojiRanges, cp); }
 bool isKeycapBase(char32_t cp) {
     return (cp >= U'0' && cp <= U'9') || cp == U'#' || cp == U'*';
 }
