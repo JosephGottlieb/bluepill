@@ -76,7 +76,7 @@ ApplicationWindow {
     property real tapbackEmojiPopupX: 0
     property real tapbackEmojiPopupY: 0
     property Item previousFocusBeforeTapbackPicker: null
-    property string settingsActiveTab: "all"
+    property string settingsActiveTab: "server"
     // Shows on hover when backend.hoverMessageActions is enabled (default true), and always when pinned via right-click.
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== ""
                                                       ? pinnedActionMessageGuid
@@ -613,6 +613,9 @@ ApplicationWindow {
         root.loadPrimaryServerFields(backend.configuredServerUrl)
         secondaryServerUrlInput.text = backend.secondaryServerUrl
         serverPasswordInput.text = backend.serverPassword
+        if (root.settingsActiveTab !== "server" && root.settingsActiveTab !== "appearance" && root.settingsActiveTab !== "notifications") {
+            root.settingsActiveTab = "server"
+        }
         root.showServerPassword = false
         root.showServerConfigModal = true
         serverUrlInput.forceActiveFocus()
@@ -9562,7 +9565,7 @@ ApplicationWindow {
                         }
                     }
 
-                    // Settings Section Tabs (All / Server & Sync / UI & Appearance / Notifications & Audio)
+                    // Settings Section Tabs (Server & Sync / UI & Appearance / Notifications & Audio)
                     RowLayout {
                         id: settingsSectionTabsRow
                         objectName: "settingsSectionTabsRow"
@@ -9571,7 +9574,6 @@ ApplicationWindow {
 
                         Repeater {
                             model: [
-                                { key: "all", label: "☰ " + i18n.tr("All") },
                                 { key: "server", label: "🌐 " + i18n.tr("Server & Sync") },
                                 { key: "appearance", label: "🎨 " + i18n.tr("UI & Appearance") },
                                 { key: "notifications", label: "🔔 " + i18n.tr("Notifications & Audio") }
@@ -9580,14 +9582,23 @@ ApplicationWindow {
                                 required property var modelData
                                 objectName: "settingsTab_" + modelData.key
                                 Layout.fillWidth: true
-                                height: 28
+                                Layout.preferredWidth: tabLabelText.implicitWidth + 20
+                                implicitWidth: tabLabelText.implicitWidth + 20
+                                height: 30
                                 radius: 6
+                                clip: true
                                 readonly property bool isCurrentTab: root.settingsActiveTab === modelData.key
                                 color: isCurrentTab ? theme.accent : theme.lighterBackground
                                 border.width: 1
                                 border.color: isCurrentTab ? theme.accent : theme.muted
                                 Text {
-                                    anchors.centerIn: parent
+                                    id: tabLabelText
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.leftMargin: 6
+                                    anchors.rightMargin: 6
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    horizontalAlignment: Text.AlignHCenter
                                     text: modelData.label
                                     font.pixelSize: theme.fontSize - 3
                                     font.bold: isCurrentTab
@@ -9606,7 +9617,7 @@ ApplicationWindow {
                 ColumnLayout {
                     id: serverSyncSection
                     objectName: "serverSyncSection"
-                    visible: root.settingsActiveTab === "all" || root.settingsActiveTab === "server"
+                    visible: root.settingsActiveTab === "server"
                     Layout.fillWidth: true
                     spacing: 12
 
@@ -10252,7 +10263,7 @@ ApplicationWindow {
                 ColumnLayout {
                     id: uiAppearanceSection
                     objectName: "uiAppearanceSection"
-                    visible: root.settingsActiveTab === "all" || root.settingsActiveTab === "appearance"
+                    visible: root.settingsActiveTab === "appearance"
                     Layout.fillWidth: true
                     spacing: 8
 
@@ -10390,7 +10401,7 @@ ApplicationWindow {
                 ColumnLayout {
                     id: notificationsSettingsCol
                     objectName: "notificationsSettingsCol"
-                    visible: root.settingsActiveTab === "all" || root.settingsActiveTab === "notifications"
+                    visible: root.settingsActiveTab === "notifications"
                     Layout.fillWidth: true
                     spacing: 8
 

@@ -10521,12 +10521,26 @@ private slots:
         QVERIFY(comboContentItem != nullptr);
         QCOMPARE(comboContentItem->property("text").toString(), QStringLiteral("60 days"));
 
-        // Verify Settings version/connection banner & section tabs & UI & Appearance toggles exist
+        std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (!item) return nullptr;
+            if (item->objectName() == name) return item;
+            for (QQuickItem *c : item->childItems())
+                if (QQuickItem *f = findVisual(c, name)) return f;
+            return nullptr;
+        };
+
+        // Verify Settings version/connection banner & 3 section tabs (no "all" tab) & UI & Appearance toggles exist
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsVersionBanner")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsClientVersionText")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsRelayStatusText")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsEndpointText")) != nullptr);
-        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("settingsSectionTabsRow")) != nullptr);
+        QQuickItem *tabsRow = win->findChild<QQuickItem *>(QStringLiteral("settingsSectionTabsRow"));
+        QVERIFY(tabsRow != nullptr);
+        QVERIFY(findVisual(tabsRow, QStringLiteral("settingsTab_all")) == nullptr);
+        QVERIFY(findVisual(tabsRow, QStringLiteral("settingsTab_server")) != nullptr);
+        QVERIFY(findVisual(tabsRow, QStringLiteral("settingsTab_appearance")) != nullptr);
+        QVERIFY(findVisual(tabsRow, QStringLiteral("settingsTab_notifications")) != nullptr);
+        QCOMPARE(win->property("settingsActiveTab").toString(), QStringLiteral("server"));
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("serverSyncSection")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("uiAppearanceSection")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleTopBarStatusPillBtn")) != nullptr);
@@ -10557,13 +10571,6 @@ private slots:
         QCOMPARE(pinnedBar->property("visible").toBool(), true);
 
         // Verify sidebar 4 hover buttons & tooltips in Main.qml source and visual tree
-        std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
-            if (!item) return nullptr;
-            if (item->objectName() == name) return item;
-            for (QQuickItem *c : item->childItems())
-                if (QQuickItem *f = findVisual(c, name)) return f;
-            return nullptr;
-        };
         QQuickItem *pinHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowPinChatBtn"));
         QQuickItem *readHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowReadToggleBtn"));
         QQuickItem *muteHoverBtn = findVisual(win->contentItem(), QStringLiteral("rowMuteChatBtn"));
