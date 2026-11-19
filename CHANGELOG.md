@@ -7,7 +7,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ### Changed
 - **No more Home page:** with no conversation open, the right pane shows a short hint instead of a dashboard that repeated the top bar and the chat list. Its pieces moved:
   - The conversation count is now part of the filter (**All (N)**).
-  - The history sync window and **Web UI** are in **Settings**. **Sync** is in the top bar.
+  - The history sync window (now a dropdown) and **Web UI** are in **Settings**. **Sync** is in the top bar.
   - **Mark all read** appears at the top of the **Unread** view, and Ctrl+Shift+A still works.
   - Ctrl+H still closes the open conversation.
 - **Quieter top bar:** the relay status ("Connected v1.2.1 · macOS …") shows only while hovering the connection dot, and the `60d` history pill is gone.

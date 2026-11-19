@@ -8601,50 +8601,25 @@ ApplicationWindow {
                         }
                     }
 
-                    Flow {
+                    ThemedComboBox {
+                        id: historySyncWindowCombo
                         objectName: "historySyncWindowChoices"
-                        Layout.fillWidth: true
-                        spacing: 6
-                        Repeater {
-                            id: syncDayRepeater
-                            model: [7, 14, 30, 60, 90, 180, 365]
-                            delegate: Rectangle {
-                                required property int modelData
-                                required property int index
-                                height: 28
-                                width: dayLbl.implicitWidth + 22
-                                radius: 6
-                                color: backend.historySyncDays === modelData ? theme.accent : (dayMouse.containsMouse ? theme.selection : theme.lighterBackground)
-                                border.width: activeFocus ? 2 : 1
-                                border.color: (backend.historySyncDays === modelData || activeFocus) ? theme.accent : theme.muted
-                                activeFocusOnTab: true
-                                Accessible.role: Accessible.Button
-                                Accessible.name: i18n.tr("Sync %1 days").arg(modelData)
-                                Accessible.checkable: true
-                                Accessible.checked: backend.historySyncDays === modelData
-                                Accessible.onPressAction: backend.setHistorySyncDays(modelData)
-                                Keys.onReturnPressed: backend.setHistorySyncDays(modelData)
-                                Keys.onEnterPressed: backend.setHistorySyncDays(modelData)
-                                Keys.onSpacePressed: backend.setHistorySyncDays(modelData)
-                                Keys.onLeftPressed: if (index > 0) backend.setHistorySyncDays(syncDayRepeater.model[index - 1])
-                                Keys.onRightPressed: if (index < syncDayRepeater.count - 1) backend.setHistorySyncDays(syncDayRepeater.model[index + 1])
-                                Text {
-                                    id: dayLbl
-                                    anchors.centerIn: parent
-                                    text: modelData + "d"
-                                    font.pixelSize: theme.fontSize - 2
-                                    font.bold: backend.historySyncDays === modelData
-                                    color: backend.historySyncDays === modelData ? theme.darkerBackground : theme.foreground
-                                }
-                                MouseArea {
-                                    id: dayMouse
-                                    anchors.fill: parent
-                                    hoverEnabled: true
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: backend.setHistorySyncDays(modelData)
-                                }
-                            }
+                        Layout.preferredWidth: 180
+                        Accessible.name: i18n.tr("Message History Sync Window")
+                        textRole: "label"
+                        valueRole: "days"
+                        // Presets, plus the current value if it was set to something else
+                        model: {
+                            const presets = [7, 14, 30, 60, 90, 180, 365]
+                            const cur = backend.historySyncDays
+                            const days = presets.indexOf(cur) >= 0 || cur <= 0 ? presets
+                                       : presets.concat([cur]).sort(function(a, b) { return a - b })
+                            return days.map(function(d) {
+                                return { days: d, label: d === 365 ? i18n.tr("1 year") : i18n.tr("%1 days").arg(d) }
+                            })
                         }
+                        currentIndex: indexOfValue(backend.historySyncDays)
+                        onActivated: backend.setHistorySyncDays(currentValue)
                     }
                     Text {
                         Layout.fillWidth: true

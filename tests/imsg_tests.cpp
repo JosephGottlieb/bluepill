@@ -2411,6 +2411,21 @@ private slots:
         QVERIFY(!lv->property("smoothScrolling").toBool());
         QTest::qWait(800);
         QVERIFY(lv->property("stickToBottom").toBool());
+
+        // Settings: the sync window is a themed dropdown bound to the backend
+        QObject *syncCombo = win->findChild<QObject *>(QStringLiteral("historySyncWindowChoices"));
+        QVERIFY(syncCombo);
+        backend.setHistorySyncDays(30);
+        QCOMPARE(syncCombo->property("currentValue").toInt(), 30);
+        QCOMPARE(syncCombo->property("displayText").toString(), QStringLiteral("30 days"));
+        QCOMPARE(syncCombo->property("count").toInt(), 7);
+        syncCombo->setProperty("currentIndex", 6);
+        QMetaObject::invokeMethod(syncCombo, "activated", Q_ARG(int, 6));
+        QCOMPARE(backend.historySyncDays(), 365);
+        QCOMPARE(syncCombo->property("displayText").toString(), QStringLiteral("1 year"));
+        backend.setHistorySyncDays(45);  // a non-preset value still shows
+        QCOMPARE(syncCombo->property("count").toInt(), 8);
+        QCOMPARE(syncCombo->property("currentValue").toInt(), 45);
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
