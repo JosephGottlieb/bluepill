@@ -470,6 +470,15 @@ public:
     // Test / diagnostic injection helper
     void ingestMessagesForTest(const QJsonArray &messagesArray, bool isInitialLoad = true);
     void ingestChatsMetadataForTest(const QJsonArray &chatsArray);
+    // Resolves "iMessage" / "RCS" / "SMS" (or "" if unknown) for a chat.
+    // macOS 26+ writes chat GUIDs as "any;-;<handle>", so the prefix alone
+    // is not enough: fall back to the chat's last message, then participants.
+    // evidenceDate (optional) receives the dateCreated of the message that
+    // decided the service, or 0 when it came from undated evidence
+    // (GUID prefix, chat-level field, participants).
+    static QString resolveChatService(const QJsonObject &chat, const QJsonObject &message = QJsonObject(),
+                                      qint64 *evidenceDate = nullptr);
+    static QString normalizeServiceName(const QString &raw);
     void reconcileUnreadMessagesForTest(const QJsonArray &unreadMessages);
     void reconcileChatMessagesForTest(const QString &chatGuid, const QJsonArray &serverMessages);
     void handleSocketIoPayloadForTest(const QByteArray &rawPayload);
@@ -644,6 +653,12 @@ private:
     int m_tailscalePendingProbes = 0;
     void setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning);
     void probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback);
+    QHash<QString, qint64> m_chatServiceDates;  // chat guid -> date of message that set entry.service
+    bool m_chatServiceEmitPending = false;
+    void refineChatServiceFromMessage(const QString &chatGuid, const QJsonObject &msg);
+    // Dated (message) evidence wins if it is at least as new as what we have;
+    // undated evidence only fills in a chat that has no message evidence yet.
+    bool applyChatServiceEvidence(ChatEntry &entry, const QString &svc, qint64 evidenceDate);
     QPointer<QNetworkReply> m_activeMessagesReply;
     QPointer<QNetworkReply> m_activeEnrichReply;
     QPointer<QNetworkReply> m_activeSocketPollReply;
