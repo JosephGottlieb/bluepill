@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 
 ApplicationWindow {
     id: root
@@ -1364,20 +1365,26 @@ ApplicationWindow {
                 Rectangle {
                     id: topSyncBtn
                     objectName: "topSyncBtn"
-                    width: topSyncLbl.implicitWidth + 18
+                    width: 34
                     height: 30
                     radius: 7
                     color: topSyncMouse.containsMouse ? theme.selection : theme.lighterBackground
                     border.width: 1
                     border.color: (topSyncMouse.containsMouse || backend.syncingHistory) ? theme.accent : theme.muted
                     ToolTip.visible: topSyncMouse.containsMouse
-                    ToolTip.text: i18n.tr("Sync conversations and contacts (Ctrl+R)")
+                    ToolTip.text: backend.syncingHistory ? i18n.tr("Syncing…") : i18n.tr("Sync conversations and contacts (Ctrl+R)")
                     ToolTip.delay: 400
                     Text {
                         id: topSyncLbl
                         anchors.centerIn: parent
-                        text: backend.syncingHistory ? ("↻ " + i18n.tr("Syncing…")) : ("↻ " + i18n.tr("Sync"))
-                        font.pixelSize: theme.fontSize - 2
+                        text: "↻"
+                        font.pixelSize: theme.fontSize + 2
+                        // Spins while history syncs
+                        RotationAnimation on rotation {
+                            running: backend.syncingHistory
+                            from: 0; to: 360; duration: 1000; loops: Animation.Infinite
+                            onRunningChanged: if (!running) topSyncLbl.rotation = 0
+                        }
                         color: backend.syncingHistory ? theme.accent : theme.foreground
                     }
                     MouseArea {
@@ -1413,25 +1420,37 @@ ApplicationWindow {
                     }
                 }
 
-                // New Message Button
+                // New Message: a compose icon (pencil over paper), no label
                 Rectangle {
+                    id: topComposeBtn
+                    objectName: "topComposeBtn"
                     height: 30
+                    width: 34
                     radius: 7
-                    implicitWidth: newMsgText.implicitWidth + (root.isNarrowWindow ? 16 : 22)
-                    color: theme.selection
+                    color: composeMouse.containsMouse ? theme.accent : theme.selection
                     border.width: 1
                     border.color: theme.accent
+                    ToolTip.visible: composeMouse.containsMouse
+                    ToolTip.text: i18n.tr("New Message (Ctrl+N)")
+                    ToolTip.delay: 400
 
-                    Text {
-                        id: newMsgText
+                    // Material Design Icons "square-edit-outline" (Apache-2.0), drawn in the theme color
+                    Shape {
                         anchors.centerIn: parent
-                        text: "+ " + (root.width < 980 ? i18n.tr("New") : i18n.tr("New Message"))
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.accent
+                        width: 24
+                        height: 24
+                        scale: 0.8
+                        preferredRendererType: Shape.CurveRenderer
+                        ShapePath {
+                            strokeWidth: -1
+                            fillColor: composeMouse.containsMouse ? theme.darkerBackground : theme.accent
+                            PathSvg { path: "M5 3c-1.11 0-2 .89-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7H5V5h7V3H5m12.78 1a.69.69 0 0 0-.48.2l-1.22 1.21 2.5 2.5L19.8 6.7c.26-.26.26-.7 0-.95L18.25 4.2c-.13-.13-.3-.2-.47-.2m-2.41 2.12L8 13.5V16h2.5l7.37-7.38-2.5-2.5z" }
+                        }
                     }
                     MouseArea {
+                        id: composeMouse
                         anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             root.showNewChatModal = true
@@ -1446,7 +1465,7 @@ ApplicationWindow {
                     objectName: "topServerConfigBtn"
                     height: 30
                     radius: 7
-                    implicitWidth: serverTopLbl.implicitWidth + 16
+                    implicitWidth: 34
                     color: root.showServerConfigModal ? theme.accent : theme.lighterBackground
                     border.width: 1
                     border.color: (root.showServerConfigModal || backend.needsSetup) ? theme.accent : theme.muted
@@ -1461,13 +1480,14 @@ ApplicationWindow {
                         spacing: 5
                         Text {
                             text: "⚙"
-                            font.pixelSize: theme.fontSize - 1
+                            font.pixelSize: theme.fontSize + 2
                             color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
                         }
                         Text {
+                            // Icon only (the tooltip says "Settings"); kept for tests/accessibility
                             id: serverTopBtnText
                             objectName: "serverTopBtnText"
-                            visible: root.width >= 900
+                            visible: false
                             text: i18n.tr("Settings")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
@@ -2597,11 +2617,74 @@ ApplicationWindow {
                             }
                         }
                     }
+                    // The default Flickable wheel step is tiny (3 notches ≈ 18px); scroll a
+                    // fixed ~110px per notch instead, speeding up while the wheel spins fast.
                     WheelHandler {
-                        // Scrolling with the wheel counts as activity (the list still scrolls itself)
+                        id: timelineWheel
                         acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
                         target: null
-                        onWheel: messageListView.notePointerActivity()
+                        property double lastWheelMs: 0
+                        property real boost: 1
+                        onWheel: function(event) {
+                            const now = Date.now()
+                            boost = (now - lastWheelMs < 120) ? Math.min(2.5, boost + 0.25) : 1
+                            lastWheelMs = now
+                            const dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y * 1.5
+                                                                : (event.angleDelta.y / 120) * 110 * boost
+                            messageListView.scrollByWheel(dy)
+                        }
+                    }
+                    function scrollBounds() {
+                        const minY = originY - topMargin
+                        return { min: minY, max: Math.max(minY, originY + contentHeight - height + bottomMargin) }
+                    }
+                    function scrollByWheel(dy) {
+                        if (dy === 0) return
+                        notePointerActivity()
+                        smoothScrollAnim.stop()
+                        restoringScrollPosition = false
+                        scrollRestoreTimer.stop()
+                        settlingToBottom = false
+                        bottomSettleTimer.stop()
+                        const b = scrollBounds()
+                        contentY = Math.max(b.min, Math.min(b.max, contentY - dy))
+                        stickToBottom = isNearBottom()
+                        savedStickToBottom = stickToBottom
+                        if (dy > 0 && contentY <= b.min + 1 && backend.hasOlderMessages && !backend.loadingOlderMessages) {
+                            prevContentHeight = contentHeight
+                            prevContentY = contentY
+                            backend.loadOlderMessages()
+                        }
+                    }
+                    // ↑ / ↓ arrows: animate there, then settle exactly (heights are estimates
+                    // until delegates exist)
+                    NumberAnimation {
+                        id: smoothScrollAnim
+                        target: messageListView
+                        property: "contentY"
+                        easing.type: Easing.OutCubic
+                        property bool toEnd: false
+                        onFinished: toEnd ? messageListView.scrollToBottom() : messageListView.scrollToTop()
+                    }
+                    function smoothScrollTo(toEnd) {
+                        smoothScrollAnim.stop()
+                        restoringScrollPosition = false
+                        scrollRestoreTimer.stop()
+                        settlingToBottom = false
+                        bottomSettleTimer.stop()
+                        stickToBottom = false
+                        const b = scrollBounds()
+                        const goal = toEnd ? b.max : b.min
+                        const dist = Math.abs(goal - contentY)
+                        if (dist < 2) {
+                            if (toEnd) scrollToBottom(); else scrollToTop()
+                            return
+                        }
+                        smoothScrollAnim.toEnd = toEnd
+                        smoothScrollAnim.from = contentY
+                        smoothScrollAnim.to = goal
+                        smoothScrollAnim.duration = Math.min(700, 220 + dist / 12)
+                        smoothScrollAnim.start()
                     }
                     property bool settlingToBottom: false
                     property int settlePassesRemaining: 0
@@ -3047,7 +3130,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: messageListView.scrollToTop()
+                            onClicked: messageListView.smoothScrollTo(false)
                         }
                     }
 
@@ -3090,7 +3173,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: messageListView.scrollToBottom()
+                            onClicked: messageListView.smoothScrollTo(true)
                         }
                     }
 

@@ -2350,6 +2350,58 @@ private slots:
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
     }
 
+    void testTimelineWheelSpeedAndAnimatedScrollArrows() {
+        Backend backend(false);
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        QJsonArray batch;
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 3600000;
+        for (int i = 0; i < 120; ++i)
+            batch.append(QJsonObject{{"guid", QStringLiteral("w-%1").arg(i)}, {"text", QStringLiteral("message number %1").arg(i)},
+                                     {"isFromMe", i % 2 == 0}, {"service", "iMessage"}, {"dateCreated", t + i * 1000},
+                                     {"chats", QJsonArray{chatObj}}});
+        backend.ingestMessagesForTest(batch, true);
+        backend.selectChat(chatGuid);
+        Theme theme; Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        win->resize(1180, 600); win->show(); QTest::qWait(500);
+        auto *lv = win->findChild<QQuickItem *>(QStringLiteral("messageTimelineListView"));
+        const QPointF c = lv->mapToScene(QPointF(lv->width()/2, lv->height()/2));
+        const qreal y0 = lv->property("contentY").toReal();
+        for (int i = 0; i < 3; ++i) {
+            QWheelEvent ev(c, win->mapToGlobal(c.toPoint()), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(win, &ev);
+            QTest::qWait(40);
+        }
+        QTest::qWait(300);
+        // ~110px a notch, faster while spinning (the default moved 3 notches only ~18px)
+        const qreal moved = y0 - lv->property("contentY").toReal();
+        QVERIFY2(moved >= 300 && moved <= 500, qPrintable(QString::number(moved)));
+        QVERIFY(!lv->property("stickToBottom").toBool());
+
+        // The ↑ arrow animates up instead of jumping, then lands at the very top
+        const qreal before = lv->property("contentY").toReal();
+        QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, false));
+        QTest::qWait(60);
+        const qreal mid = lv->property("contentY").toReal();
+        QVERIFY2(mid < before && mid > lv->property("originY").toReal() - lv->property("topMargin").toReal() + 50,
+                 qPrintable(QStringLiteral("before %1 mid %2").arg(before).arg(mid)));
+        QTRY_VERIFY_WITH_TIMEOUT(lv->property("atYBeginning").toBool(), 3000);
+        // ...and ↓ back to the newest message, sticking there
+        QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, true));
+        // (scrollToBottom() rests the last message above the 46px bottom margin)
+        auto atBottom = [&]() {
+            const qreal end = lv->property("originY").toReal() + lv->property("contentHeight").toReal() - lv->height();
+            return lv->property("stickToBottom").toBool() && qAbs(lv->property("contentY").toReal() - end) <= 2.0;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(atBottom(), 3000);
+    }
+
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
         Backend backend(false);
         backend.loadDemoData();
