@@ -211,9 +211,18 @@ def _ab_birthday(raw: Any, yearless: bool = False) -> str:
         dt = datetime.datetime(2001, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=float(raw))
     except (TypeError, ValueError, OverflowError):
         return ""
-    # Contacts stores the day at noon UTC, or at local midnight (07:00 UTC in
-    # California, 15:00 the day before in Tokyo); +11h lands each on its day.
-    dt = (dt + datetime.timedelta(hours=11)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Contacts stores the day either at noon UTC or at local midnight of the
+    # zone it was entered in (07:00 UTC in California, 15:00 the day before in
+    # Tokyo, 10:00 the day before in Kiribati).
+    local = dt.astimezone()
+    minutes = dt.hour * 60 + dt.minute
+    if local.hour == 0 and local.minute == 0:
+        day = local.date()  # midnight in this Mac's zone (also settles 10:00-11:59 UTC)
+    elif minutes <= 12 * 60:
+        day = dt.date()  # noon UTC, or midnight west of UTC (offset -0..-12h)
+    else:
+        day = (dt + datetime.timedelta(days=1)).date()  # midnight east of UTC (+0..+14h)
+    dt = datetime.datetime(day.year, day.month, day.day)
     # Apple stores year-less birthdays in 1604.
     return dt.strftime("--%m-%d") if yearless or dt.year == 1604 else dt.strftime("%Y-%m-%d")
 
@@ -1920,7 +1929,7 @@ class BluePillEngine:
                 return self._contacts_cache
 
         contacts: List[Dict[str, Any]] = []
-        seen_keys = set()
+        seen_keys: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
         avatar_index: Dict[str, Tuple[str, int]] = {}
 
         # 1. Load from BlueBubbles config.db contact + contact_address tables (if present)
@@ -1967,9 +1976,7 @@ class BluePillEngine:
                     )
                     if dedup_key in seen_keys:
                         continue
-                    seen_keys.add(dedup_key)
-                    contacts.append(
-                        {
+                    bb_contact = {
                             "id": f"bb-{cid}",
                             "firstName": first,
                             "lastName": last,
@@ -1981,7 +1988,8 @@ class BluePillEngine:
                             "birthday": "",
                             "avatar": str(r["avatar"] or ""),
                         }
-                    )
+                    seen_keys[dedup_key] = bb_contact
+                    contacts.append(bb_contact)
             except Exception:
                 pass
 
@@ -2089,9 +2097,7 @@ class BluePillEngine:
                         tuple(sorted(p["address"] for p in phones)),
                         tuple(sorted(e["address"] for e in emails)),
                     )
-                    if dedup_key in seen_keys:
-                        continue
-                    seen_keys.add(dedup_key)
+                    existing = seen_keys.get(dedup_key)
                     avatar = ""
                     if photo_cols:
                         avatar_index[uid] = (db_file, pk)
@@ -2099,8 +2105,7 @@ class BluePillEngine:
                     birthday = ""
                     if "ZBIRTHDAY" in optional and r["ZBIRTHDAY"] is not None:
                         birthday = _ab_birthday(r["ZBIRTHDAY"], "ZBIRTHDAYYEARLESS" in optional and bool(r["ZBIRTHDAYYEARLESS"]))
-                    contacts.append(
-                        {
+                    ab_contact = {
                             "id": uid,
                             "firstName": first,
                             "lastName": last,
@@ -2118,7 +2123,19 @@ class BluePillEngine:
                             "birthday": birthday,
                             "avatar": avatar,
                         }
-                    )
+                    if existing is not None:
+                        # Same person as a BlueBubbles (or earlier source) entry: keep one
+                        # contact, filling in whatever the Mac adds (birthday, note, photo...)
+                        for key, value in ab_contact.items():
+                            if key == "id":
+                                continue
+                            if key in ("phoneNumbers", "emails") and value:
+                                existing[key] = value  # same addresses, but with the Mac's labels
+                            elif value and not existing.get(key):
+                                existing[key] = value
+                        continue
+                    seen_keys[dedup_key] = ab_contact
+                    contacts.append(ab_contact)
                 conn.close()
             except Exception:
                 continue
@@ -10443,6 +10460,50 @@ def run_selftest(engine: BluePillEngine) -> int:
         photo = ab_eng.contact_avatar("uid-1")
         assert photo and photo[0] == fake_png and photo[1] == "image/png", photo
         assert ab_eng.contact_avatar("no-such-contact") is None
+        # A BlueBubbles entry for the same person is kept once, filled in with the Mac's fields
+        bb_path = os.path.join(ab_dir, "config.db")
+        bb = sqlite3.connect(bb_path)
+        bb.executescript(
+            """
+            CREATE TABLE contact (id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT, display_name TEXT, avatar TEXT);
+            CREATE TABLE contact_address (contactId INTEGER, address TEXT, type TEXT);
+            INSERT INTO contact VALUES (7, 'Alex', 'Rivera', 'Alex Rivera', '');
+            INSERT INTO contact_address VALUES (7, '+1 (555) 555-0100', 'phone');
+            INSERT INTO contact_address VALUES (7, '+1 (555) 555-0101', 'phone');
+            INSERT INTO contact_address VALUES (7, 'user@example.com', 'email');
+            """
+        )
+        bb.commit()
+        bb.close()
+        ab_eng.bb_config_db_path = bb_path
+        merged = ab_eng.query_contacts(force_refresh=True)
+        assert len(merged) == 1, f"duplicate BlueBubbles + Mac contact: {merged}"
+        m0 = merged[0]
+        assert m0["id"] == "bb-7" and m0["note"] == "Met at the conference" and m0["birthday"] == "2020-05-04", m0
+        assert m0["avatar"] == "/api/v1/contact/uid-1/avatar" and m0["phoneNumbers"][0]["label"] == "Mobile", m0
+        assert ab_eng.contact_avatar("uid-1") is not None
+        ab_eng.bb_config_db_path = "/nonexistent/config.db"
+    # Birthdays: noon UTC, or local midnight anywhere from UTC-12 to UTC+14
+    _old_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        assert _ab_birthday(610286400) == "2020-05-04"            # noon UTC
+        assert _ab_birthday(610286400 - 5 * 3600) == "2020-05-04"  # midnight in California (07:00 UTC)
+        assert _ab_birthday(610286400 - 21 * 3600) == "2020-05-04"  # midnight in Tokyo (15:00 UTC the day before)
+        assert _ab_birthday(610286400 - 22 * 3600) == "2020-05-04"  # midnight UTC+10
+        assert _ab_birthday(610286400 - 2 * 3600) == "2020-05-04"  # midnight Hawaii (10:00 UTC)
+        os.environ["TZ"] = "Pacific/Kiritimati"  # UTC+14: 10:00 UTC the day before is local midnight
+        time.tzset()
+        assert _ab_birthday(610286400 - 26 * 3600) == "2020-05-04", _ab_birthday(610286400 - 26 * 3600)
+        assert _ab_birthday(610286400) == "2020-05-04"
+        assert _ab_birthday(-12517416000) == "--05-04", "1604 is year-less"
+    finally:
+        if _old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _old_tz
+        time.tzset()
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
     launchctl_calls: List[List[str]] = []
     test_eng._run_launchctl = lambda args: (

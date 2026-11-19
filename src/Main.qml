@@ -483,9 +483,7 @@ ApplicationWindow {
         root.photoViewerZoom = 1.0
         root.photoViewerPanX = 0
         root.photoViewerPanY = 0
-        if (backend.selectedChatGuid.length > 0) {
-            composerInput.forceActiveFocus()
-        }
+        root.focusAfterOverlay()
     }
 
     function handlePhotoViewerKey(event) {
@@ -602,12 +600,34 @@ ApplicationWindow {
     property int contactInfoTab: 0          // 0 Details, 1 Photos, 2 Links, 3 Files
     property var contactInfoDetails: ({})
     property var contactInfoMedia: ({ photos: [], links: [], files: [] })
-    function openContactInfo(tab) {
-        if (backend.selectedChatGuid.length === 0) return
+    function refreshContactInfo() {
         root.contactInfoDetails = backend.selectedChatIsGroup ? ({ found: false }) : backend.contactDetails(backend.selectedChatAddress)
         root.contactInfoMedia = backend.conversationMedia(backend.selectedChatGuid)
+    }
+    function openContactInfo(tab) {
+        if (backend.selectedChatGuid.length === 0) return
+        root.refreshContactInfo()
         root.contactInfoTab = tab || 0
         root.showContactInfo = true
+        // Keys go to the card, not the (covered) composer with its draft
+        contactInfoModal.forceActiveFocus()
+    }
+    function closeContactInfo() {
+        if (!root.showContactInfo) return
+        root.showContactInfo = false
+        if (backend.selectedChatGuid.length > 0) composerInput.forceActiveFocus()
+    }
+    // Where focus goes when the editor or photo viewer closes: back to the card if it's open
+    function focusAfterOverlay() {
+        if (root.showContactInfo) contactInfoModal.forceActiveFocus()
+        else if (backend.selectedChatGuid.length > 0) composerInput.forceActiveFocus()
+    }
+    // Closing the contact editor backs out to the card, with the saved details
+    onShowContactModalChanged: {
+        if (!showContactModal && showContactInfo) {
+            root.refreshContactInfo()
+            root.focusAfterOverlay()
+        }
     }
     function openContactModal(address, title) {
         var d = backend.contactDetails(address || "")
@@ -789,6 +809,10 @@ ApplicationWindow {
             var sameConv = (root.lastDraftChatGuid === newGuid) || (root.lastDraftChatGuid !== "" && newGuid !== "" && backend.isSameConversation(root.lastDraftChatGuid, newGuid))
             if (!sameConv) {
                 root.clearActionMenu()
+                // The info card follows the conversation
+                if (root.showContactInfo) {
+                    if (newGuid.length > 0) root.refreshContactInfo(); else root.closeContactInfo()
+                }
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
                 root.replyTargetText = ""
@@ -842,6 +866,7 @@ ApplicationWindow {
             }
         }
         function onContactsChanged() {
+            if (root.showContactInfo) root.contactInfoDetails = backend.selectedChatIsGroup ? ({ found: false }) : backend.contactDetails(backend.selectedChatAddress)
             if (root.showNewChatModal) root.refreshNewChatSuggestions()
             if (searchInput.text.trim().length > 0) root.refreshSidebarContacts()
         }
@@ -1080,11 +1105,7 @@ ApplicationWindow {
     Shortcut {
         sequences: ["Ctrl+Shift+C", "Alt+C"]
         onActivated: {
-            root.contactModalFirstName = ""
-            root.contactModalLastName = ""
-            root.contactModalPhone = backend.selectedChatAddress
-            root.contactModalEmail = ""
-            root.showContactModal = true
+            if (backend.selectedChatGuid.length > 0) root.openContactModal(backend.selectedChatAddress, "")
         }
     }
     Shortcut {
@@ -1234,8 +1255,10 @@ ApplicationWindow {
                 audioInputDeviceCombo.popup.close()
             } else if (audioOutputDeviceCombo.popup.visible) {
                 audioOutputDeviceCombo.popup.close()
+            } else if (root.showContactModal) {
+                root.showContactModal = false
             } else if (root.showContactInfo) {
-                root.showContactInfo = false
+                root.closeContactInfo()
             } else if (root.showServerConfigModal) {
                 root.showServerConfigModal = false
             } else if (root.showDeleteChatModal) {
@@ -3036,6 +3059,7 @@ ApplicationWindow {
 
                         MouseArea {
                             id: contactHeaderHover
+                            objectName: "contactHeaderNameArea"
                             anchors.fill: parent
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
@@ -5602,6 +5626,7 @@ ApplicationWindow {
                                 anchors.rightMargin: 8
                                 topPadding: 10
                                 bottomPadding: 14
+                                objectName: "composerInput"
                                 leftPadding: 4
                                 rightPadding: 4
                                 placeholderText: i18n.tr("Type an iMessage... (:smile: for emoji, Enter to send)")
@@ -8444,6 +8469,9 @@ ApplicationWindow {
         id: contactInfoModal
         objectName: "contactInfoModal"
         visible: root.showContactInfo
+        // Holds focus while open so Return/typing never reach the composer underneath
+        Keys.onEscapePressed: root.closeContactInfo()
+        Keys.onPressed: (event) => { event.accepted = true }
         // Over the open conversation only (not the sidebar)
         readonly property point paneOrigin: {
             void (conversationPane.x + conversationPane.y + conversationPane.width + conversationPane.height + root.width + root.height)
@@ -8459,7 +8487,7 @@ ApplicationWindow {
         MouseArea {
             anchors.fill: parent
             hoverEnabled: true
-            onClicked: root.showContactInfo = false
+            onClicked: root.closeContactInfo()
         }
 
         Rectangle {
@@ -8517,7 +8545,7 @@ ApplicationWindow {
                         MouseArea {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
-                            onClicked: root.showContactInfo = false
+                            onClicked: root.closeContactInfo()
                         }
                     }
                 }
@@ -8630,10 +8658,8 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.showContactInfo = false
-                                    root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)
-                                }
+                                // The card stays underneath; Save/Cancel back out to it
+                                onClicked: root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)
                             }
                         }
                     }
@@ -8678,10 +8704,8 @@ ApplicationWindow {
                                     MouseArea {
                                         anchors.fill: parent
                                         cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.showContactInfo = false
-                                            root.openPhotoViewer(root.contactInfoMedia.photos, index)
-                                        }
+                                        // Closing the viewer comes back to the Photos tab
+                                        onClicked: root.openPhotoViewer(root.contactInfoMedia.photos, index)
                                     }
                                 }
                             }
@@ -10052,12 +10076,7 @@ ApplicationWindow {
                             chatContextMenuPopup.visible = false
                             if (g.length > 0) {
                                 backend.selectChat(g)
-                                var parts = t.split(" ")
-                                root.contactModalFirstName = parts[0] || ""
-                                root.contactModalLastName = parts.slice(1).join(" ") || ""
-                                root.contactModalPhone = addr.length > 0 ? addr : backend.selectedChatAddress
-                                root.contactModalEmail = ""
-                                root.showContactModal = true
+                                root.openContactModal(addr.length > 0 ? addr : backend.selectedChatAddress, t)
                             }
                         }
                     }

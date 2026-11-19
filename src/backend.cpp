@@ -192,6 +192,15 @@ bool Backend::writeConfigAtomicallyForTest(const QString &targetPath, const QJso
 
 Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart(autoStart) {
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
+    // Contacts and chats arrive in either order; queue photos once both are here
+    connect(this, &Backend::chatsChanged, this, [this]() {
+        if (m_avatarScanPending) return;
+        m_avatarScanPending = true;
+        QTimer::singleShot(500, this, [this]() {
+            m_avatarScanPending = false;
+            fetchContactAvatarsForChats();
+        });
+    });
     if (QClipboard *cb = QGuiApplication::clipboard()) {
         connect(cb, &QClipboard::dataChanged, this, [this]() {
             if (m_clipboardCopySeq) {
@@ -1660,19 +1669,38 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
     fetchContactAvatarsForChats();
 }
 
+QString Backend::avatarFetchKey(const QString &apiPath) const {
+    // Two relays can both serve /api/v1/contact/uid-1/avatar for different people
+    return QUrl(m_serverUrl).adjusted(QUrl::StripTrailingSlash | QUrl::RemoveUserInfo).toString() + QLatin1Char('|') + apiPath;
+}
+
+QString Backend::avatarCacheFile(const QString &apiPath) const {
+    return QDir::homePath() + QStringLiteral("/.cache/imsg/avatars/") +
+           QString::fromLatin1(QCryptographicHash::hash(avatarFetchKey(apiPath).toUtf8(), QCryptographicHash::Sha1).toHex()) +
+           QStringLiteral(".img");
+}
+
 void Backend::fetchContactAvatarsForChats() {
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
     // Only people you have a conversation with; the address book can be huge.
-    QSet<QString> queued;
     for (const ChatEntry &c : std::as_const(m_chats)) {
         const QStringList handles = c.participantHandles.isEmpty() ? QStringList{c.chatIdentifier} : c.participantHandles;
         for (const QString &h : handles) {
             const QString norm = normalizeHandle(h);
-            if (norm.isEmpty() || m_contactAvatars.contains(norm) || queued.contains(norm)) continue;
+            if (norm.isEmpty()) continue;
             const QString apiPath = m_contactAvatarApiPaths.value(norm);
-            if (apiPath.isEmpty() || m_contactAvatarFetchesDone.contains(apiPath)) continue;
-            queued.insert(norm);
-            if (!m_contactAvatarQueue.contains(apiPath)) m_contactAvatarQueue.append(apiPath);
+            if (apiPath.isEmpty() || m_contactAvatarQueue.contains(apiPath)) continue;
+            const QString key = avatarFetchKey(apiPath);
+            if (m_contactAvatarInFlight.contains(key)) continue;
+            // Installed and fresh: nothing to do. Stale photos stay visible while they refresh.
+            const auto fetched = m_contactAvatarFetchedAtMs.constFind(key);
+            if (m_contactAvatars.contains(norm) && fetched != m_contactAvatarFetchedAtMs.constEnd() &&
+                now - fetched.value() < kAvatarRefreshMs) continue;
+            const auto failure = m_contactAvatarFailures.constFind(key);
+            if (failure != m_contactAvatarFailures.constEnd() &&
+                (failure->attempts >= kAvatarMaxAttempts || now < failure->retryAtMs)) continue;
+            m_contactAvatarQueue.append(apiPath);
         }
     }
     pumpContactAvatarQueue();
@@ -1681,31 +1709,54 @@ void Backend::fetchContactAvatarsForChats() {
 void Backend::pumpContactAvatarQueue() {
     while (m_contactAvatarsInFlight < 4 && !m_contactAvatarQueue.isEmpty()) {
         const QString apiPath = m_contactAvatarQueue.takeFirst();
-        if (m_contactAvatarFetchesDone.contains(apiPath)) continue;
-        m_contactAvatarFetchesDone.insert(apiPath);
-        const QString dir = QDir::homePath() + QStringLiteral("/.cache/imsg/avatars");
-        const QString file = dir + QLatin1Char('/') +
-                             QString::fromLatin1(QCryptographicHash::hash(apiPath.toUtf8(), QCryptographicHash::Sha1).toHex()) +
-                             QStringLiteral(".img");
+        const QString key = avatarFetchKey(apiPath);
+        if (m_contactAvatarInFlight.contains(key)) continue;
+        const QString file = avatarCacheFile(apiPath);
+        const QString dir = QFileInfo(file).absolutePath();
         const QFileInfo fi(file);
-        if (fi.exists() && fi.size() > 64 && fi.lastModified().secsTo(QDateTime::currentDateTime()) < 86400) {
-            applyContactAvatar(apiPath, file);  // fresh enough: no request
+        const bool haveFetched = m_contactAvatarFetchedAtMs.contains(key);
+        if (!haveFetched && fi.exists() && fi.size() > 0 &&
+            fi.lastModified().msecsTo(QDateTime::currentDateTime()) < kAvatarRefreshMs) {
+            // Fresh copy from this relay on disk: no request
+            m_contactAvatarFetchedAtMs.insert(key, fi.lastModified().toMSecsSinceEpoch());
+            applyContactAvatar(apiPath, file);
             continue;
         }
+        m_contactAvatarInFlight.insert(key);
         ++m_contactAvatarsInFlight;
         QNetworkReply *reply = m_mediaNam.get(makeRequest(apiPath));
-        connect(reply, &QNetworkReply::finished, this, [this, reply, apiPath, dir, file]() {
+        connect(reply, &QNetworkReply::finished, this, [this, reply, apiPath, key, dir, file]() {
             reply->deleteLater();
             --m_contactAvatarsInFlight;
+            m_contactAvatarInFlight.remove(key);
             const QByteArray bytes = reply->readAll();
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            bool ok = false;
             QImage probe;
             if (reply->error() == QNetworkReply::NoError && probe.loadFromData(bytes)) {
                 QDir().mkpath(dir);
                 QFile f(file);
-                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                    f.write(bytes);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(bytes) == bytes.size()) {
                     f.close();
-                    applyContactAvatar(apiPath, file);
+                    ok = true;
+                }
+            }
+            if (ok) {
+                m_contactAvatarFailures.remove(key);
+                m_contactAvatarFetchedAtMs.insert(key, now);
+                applyContactAvatar(apiPath, file);
+            } else if (status == 404) {
+                // No photo on the Mac: don't ask again until the normal refresh
+                m_contactAvatarFailures.remove(key);
+                m_contactAvatarFetchedAtMs.insert(key, now);
+            } else {
+                AvatarFailure &fail = m_contactAvatarFailures[key];
+                ++fail.attempts;
+                const qint64 backoff = m_avatarRetryBaseMs << qMin(fail.attempts - 1, 6);
+                fail.retryAtMs = now + backoff;
+                if (fail.attempts < kAvatarMaxAttempts) {
+                    QTimer::singleShot(backoff, this, [this]() { fetchContactAvatarsForChats(); });
                 }
             }
             pumpContactAvatarQueue();
@@ -1861,7 +1912,10 @@ QString Backend::extractFirstUrl(const QString &text) {
     const QRegularExpressionMatch match = sharedMessageUrlRegex().match(text);
     if (!match.hasMatch()) return QString();
 
-    QString url = match.captured(0);
+    return normalizeExtractedHrefUrl(stripTrailingUrlPunctuation(match.captured(0)));
+}
+
+QString Backend::stripTrailingUrlPunctuation(QString url) {
     while (!url.isEmpty()) {
         const QChar last = url.back();
         if (last == QLatin1Char('.') || last == QLatin1Char(',') || last == QLatin1Char(')') ||
@@ -1873,7 +1927,7 @@ QString Backend::extractFirstUrl(const QString &text) {
             break;
         }
     }
-    return normalizeExtractedHrefUrl(url);
+    return url;
 }
 
 bool Backend::isYouTubeUrl(const QString &url) {
@@ -5327,6 +5381,16 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
         m_contactNames.insert(normEm, display);
         m_contactRawAddresses.insert(normEm, canonicalizeAddress(em));
     }
+    // Keep the Mac record's other fields, but show the saved name in the info card right away
+    for (const QString &addr : {ph, em}) {
+        if (addr.isEmpty()) continue;
+        const QString norm = normalizeHandle(addr);
+        auto recIt = m_contactRecords.find(norm);
+        if (recIt == m_contactRecords.end()) continue;
+        recIt.value().insert(QStringLiteral("firstName"), fn);
+        recIt.value().insert(QStringLiteral("lastName"), ln);
+        recIt.value().insert(QStringLiteral("displayName"), display);
+    }
     emit contactsChanged();
 
     QJsonObject contactObj;
@@ -5407,7 +5471,8 @@ QVariantMap Backend::conversationMedia(const QString &chatGuid) const {
         const bool fromMe = m.value(QStringLiteral("isFromMe")).toBool();
         // Tapbacks carry no media of their own
         if (!normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString()).isEmpty()) continue;
-        for (const QJsonValue &av : m.value(QStringLiteral("attachments")).toArray()) {
+        // Same cleanup as the timeline: one row per attachment, no plugin payloads
+        for (const QJsonValue &av : deduplicateMessageAttachments(m.value(QStringLiteral("attachments")).toArray())) {
             const QJsonObject a = av.toObject();
             const QString ag = a.value(QStringLiteral("guid")).toString();
             if (ag.isEmpty() || seenAtts.contains(ag) || a.value(QStringLiteral("hideAttachment")).toBool()) continue;
@@ -5424,7 +5489,7 @@ QVariantMap Backend::conversationMedia(const QString &chatGuid) const {
         }
         auto urlIt = sharedMessageUrlRegex().globalMatch(extractMessageText(m));
         while (urlIt.hasNext()) {
-            const QString url = normalizeExtractedHrefUrl(urlIt.next().captured(0));
+            const QString url = normalizeExtractedHrefUrl(stripTrailingUrlPunctuation(urlIt.next().captured(0)));
             if (url.isEmpty() || seenLinks.contains(url)) continue;
             seenLinks.insert(url);
             const QVariantMap preview = m_linkPreviewCache.value(url);

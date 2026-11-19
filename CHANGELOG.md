@@ -12,6 +12,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
   - **Links:** each shared link, opened in your browser.
   - **Files:** other attachments, opened from there.
   - **Group chats** get the same tabs, and Esc closes the card.
+  - Closing the editor (Save or Cancel) or the photo viewer goes back to the card, on the same tab. Switching conversations reloads it for the new chat.
 - **Contact photos instead of initials:** `bluepill-server` serves each contact's AddressBook photo at `/api/v1/contact/<id>/avatar`. That handles the photo stored inline, with or without the leading marker byte, and the newer `Images/` file reference. The client downloads photos only for people you have chats with, 4 at a time, caches them for a day, and shows them as circles in the chat list, the pinned row and the conversation header. Under **On your Mac** it lists every other populated field: middle name, nickname, company, job title, department, all phones and emails with their labels, addresses, URLs, birthday and note. `bluepill-server` now returns these fields from the AddressBook (labels, `middleName`, `jobTitle`, `department`, `addresses`, `urls`, `note`, `birthday`), reading only the columns that exist on that macOS version.
 
 ### Fixed
