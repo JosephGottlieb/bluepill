@@ -196,6 +196,15 @@ bool Backend::writeConfigAtomicallyForTest(const QString &targetPath, const QJso
 
 Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart(autoStart) {
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
+    // Contacts and chats arrive in either order; queue photos once both are here
+    connect(this, &Backend::chatsChanged, this, [this]() {
+        if (m_avatarScanPending) return;
+        m_avatarScanPending = true;
+        QTimer::singleShot(500, this, [this]() {
+            m_avatarScanPending = false;
+            fetchContactAvatarsForChats();
+        });
+    });
     if (QClipboard *cb = QGuiApplication::clipboard()) {
         connect(cb, &QClipboard::dataChanged, this, [this]() {
             if (m_clipboardCopySeq) {
@@ -2075,6 +2084,10 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
             }
         }
 
+        const QVariantMap record = c.toVariantMap();
+        // bluepill-server serves AddressBook photos at /api/v1/contact/<id>/avatar
+        const QString avatarApiPath = c.value(QStringLiteral("avatar")).toString().startsWith(QStringLiteral("/api/v1/contact/"))
+                                          ? c.value(QStringLiteral("avatar")).toString() : QString();
         const QJsonArray phones = c.value(QStringLiteral("phoneNumbers")).toArray();
         for (const QJsonValue &pv : phones) {
             QString addr;
@@ -2087,7 +2100,9 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
             if (!norm.isEmpty()) {
                 m_contactNames.insert(norm, display);
                 m_contactRawAddresses.insert(norm, canonicalizeAddress(addr));
+                m_contactRecords.insert(norm, record);
                 if (!avatarUrl.isEmpty()) m_contactAvatars.insert(norm, avatarUrl);
+                else if (!avatarApiPath.isEmpty()) m_contactAvatarApiPaths.insert(norm, avatarApiPath);
             }
         }
 
@@ -2103,7 +2118,9 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
             if (!norm.isEmpty()) {
                 m_contactNames.insert(norm, display);
                 m_contactRawAddresses.insert(norm, canonicalizeAddress(addr));
+                m_contactRecords.insert(norm, record);
                 if (!avatarUrl.isEmpty()) m_contactAvatars.insert(norm, avatarUrl);
+                else if (!avatarApiPath.isEmpty()) m_contactAvatarApiPaths.insert(norm, avatarApiPath);
             }
         }
     }
@@ -2116,6 +2133,126 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
         emit selectedChatChanged();
     }
     emit contactsChanged();
+    fetchContactAvatarsForChats();
+}
+
+QString Backend::avatarFetchKey(const QString &apiPath) const {
+    // Two relays can both serve /api/v1/contact/uid-1/avatar for different people
+    return QUrl(m_serverUrl).adjusted(QUrl::StripTrailingSlash | QUrl::RemoveUserInfo).toString() + QLatin1Char('|') + apiPath;
+}
+
+QString Backend::avatarCacheFile(const QString &apiPath) const {
+    return QDir::homePath() + QStringLiteral("/.cache/imsg/avatars/") +
+           QString::fromLatin1(QCryptographicHash::hash(avatarFetchKey(apiPath).toUtf8(), QCryptographicHash::Sha1).toHex()) +
+           QStringLiteral(".img");
+}
+
+void Backend::fetchContactAvatarsForChats() {
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    // Only people you have a conversation with; the address book can be huge.
+    for (const ChatEntry &c : std::as_const(m_chats)) {
+        const QStringList handles = c.participantHandles.isEmpty() ? QStringList{c.chatIdentifier} : c.participantHandles;
+        for (const QString &h : handles) {
+            const QString norm = normalizeHandle(h);
+            if (norm.isEmpty()) continue;
+            const QString apiPath = m_contactAvatarApiPaths.value(norm);
+            if (apiPath.isEmpty() || m_contactAvatarQueue.contains(apiPath)) continue;
+            const QString key = avatarFetchKey(apiPath);
+            if (m_contactAvatarInFlight.contains(key)) continue;
+            // Installed (or confirmed 404) and fresh: nothing to do. Stale photos stay visible while they refresh.
+            const auto fetched = m_contactAvatarFetchedAtMs.constFind(key);
+            if (fetched != m_contactAvatarFetchedAtMs.constEnd() &&
+                now - fetched.value() < kAvatarRefreshMs) continue;
+            const auto failure = m_contactAvatarFailures.constFind(key);
+            if (failure != m_contactAvatarFailures.constEnd() &&
+                (failure->attempts >= kAvatarMaxAttempts || now < failure->retryAtMs)) continue;
+            m_contactAvatarQueue.append(apiPath);
+        }
+    }
+    pumpContactAvatarQueue();
+}
+
+void Backend::pumpContactAvatarQueue() {
+    while (m_contactAvatarsInFlight < 4 && !m_contactAvatarQueue.isEmpty()) {
+        const QString apiPath = m_contactAvatarQueue.takeFirst();
+        const QString key = avatarFetchKey(apiPath);
+        if (m_contactAvatarInFlight.contains(key)) continue;
+        const QString file = avatarCacheFile(apiPath);
+        const QString dir = QFileInfo(file).absolutePath();
+        const QFileInfo fi(file);
+        const bool haveFetched = m_contactAvatarFetchedAtMs.contains(key);
+        if (!haveFetched && fi.exists() && fi.size() > 0 &&
+            fi.lastModified().msecsTo(QDateTime::currentDateTime()) < kAvatarRefreshMs) {
+            // Fresh copy from this relay on disk: no request
+            m_contactAvatarFetchedAtMs.insert(key, fi.lastModified().toMSecsSinceEpoch());
+            applyContactAvatar(apiPath, file);
+            continue;
+        }
+        m_contactAvatarInFlight.insert(key);
+        ++m_contactAvatarsInFlight;
+        const quint64 genAtDispatch = m_serverEndpointGeneration;
+        const QString endpointAtDispatch = m_serverUrl;
+        QNetworkReply *reply = m_mediaNam.get(makeRequest(apiPath));
+        connect(reply, &QNetworkReply::finished, this, [this, reply, apiPath, key, dir, file, genAtDispatch, endpointAtDispatch]() {
+            reply->deleteLater();
+            --m_contactAvatarsInFlight;
+            m_contactAvatarInFlight.remove(key);
+            if (genAtDispatch != m_serverEndpointGeneration || endpointAtDispatch != m_serverUrl) {
+                pumpContactAvatarQueue();
+                return;
+            }
+            const QByteArray bytes = reply->readAll();
+            const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const qint64 now = QDateTime::currentMSecsSinceEpoch();
+            bool ok = false;
+            QImage probe;
+            if (reply->error() == QNetworkReply::NoError && probe.loadFromData(bytes)) {
+                QDir().mkpath(dir);
+                QFile f(file);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate) && f.write(bytes) == bytes.size()) {
+                    f.close();
+                    ok = true;
+                }
+            }
+            if (ok) {
+                m_contactAvatarFailures.remove(key);
+                m_contactAvatarFetchedAtMs.insert(key, now);
+                applyContactAvatar(apiPath, file);
+            } else if (status == 404) {
+                // No photo on the Mac: don't ask again until the normal refresh
+                m_contactAvatarFailures.remove(key);
+                m_contactAvatarFetchedAtMs.insert(key, now);
+            } else {
+                AvatarFailure &fail = m_contactAvatarFailures[key];
+                ++fail.attempts;
+                const qint64 backoff = m_avatarRetryBaseMs << qMin(fail.attempts - 1, 6);
+                fail.retryAtMs = now + backoff;
+                if (fail.attempts < kAvatarMaxAttempts) {
+                    QTimer::singleShot(backoff, this, [this]() { fetchContactAvatarsForChats(); });
+                }
+            }
+            pumpContactAvatarQueue();
+        });
+    }
+}
+
+void Backend::applyContactAvatar(const QString &apiPath, const QString &file) {
+    const QString url = QUrl::fromLocalFile(file).toString();
+    for (auto it = m_contactAvatarApiPaths.constBegin(); it != m_contactAvatarApiPaths.constEnd(); ++it) {
+        if (it.value() == apiPath) m_contactAvatars.insert(it.key(), url);
+    }
+    // Coalesce: many photos arrive together; refresh the lists once.
+    if (!m_avatarRefreshPending) {
+        m_avatarRefreshPending = true;
+        QTimer::singleShot(150, this, [this]() {
+            m_avatarRefreshPending = false;
+            for (ChatEntry &c : m_chats) rebuildChatPresentation(c);
+            emit chatsChanged();
+            emit selectedChatChanged();
+            emit contactsChanged();
+        });
+    }
 }
 
 QString Backend::resolveContactName(const QString &handle) const {
@@ -2248,7 +2385,10 @@ QString Backend::extractFirstUrl(const QString &text) {
     const QRegularExpressionMatch match = sharedMessageUrlRegex().match(text);
     if (!match.hasMatch()) return QString();
 
-    QString url = match.captured(0);
+    return normalizeExtractedHrefUrl(stripTrailingUrlPunctuation(match.captured(0)));
+}
+
+QString Backend::stripTrailingUrlPunctuation(QString url) {
     while (!url.isEmpty()) {
         const QChar last = url.back();
         if (last == QLatin1Char('.') || last == QLatin1Char(',') || last == QLatin1Char(')') ||
@@ -2260,7 +2400,7 @@ QString Backend::extractFirstUrl(const QString &text) {
             break;
         }
     }
-    return normalizeExtractedHrefUrl(url);
+    return url;
 }
 
 bool Backend::isYouTubeUrl(const QString &url) {
@@ -5765,6 +5905,16 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
         m_contactNames.insert(normEm, display);
         m_contactRawAddresses.insert(normEm, canonicalizeAddress(em));
     }
+    // Keep the Mac record's other fields, but show the saved name in the info card right away
+    for (const QString &addr : {ph, em}) {
+        if (addr.isEmpty()) continue;
+        const QString norm = normalizeHandle(addr);
+        auto recIt = m_contactRecords.find(norm);
+        if (recIt == m_contactRecords.end()) continue;
+        recIt.value().insert(QStringLiteral("firstName"), fn);
+        recIt.value().insert(QStringLiteral("lastName"), ln);
+        recIt.value().insert(QStringLiteral("displayName"), display);
+    }
     emit contactsChanged();
 
     QJsonObject contactObj;
@@ -5820,6 +5970,114 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
             fetchContactsRemote();
         });
     }
+}
+
+QVariantMap Backend::conversationMedia(const QString &chatGuid) const {
+    // Photos, links and files shared in a conversation (newest first), for the
+    // contact info view's tabs. Uses the merged canonical chat and its siblings.
+    const QString canon = resolveCanonicalChatGuid(chatGuid.isEmpty() ? m_selectedChatGuid : chatGuid);
+    QList<QJsonObject> msgs;
+    for (auto it = m_chatMessagesCache.constBegin(); it != m_chatMessagesCache.constEnd(); ++it) {
+        if (it.key() == canon || isSameConversation(it.key(), canon)) {
+            for (const QJsonObject &m : it.value()) msgs.append(m);
+        }
+    }
+    std::sort(msgs.begin(), msgs.end(), [](const QJsonObject &a, const QJsonObject &b) {
+        return a.value(QStringLiteral("dateCreated")).toVariant().toLongLong() >
+               b.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    });
+    QVariantList photos, links, files;
+    QSet<QString> seenLinks, seenAtts;
+    for (const QJsonObject &m : msgs) {
+        const QString guid = m.value(QStringLiteral("guid")).toString();
+        if (m_deletedMessageGuids.contains(guid) || isMessageDeletedOrRetracted(m)) continue;
+        const qint64 date = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        const bool fromMe = m.value(QStringLiteral("isFromMe")).toBool();
+        // Tapbacks carry no media of their own
+        if (!normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString()).isEmpty()) continue;
+        // Same cleanup as the timeline: one row per attachment, no plugin payloads
+        for (const QJsonValue &av : deduplicateMessageAttachments(m.value(QStringLiteral("attachments")).toArray())) {
+            const QJsonObject a = av.toObject();
+            const QString ag = a.value(QStringLiteral("guid")).toString();
+            if (ag.isEmpty() || seenAtts.contains(ag) || a.value(QStringLiteral("hideAttachment")).toBool()) continue;
+            seenAtts.insert(ag);
+            const QString name = a.value(QStringLiteral("transferName")).toString();
+            const QString mime = a.value(QStringLiteral("mimeType")).toString();
+            const QString path = lookupCachedAttachmentPath(m_attachmentPaths, ag);
+            QVariantMap item{{QStringLiteral("guid"), ag}, {QStringLiteral("messageGuid"), guid},
+                             {QStringLiteral("name"), name}, {QStringLiteral("mimeType"), mime},
+                             {QStringLiteral("date"), date}, {QStringLiteral("fromMe"), fromMe},
+                             {QStringLiteral("localUrl"), (!path.isEmpty() && QFileInfo::exists(path)) ? QUrl::fromLocalFile(path).toString() : QString()}};
+            if (isImageMimeOrExt(mime, name)) photos.append(item);
+            else if (!mime.startsWith(QStringLiteral("audio/")) || name.isEmpty() || !name.endsWith(QStringLiteral(".caf"), Qt::CaseInsensitive)) files.append(item);
+        }
+        auto urlIt = sharedMessageUrlRegex().globalMatch(extractMessageText(m));
+        while (urlIt.hasNext()) {
+            const QString url = normalizeExtractedHrefUrl(stripTrailingUrlPunctuation(urlIt.next().captured(0)));
+            if (url.isEmpty() || seenLinks.contains(url)) continue;
+            seenLinks.insert(url);
+            const QVariantMap preview = m_linkPreviewCache.value(url);
+            links.append(QVariantMap{{QStringLiteral("url"), url}, {QStringLiteral("messageGuid"), guid},
+                                     {QStringLiteral("title"), preview.value(QStringLiteral("title")).toString()},
+                                     {QStringLiteral("host"), QUrl(url).host()},
+                                     {QStringLiteral("date"), date}, {QStringLiteral("fromMe"), fromMe}});
+        }
+    }
+    return QVariantMap{{QStringLiteral("photos"), photos}, {QStringLiteral("links"), links}, {QStringLiteral("files"), files}};
+}
+
+QVariantMap Backend::contactDetails(const QString &address) const {
+    QVariantMap out;
+    const QVariantMap rec = m_contactRecords.value(normalizeHandle(address));
+    out.insert(QStringLiteral("found"), !rec.isEmpty());
+    if (rec.isEmpty()) return out;
+    auto str = [&rec](const char *key) { return rec.value(QString::fromLatin1(key)).toString().trimmed(); };
+    out.insert(QStringLiteral("firstName"), str("firstName"));
+    out.insert(QStringLiteral("lastName"), str("lastName"));
+
+    // Every populated field, in Contacts' order, for the "On your Mac" list
+    QVariantList rows;
+    auto addRow = [&rows](const QString &label, const QString &value) {
+        if (value.trimmed().isEmpty()) return;
+        rows.append(QVariantMap{{QStringLiteral("label"), label}, {QStringLiteral("value"), value.trimmed()}});
+    };
+    addRow(QStringLiteral("Middle name"), str("middleName"));
+    addRow(QStringLiteral("Nickname"), str("nickname"));
+    addRow(QStringLiteral("Company"), str("organization"));
+    addRow(QStringLiteral("Job title"), str("jobTitle"));
+    addRow(QStringLiteral("Department"), str("department"));
+    auto addList = [&](const char *key, const QString &kind, QString *firstValue) {
+        for (const QVariant &v : rec.value(QString::fromLatin1(key)).toList()) {
+            const QVariantMap m = v.toMap();
+            const QString value = v.typeId() == QMetaType::QString ? v.toString() : m.value(QStringLiteral("address")).toString();
+            const QString label = m.value(QStringLiteral("label")).toString().trimmed();
+            if (firstValue && firstValue->isEmpty()) *firstValue = value.trimmed();
+            addRow(label.isEmpty() ? kind : QStringLiteral("%1 (%2)").arg(kind, label), value);
+        }
+    };
+    QString firstPhone, firstEmail;
+    addList("phoneNumbers", QStringLiteral("Phone"), &firstPhone);
+    addList("emails", QStringLiteral("Email"), &firstEmail);
+    addList("addresses", QStringLiteral("Address"), nullptr);
+    addList("urls", QStringLiteral("URL"), nullptr);
+    const QString birthday = str("birthday");
+    if (!birthday.isEmpty()) {
+        const QDate d = QDate::fromString(birthday, Qt::ISODate);
+        if (d.isValid()) addRow(QStringLiteral("Birthday"), QLocale().toString(d, QLocale::LongFormat));
+        else if (birthday.startsWith(QStringLiteral("--"))) {
+            const QDate md = QDate::fromString(QStringLiteral("2000") + birthday.mid(1), Qt::ISODate);
+            addRow(QStringLiteral("Birthday"), md.isValid() ? QLocale().toString(md, QStringLiteral("MMMM d")) : birthday);
+        } else addRow(QStringLiteral("Birthday"), birthday);
+    }
+    addRow(QStringLiteral("Note"), str("note"));
+    out.insert(QStringLiteral("rows"), rows);
+
+    // Prefill the editable phone/email with the chat's own address when it's one of them
+    const QString canon = canonicalizeAddress(address);
+    const bool isEmail = address.contains(QLatin1Char('@'));
+    out.insert(QStringLiteral("phone"), isEmail ? firstPhone : (canon.isEmpty() ? firstPhone : canon));
+    out.insert(QStringLiteral("email"), isEmail ? address.trimmed() : firstEmail);
+    return out;
 }
 
 void Backend::syncContactsNow() {
@@ -7355,6 +7613,13 @@ void Backend::pumpAttachmentDownloadQueue() {
     }
 }
 
+QString Backend::cachedAttachmentUrl(const QString &attachmentGuid) const {
+    if (attachmentGuid.isEmpty()) return QString();
+    const QString path = lookupCachedAttachmentPath(m_attachmentPaths, attachmentGuid);
+    if (path.isEmpty() || !QFileInfo::exists(path)) return QString();
+    return QUrl::fromLocalFile(path).toString();
+}
+
 void Backend::downloadAttachment(const QString &attachmentGuid, const QString &transferName, bool highPriority) {
     if (attachmentGuid.isEmpty() ||
         m_downloadingAttachments.contains(attachmentGuid) ||
@@ -7382,7 +7647,6 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         m_attachmentRetryCount.remove(attGuid);
         insertCachedAttachmentPath(m_attachmentPaths, attGuid, effectivePath);
         const QString localUrl = QUrl::fromLocalFile(effectivePath).toString();
-        bool anyUpdated = false;
         for (int i = 0; i < m_messages.size(); ++i) {
             QVariantMap map = m_messages[i].toMap();
             bool msgModified = false;
@@ -7414,16 +7678,14 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
             };
             updateAttList(QStringLiteral("imageAttachments"));
             updateAttList(QStringLiteral("attachments"));
+            // Updated in place without messagesChanged(): the timeline's model is
+            // a plain list, so that signal makes ListView destroy and rebuild every
+            // delegate (one full rebuild per image while a chat opens). Visible
+            // delegates pick the file up from attachmentReady below; delegates
+            // created later ask cachedAttachmentUrl().
             if (msgModified) {
-                if (!anyUpdated) {
-                    emit aboutToChangeMessages();
-                }
                 m_messages[i] = map;
-                anyUpdated = true;
             }
-        }
-        if (anyUpdated) {
-            emit messagesChanged();
         }
         bool photosEvictionResolved = false;
         for (int i = 0; i < m_icloudPhotos.size(); ++i) {
@@ -8622,6 +8884,90 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
         partIndex = computeTextPartIndex(m_chatMessagesCache.value(resolvedChatGuid).value(resolvedMsgGuid));
     }
 
+    const QJsonObject msgObj = findCachedMessage(resolvedMsgGuid);
+    const bool offline = m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() ||
+                         resolvedMsgGuid.startsWith(QStringLiteral("temp-"));
+    if (offline) {
+        applyLocalUnsend(resolvedMsgGuid, resolvedChatGuid);
+        emit toastMessage(QStringLiteral("↩ Message unsent"));
+        return;
+    }
+    const qint64 sentAt = msgObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    if (sentAt > 0 && QDateTime::currentMSecsSinceEpoch() - sentAt > kMessageEditWindowMs) {
+        emit toastMessage(QStringLiteral("⚠ Messages can only be unsent within 2 minutes"));
+        return;
+    }
+
+    // The Mac's helper needs the chat the message is actually in (a merged
+    // sibling chat may have a different GUID than the one shown).
+    const QString sendChatGuid = messageOwnChatGuid(msgObj, resolvedChatGuid);
+    const QString encodedMsgGuid = QString::fromUtf8(QUrl::toPercentEncoding(resolvedMsgGuid));
+    QJsonObject body;
+    body.insert(QStringLiteral("chatGuid"), sendChatGuid);
+    body.insert(QStringLiteral("partIndex"), partIndex);
+
+    QNetworkRequest unsendReq = makeRequest(QStringLiteral("/api/v1/message/%1/unsend").arg(encodedMsgGuid));
+    unsendReq.setPriority(QNetworkRequest::HighPriority);
+    QNetworkReply *reply = m_sendNam.post(unsendReq, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, resolvedMsgGuid, resolvedChatGuid, sendChatGuid, encodedMsgGuid]() {
+        reply->deleteLater();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QJsonObject root;
+        const bool jsonOk = parseJsonReplyObject(reply->readAll(), &root);
+        if (reply->error() != QNetworkReply::NoError || httpStatus != 200 || !jsonOk) {
+            // Keep the message: it's still on everyone's devices.
+            QString why = root.value(QStringLiteral("message")).toString().trimmed();
+            if (why.isEmpty()) why = (reply->error() == QNetworkReply::NoError && !jsonOk)
+                                         ? QStringLiteral("unexpected reply from the server")
+                                         : reply->errorString();
+            emit toastMessage(QStringLiteral("⚠ Couldn't unsend: %1").arg(why));
+            return;
+        }
+        applyLocalUnsend(resolvedMsgGuid, resolvedChatGuid);
+        emit toastMessage(QStringLiteral("↩ Message unsent across iCloud devices"));
+        if (!sendChatGuid.isEmpty()) {
+            const QString encodedChatGuid = QString::fromUtf8(QUrl::toPercentEncoding(sendChatGuid));
+            QNetworkRequest delReq = makeRequest(QStringLiteral("/api/v1/chat/%1/%2").arg(encodedChatGuid, encodedMsgGuid));
+            delReq.setPriority(QNetworkRequest::HighPriority);
+            QNetworkReply *delReply = m_sendNam.deleteResource(delReq);
+            connect(delReply, &QNetworkReply::finished, delReply, &QNetworkReply::deleteLater);
+        }
+    });
+}
+
+bool Backend::parseJsonReplyObject(const QByteArray &bytes, QJsonObject *out) {
+    QJsonParseError err;
+    const QJsonDocument doc = QJsonDocument::fromJson(bytes, &err);
+    if (err.error != QJsonParseError::NoError || !doc.isObject()) return false;
+    if (out) *out = doc.object();
+    return true;
+}
+
+QJsonObject Backend::findCachedMessage(const QString &messageGuid, QString *chatKey) const {
+    for (auto it = m_chatMessagesCache.constBegin(); it != m_chatMessagesCache.constEnd(); ++it) {
+        const auto found = it.value().constFind(messageGuid);
+        if (found != it.value().constEnd()) {
+            if (chatKey) *chatKey = it.key();
+            return found.value();
+        }
+    }
+    if (chatKey) chatKey->clear();
+    return QJsonObject();
+}
+
+QString Backend::messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid) {
+    const QString original = msgObj.value(QStringLiteral("originalChatGuid")).toString().trimmed();
+    if (!original.isEmpty()) return original;
+    const QJsonArray chats = msgObj.value(QStringLiteral("chats")).toArray();
+    for (const QJsonValue &v : chats) {
+        const QString g = v.toObject().value(QStringLiteral("guid")).toString().trimmed();
+        if (!g.isEmpty()) return g;
+    }
+    const QString direct = msgObj.value(QStringLiteral("chatGuid")).toString().trimmed();
+    return direct.isEmpty() ? fallbackChatGuid : direct;
+}
+
+void Backend::applyLocalUnsend(const QString &resolvedMsgGuid, const QString &resolvedChatGuid) {
     m_deletedMessageGuids.insert(resolvedMsgGuid);
     m_pendingDeliveryMessages.remove(resolvedMsgGuid);
     m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
@@ -8661,31 +9007,117 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
     }
     saveAppState();
     saveMessagesCache();
-    emit toastMessage(QStringLiteral("↩ Message unsent across iCloud devices"));
+}
 
-    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || resolvedMsgGuid.startsWith(QStringLiteral("temp-"))) {
+void Backend::editMessage(const QString &messageGuid, const QString &newText) {
+    const QString msgGuid = messageGuid.trimmed();
+    const QString text = newText.trimmed();
+    if (msgGuid.isEmpty() || text.isEmpty()) return;
+    QString chatKey;
+    QJsonObject msgObj = findCachedMessage(msgGuid, &chatKey);
+    if (msgObj.isEmpty() || !msgObj.value(QStringLiteral("isFromMe")).toBool()) return;
+    const QString oldText = msgObj.value(QStringLiteral("text")).toString();
+    if (extractMessageText(msgObj) == text) return;
+    const qint64 sentAt = msgObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    if (sentAt > 0 && QDateTime::currentMSecsSinceEpoch() - sentAt > kMessageEditWindowMs) {
+        emit toastMessage(QStringLiteral("⚠ Messages can only be edited within 2 minutes"));
         return;
     }
+    const QJsonValue oldDateEdited = msgObj.value(QStringLiteral("dateEdited"));
+    const QJsonValue oldAttributed = msgObj.value(QStringLiteral("attributedBody"));
+    const bool online = !(m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || msgGuid.startsWith(QStringLiteral("temp-")));
+    // Show the edit right away (the old attributed body would override the new text)
+    applyEditedText(chatKey, msgGuid, text, QJsonValue(QDateTime::currentMSecsSinceEpoch()), QJsonValue(QJsonValue::Undefined));
+    if (!online) return;
 
-    const QString encodedMsgGuid = QString::fromUtf8(QUrl::toPercentEncoding(resolvedMsgGuid));
+    EditTracking &track = m_editTracking[msgGuid];
+    if (!track.inFlight && !track.hasQueued) {
+        track.confirmed = EditSnapshot{oldText, oldDateEdited, oldAttributed};
+        track.chatKey = chatKey;
+        track.sendChatGuid = messageOwnChatGuid(msgObj, chatKey);
+        track.partIndex = computeTextPartIndex(msgObj);
+    }
+    track.shownText = text;
+    if (track.inFlight) {
+        // Sent after the one in flight finishes, so the Mac applies them in order
+        track.hasQueued = true;
+        track.queuedText = text;
+        return;
+    }
+    sendEditRequest(msgGuid, text);
+}
+
+void Backend::applyEditedText(const QString &chatKey, const QString &msgGuid, const QString &t,
+                              const QJsonValue &dateEdited, const QJsonValue &attributed) {
+    auto chatIt = m_chatMessagesCache.find(chatKey);
+    if (chatIt == m_chatMessagesCache.end()) return;
+    auto msgIt = chatIt.value().find(msgGuid);
+    if (msgIt == chatIt.value().end()) return;
+    QJsonObject m = msgIt.value();
+    m.insert(QStringLiteral("text"), t);
+    if (dateEdited.isUndefined()) m.remove(QStringLiteral("dateEdited"));
+    else m.insert(QStringLiteral("dateEdited"), dateEdited);
+    if (attributed.isUndefined()) m.remove(QStringLiteral("attributedBody"));
+    else m.insert(QStringLiteral("attributedBody"), attributed);
+    msgIt.value() = m;
+    if (!m_selectedChatGuid.isEmpty() &&
+        (chatKey == m_selectedChatGuid || isSameConversation(chatKey, m_selectedChatGuid))) {
+        rebuildSelectedChatMessages();
+    }
+    refreshChatPreviewFromCache(chatKey);
+    saveMessagesCache();
+}
+
+void Backend::sendEditRequest(const QString &msgGuid, const QString &text) {
+    auto trackIt = m_editTracking.find(msgGuid);
+    if (trackIt == m_editTracking.end()) return;
+    trackIt->inFlight = true;
     QJsonObject body;
-    body.insert(QStringLiteral("partIndex"), partIndex);
-
-    QNetworkRequest unsendReq = makeRequest(QStringLiteral("/api/v1/message/%1/unsend").arg(encodedMsgGuid));
-    unsendReq.setPriority(QNetworkRequest::HighPriority);
-    QNetworkReply *reply = m_sendNam.post(
-        unsendReq,
-        QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, resolvedChatGuid, encodedMsgGuid]() {
+    body.insert(QStringLiteral("chatGuid"), trackIt->sendChatGuid);
+    body.insert(QStringLiteral("editedMessage"), text);
+    body.insert(QStringLiteral("backwardsCompatibilityMessage"), QStringLiteral("Edited to “%1”").arg(text));
+    body.insert(QStringLiteral("partIndex"), trackIt->partIndex);
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(msgGuid));
+    QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/message/%1/edit").arg(encoded));
+    req.setPriority(QNetworkRequest::HighPriority);
+    QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, msgGuid, text]() {
         reply->deleteLater();
-        if (!resolvedChatGuid.isEmpty()) {
-            const QString encodedChatGuid = QString::fromUtf8(QUrl::toPercentEncoding(resolvedChatGuid));
-            const QString delPath = QStringLiteral("/api/v1/chat/%1/%2").arg(encodedChatGuid, encodedMsgGuid);
-            QNetworkRequest delReq = makeRequest(delPath);
-            delReq.setPriority(QNetworkRequest::HighPriority);
-            QNetworkReply *delReply = m_sendNam.deleteResource(delReq);
-            connect(delReply, &QNetworkReply::finished, delReply, &QNetworkReply::deleteLater);
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QJsonObject root;
+        const bool jsonOk = parseJsonReplyObject(reply->readAll(), &root);
+        const bool ok = reply->error() == QNetworkReply::NoError && httpStatus == 200 && jsonOk;
+        ++m_editRepliesProcessed;
+        auto trackIt = m_editTracking.find(msgGuid);
+        if (trackIt == m_editTracking.end()) return;
+        EditTracking &track = trackIt.value();
+        track.inFlight = false;
+        // Requests are sequential, so a success is the Mac's current text
+        if (ok) track.confirmed = EditSnapshot{text, QJsonValue(QDateTime::currentMSecsSinceEpoch()), QJsonValue(QJsonValue::Undefined)};
+        QString why;
+        if (!ok) {
+            why = root.value(QStringLiteral("message")).toString().trimmed();
+            if (why.isEmpty()) why = (reply->error() == QNetworkReply::NoError && !jsonOk)
+                                         ? QStringLiteral("unexpected reply from the server")
+                                         : reply->errorString();
         }
+        if (track.hasQueued) {
+            track.hasQueued = false;
+            const QString next = track.queuedText;
+            if (!ok) emit toastMessage(QStringLiteral("⚠ An earlier edit didn't go through: %1").arg(why));
+            sendEditRequest(msgGuid, next);
+            return;
+        }
+        const EditTracking settled = track;
+        m_editTracking.erase(trackIt);
+        if (ok) return;
+        // Roll back only if the message still shows our edit (a sync from another
+        // device may have replaced it with something newer)
+        const QString nowShown = findCachedMessage(msgGuid).value(QStringLiteral("text")).toString();
+        if (nowShown == settled.shownText) {
+            applyEditedText(settled.chatKey, msgGuid, settled.confirmed.text, settled.confirmed.dateEdited, settled.confirmed.attributed);
+        }
+        emit toastMessage(QStringLiteral("⚠ Couldn't edit: %1").arg(why));
     });
 }
 

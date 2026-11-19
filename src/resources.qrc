@@ -2,6 +2,7 @@
     <qresource prefix="/">
         <file>Main.qml</file>
         <file>ThemedComboBox.qml</file>
+        <file>RoundAvatar.qml</file>
         <file>bluepill.svg</file>
         <file>i18n/da.json</file>
     </qresource>
