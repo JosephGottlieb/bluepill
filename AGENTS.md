@@ -102,9 +102,14 @@ EOF_CFG
     chmod 600 "${CONFIG_FILE}"
 fi
 
-# NOTE: bluepill-server reads only "password" from server.json; host/port come from
-# --host/--port (or BLUEPILL_HOST/BLUEPILL_PORT). Without --host it binds 127.0.0.1,
-# so add --host 0.0.0.0 (or the Mac's Tailscale IP) to the LaunchAgent for remote clients.
+# NOTE: bluepill-server reads "password" and the iCloud module toggles (enableNotes,
+# enableCalendar, enablePhotos) from server.json, but NOT "host"/"port": those come from
+# --host/--port (or BLUEPILL_HOST/BLUEPILL_PORT). Without --host it binds 127.0.0.1.
+# For remote Linux clients, set BLUEPILL_BIND_HOST to the Mac's Tailscale IP
+# (`tailscale ip -4`; traffic is WireGuard-encrypted). Avoid 0.0.0.0 on untrusted LANs:
+# the relay speaks plain HTTP, so the password would cross the LAN in cleartext.
+# Use a TLS reverse proxy instead (docs/INSTALLATION_AND_OPERATIONS_GUIDE.md).
+BIND_HOST="${BLUEPILL_BIND_HOST:-127.0.0.1}"
 
 # 2.4 Run Server Self-Test
 timeout 15s bluepill-server --selftest </dev/null
@@ -127,6 +132,8 @@ cat << EOF_PL > "${PLIST}"
     <array>
         <string>${BIN_PATH}</string>
         <string>serve</string>
+        <string>--host</string>
+        <string>${BIND_HOST}</string>
         <string>--port</string>
         <string>${PORT}</string>
         <string>--password</string>
@@ -151,7 +158,9 @@ timeout 10s launchctl bootstrap "gui/$(id -u)" "${PLIST}" </dev/null
 sleep 2
 
 # 2.6 Verify Relay Health
-timeout 5s curl -s -f "http://127.0.0.1:${PORT}/api/v1/ping?password=${PWD}" </dev/null
+# Health check against the bound address (0.0.0.0 is checked via loopback)
+CHECK_HOST="${BIND_HOST/#0.0.0.0/127.0.0.1}"
+timeout 5s curl -s -f "http://${CHECK_HOST}:${PORT}/api/v1/ping?password=${PWD}" </dev/null
 echo "[✓] macOS Relay Server successfully deployed and running."
 ```
 
@@ -184,6 +193,8 @@ mkdir -p "${CLIENT_DIR}"
 chmod 700 "${CLIENT_DIR}"
 
 CLIENT_CFG="${CLIENT_DIR}/config.json"
+# Use the address/port the relay actually listens on: the Mac's BIND_HOST and the
+# "port" from its server.json (older installs may still use 1234; Homebrew uses 1235).
 RELAY_URL="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"
 RELAY_TOKEN="${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}"
 
@@ -236,7 +247,7 @@ echo "[✓] Linux Desktop Client configured."
 Run this verification block to report final status:
 
 ```bash
-RELAY_ADDR="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"
+RELAY_ADDR="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"  # same address/port as RELAY_URL above
 RELAY_PWD="${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}"
 
 # 1. Ping

@@ -111,7 +111,9 @@ else
 fi
 ```
 
-> **Note:** `bluepill-server` reads only `password` from `server.json`. The listen address and port come from `--host` / `--port` (or `BLUEPILL_HOST` / `BLUEPILL_PORT`), so the LaunchAgent below binds to `127.0.0.1` unless you add `--host 0.0.0.0` (or the Mac's Tailscale IP) to `ProgramArguments`.
+> **Note:** `bluepill-server` reads `password` and the iCloud module toggles (`enableNotes`, `enableCalendar`, `enablePhotos`) from `server.json`, but **not** `host`/`port`. Those come from `--host` / `--port` (or `BLUEPILL_HOST` / `BLUEPILL_PORT`), and without `--host` the relay listens on `127.0.0.1` only. For remote Linux clients, set `BLUEPILL_BIND_HOST` to the Mac's Tailscale IP (`tailscale ip -4`), which keeps traffic WireGuard-encrypted.
+>
+> **Security:** the relay speaks plain HTTP. Binding to `0.0.0.0` sends the relay password across your LAN in cleartext. On networks you don't fully trust, bind to the Tailscale IP or put a TLS reverse proxy in front (see [Reverse Proxy & TLS Termination](INSTALLATION_AND_OPERATIONS_GUIDE.md#reverse-proxy--tls-termination)).
 
 ### Step 2.4: Execute Built-In Self-Test
 Verify that typedstream serialization and database engines pass all assertions:
@@ -125,6 +127,7 @@ Configure automatic startup on user login:
 
 ```bash
 PLIST_PATH="${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist"
+BIND_HOST="${BLUEPILL_BIND_HOST:-127.0.0.1}"   # see the note above
 BINARY_PATH="$(which bluepill-server)"
 SERVER_PORT=$(jq -r '.port // 1235' "${CONFIG_FILE}")
 SERVER_PWD=$(jq -r '.password // ""' "${CONFIG_FILE}")
@@ -141,6 +144,8 @@ cat << EOF_PL > "${PLIST_PATH}"
     <array>
         <string>${BINARY_PATH}</string>
         <string>serve</string>
+        <string>--host</string>
+        <string>${BIND_HOST}</string>
         <string>--port</string>
         <string>${SERVER_PORT}</string>
         <string>--password</string>
@@ -168,7 +173,9 @@ timeout 10s launchctl bootstrap "gui/$(id -u)" "${PLIST_PATH}" </dev/null
 sleep 2
 
 # Verify local REST heartbeat
-timeout 5s curl -s -f "http://127.0.0.1:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}" </dev/null
+# Verify against the bound address (0.0.0.0 is checked via loopback)
+CHECK_HOST="${BIND_HOST/#0.0.0.0/127.0.0.1}"
+timeout 5s curl -s -f "http://${CHECK_HOST}:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}" </dev/null
 ```
 
 ---
@@ -219,7 +226,9 @@ mkdir -p "${CLIENT_CONFIG_DIR}"
 chmod 700 "${CLIENT_CONFIG_DIR}"
 
 CLIENT_CONFIG="${CLIENT_CONFIG_DIR}/config.json"
-RELAY_URL="http://127.0.0.1:1235" # Or ssh://user@mac-host / https://relay.example.com
+# Use the relay's real address and the "port" from its server.json (older installs
+# may still use 1234; Homebrew uses 1235). Or ssh://user@mac-host / https://relay.example.com:443
+RELAY_URL="http://127.0.0.1:1235"
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 
 cat << EOF_CLI > "${CLIENT_CONFIG}"
@@ -281,7 +290,7 @@ fi
 Run this non-interactive verification script to validate complete connectivity across all components:
 
 ```bash
-RELAY_HOST="127.0.0.1:1235" # Or your configured relay address
+RELAY_HOST="127.0.0.1:1235" # Same host:port as RELAY_URL in Step 3.2
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 
 echo "=== BluePill End-to-End Validation ==="

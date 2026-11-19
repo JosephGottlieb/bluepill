@@ -449,7 +449,10 @@ chmod 600 ~/.config/bluepill/server.json
 ```
 
 > [!NOTE]
-> `bluepill-server` reads the `password` from `server.json`, but it takes its **listen address and port from the command line** (`--host` / `--port`, or `BLUEPILL_HOST` / `BLUEPILL_PORT`). Without `--host` it listens on `127.0.0.1` only, so Linux clients on your LAN or tailnet can't reach it. To accept remote connections, start it with `--host 0.0.0.0` (or the Mac's LAN / Tailscale IP). The Homebrew service listens on port `1235`, which is the port the Linux client uses when you don't enter one.
+> `bluepill-server` reads `password` and the iCloud module toggles (`enableNotes`, `enableCalendar`, `enablePhotos`) from `server.json`, but it takes its **listen address and port from the command line** (`--host` / `--port`, or `BLUEPILL_HOST` / `BLUEPILL_PORT`). Without `--host` it listens on `127.0.0.1` only, so Linux clients on your LAN or tailnet can't reach it. To accept remote connections, start it with `--host <the Mac's Tailscale IP>` (recommended; WireGuard-encrypted) or `--host 0.0.0.0`. The Homebrew service listens on port `1235`, which is the port the Linux client uses when you don't enter one.
+
+> [!WARNING]
+> The relay speaks plain HTTP. With `--host 0.0.0.0`, the relay password and your messages cross the LAN unencrypted. On any network you don't fully trust, bind to the Tailscale IP or use [Reverse Proxy & TLS Termination](#reverse-proxy--tls-termination).
 
 #### 2. Run Built-In Self-Test
 Verify timestamp conversion, typedstream parsing, and database bindings:
@@ -715,8 +718,11 @@ If the macOS host enters deep sleep and suspends network daemons:
 sudo pmset -c sleep 0
 sudo pmset -c disablesleep 1
 
-# Or run bluepill-server wrapped in caffeinate
+# Or run bluepill-server wrapped in caffeinate. Stop the Homebrew service first,
+# because it already holds port 1235, then start it again when you're done:
+brew services stop bluepill
 caffeinate -s bluepill-server serve --port 1235
+brew services start bluepill
 ```
 
 ### Runbook 3: Diagnosing Private API (:45670) Unavailability
