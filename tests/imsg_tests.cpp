@@ -2428,6 +2428,13 @@ private slots:
         pending.insert(QStringLiteral("guid"), QStringLiteral("temp-123"));
         QVERIFY(!allowed(pending));
 
+        // Hovering doesn't open the action bar; right-click does
+        win->setProperty("hoveredActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
+        QMetaObject::invokeMethod(win, "clearActionMenu");
+
         // Edit mode: Save edits the message instead of sending a new one
         QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("The typo, fixed")));
         QCOMPARE(win->property("editTargetGuid").toString(), QStringLiteral("m-new"));

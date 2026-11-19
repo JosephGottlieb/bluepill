@@ -60,7 +60,9 @@ ApplicationWindow {
     property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
-    readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== "" ? pinnedActionMessageGuid : hoveredActionMessageGuid
+    // The tapback / reply / copy / delete bar opens on right-click only (hovering
+    // a message neither outlines it nor shows the bar).
+    readonly property string activeActionMessageGuid: pinnedActionMessageGuid
 
     function clearActionMenu() {
         pinnedActionMessageGuid = ""
@@ -4324,23 +4326,14 @@ ApplicationWindow {
                                         id: bubbleClickArea
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        cursorShape: Qt.PointingHandCursor
                                         onClicked: (mouse) => {
                                             if (mouse.button === Qt.RightButton) {
-                                                if (msgText.selectedText && msgText.selectedText.length > 0) {
-                                                    backend.copyToClipboard(msgText.selectedText, "selection")
-                                                } else if (modelData.hasImageAttachment) {
-                                                    msgDelegate.copyPrimaryImageAttachment()
-                                                } else if ((modelData.text || "").length > 0) {
-                                                    backend.copyToClipboard(modelData.text, "message")
-                                                }
+                                                // Right-click opens (or closes) this message's actions
+                                                root.pinnedActionMessageGuid = (root.pinnedActionMessageGuid === modelData.guid) ? "" : modelData.guid
                                                 return
                                             }
-                                            if (root.pinnedActionMessageGuid === modelData.guid) {
-                                                root.pinnedActionMessageGuid = ""
-                                            } else {
-                                                root.pinnedActionMessageGuid = modelData.guid
-                                            }
+                                            // Left-click just dismisses an open action bar
+                                            if (root.pinnedActionMessageGuid !== "") root.clearActionMenu()
                                         }
                                         onDoubleClicked: (mouse) => {
                                             var cGuid = backend.selectedChatGuid
@@ -4427,7 +4420,9 @@ ApplicationWindow {
                                                     cursorShape: Qt.PointingHandCursor
                                                     onClicked: (mouse) => {
                                                         if (mouse.button === Qt.RightButton) {
-                                                            backend.copyImageToClipboard(parent.resolvedImgUrl, modelData.guid || "")
+                                                            // Same as the bubble: right-click opens the message's actions (Copy is there)
+                                                            var mg = msgDelegate.modelData.guid
+                                                            root.pinnedActionMessageGuid = (root.pinnedActionMessageGuid === mg) ? "" : mg
                                                             return
                                                         }
                                                         var rawList = imageAttachmentRepeater.model || []
