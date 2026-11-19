@@ -15,6 +15,7 @@
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <QSGRendererInterface>
 #include <functional>
 #include <QtTest>
 #include <QScopeGuard>
@@ -2299,10 +2300,10 @@ private slots:
         QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
         const QString qml = QString::fromUtf8(qmlFile.readAll());
 
-        // Verify multi-attachment Repeater, EXIF autoTransform, and portrait aspect ratio in Main.qml
+        // Verify multi-attachment Repeater, EXIF autoTransform, and aspect-fit sizing (no crop) in Main.qml
         QVERIFY(qml.contains(QStringLiteral("id: imageAttachmentRepeater")));
         QVERIFY(qml.contains(QStringLiteral("autoTransform: true")));
-        QVERIFY(qml.contains(QStringLiteral("readonly property bool isPortraitImage")));
+        QVERIFY(qml.contains(QStringLiteral("readonly property real fitScale")));
         QVERIFY(qml.contains(QStringLiteral("msgDelegate.modelData.imageAttachments")));
         QVERIFY(qml.contains(QStringLiteral("function resolveAttachmentUrl(attGuid, initialUrl)")));
 
@@ -3519,6 +3520,234 @@ private slots:
         QQuickItem *tooltipTextItem = findVisualItem(pillItem, QStringLiteral("reactionTooltipText"));
         QVERIFY(tooltipTextItem != nullptr);
         QCOMPARE(tooltipTextItem->property("text").toString(), QStringLiteral("❤️ Alex Rivera, Sam, You"));
+    }
+
+    void testJumboEmojiCountAndAnimatedAttachmentDetection() {
+        auto n = [](const char *t) { return Backend::jumboEmojiCount(QString::fromUtf8(t)); };
+        QCOMPARE(n("😂"), 1);
+        QCOMPARE(n("  ❤️ "), 1);
+        QCOMPARE(n("🎉🔥👍"), 3);
+        QCOMPARE(n("🎉 🔥"), 2);
+        QCOMPARE(n("👍🏽"), 1);            // skin tone modifier
+        QCOMPARE(n("👨‍👩‍👧"), 1);  // ZWJ family is one emoji
+        QCOMPARE(n("🇺🇸"), 1);            // flag (regional indicator pair)
+        QCOMPARE(n("1️⃣"), 1);            // keycap
+        QCOMPARE(n("©️"), 1);             // text-default symbol with VS16
+        QCOMPARE(n("🎉🔥👍😂"), 0);       // more than three: normal bubble
+        QCOMPARE(n("hi 👍"), 0);
+        QCOMPARE(n("👍!"), 0);
+        QCOMPARE(n("1"), 0);
+        QCOMPARE(n("©"), 0);              // no VS16: text
+        QCOMPARE(n("☺︎"), 0);             // explicit text presentation (FE0E)
+        // Exact Unicode emoji properties, not whole blocks
+        QCOMPARE(n("⌚"), 1);             // U+231A Emoji_Presentation
+        QCOMPARE(n("⌘"), 0);              // U+2318 sits in an emoji-heavy block but isn't an emoji
+        QCOMPARE(n("★"), 0);              // U+2605 isn't an emoji
+        QCOMPARE(n("✓"), 0);              // U+2713 isn't an emoji (✔ U+2714 is, as text)
+        QCOMPARE(n("☺"), 0);              // text-default emoji without VS16 stays text
+        QCOMPARE(n("☺️"), 1);
+        QCOMPARE(n("📷 Photo"), 0);
+        QCOMPARE(n(""), 0);
+
+        QVERIFY(Backend::isAnimatedImageAttachment(QStringLiteral("image/gif"), QString()));
+        QVERIFY(Backend::isAnimatedImageAttachment(QStringLiteral("IMAGE/WEBP"), QString()));
+        QVERIFY(Backend::isAnimatedImageAttachment(QString(), QStringLiteral("Funny.GIF")));
+        QVERIFY(Backend::isAnimatedImageAttachment(QString(), QStringLiteral("file:///tmp/a.gif?v=2")));
+        QVERIFY(!Backend::isAnimatedImageAttachment(QStringLiteral("image/png"), QStringLiteral("photo.png")));
+        QVERIFY(!Backend::isAnimatedImageAttachment(QStringLiteral("image/heic"), QStringLiteral("IMG_0001.HEIC")));
+    }
+
+    void testBubblelessMediaEmojiAndAnimatedGifRendering() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        // A wide photo (scaled down, aspect kept) and a small animated GIF (native size).
+        const QString widePath = tempDir.filePath(QStringLiteral("wide.png"));
+        {
+            QImage wide(1600, 600, QImage::Format_RGB32);
+            wide.fill(QColor(40, 110, 160));
+            QVERIFY(wide.save(widePath));
+        }
+        const QString gifPath = tempDir.filePath(QStringLiteral("anim.gif"));
+        {
+            QFile f(gifPath);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(QByteArray::fromBase64(
+                "R0lGODlhKAAUAIEAAP8AAAAAAAAAAAAAACH/C05FVFNDQVBFMi4wAwEAAAAh+QQABgAAACwAAAAAKAAUAAAIMAABCBxIsKDBgwgTKlzI"
+                "sKHDhxAjSpxIsaLFixgzatzIsaPHjyBDihxJsqTJkxQDAgAh+QQBBgABACwAAAAAKAAUAIEAAP8AAAAAAAAAAAAIMAABCBxIsKDBgwgT"
+                "KlzIsKHDhxAjSpxIsaLFixgzatzIsaPHjyBDihxJsqTJkxQDAgA7"));
+        }
+        auto imageMsg = [](const QString &guid, const QString &text, const QString &name, const QString &mime, const QString &path) {
+            const QString url = QUrl::fromLocalFile(path).toString();
+            return QVariantMap{{"guid", guid}, {"text", text}, {"isFromMe", true}, {"service", "iMessage"},
+                               {"timeText", "2:22 PM"}, {"hasImageAttachment", true}, {"attachmentGuid", guid + "-a"},
+                               {"attachmentLocalUrl", url},
+                               {"imageAttachments", QVariantList{QVariantMap{{"guid", guid + "-a"}, {"name", name}, {"mimeType", mime},
+                                                                             {"localUrl", url}, {"isImage", true}}}}};
+        };
+        auto textMsg = [](const QString &guid, const QString &text) {
+            return QVariantMap{{"guid", guid}, {"text", text}, {"isFromMe", false}, {"service", "iMessage"}, {"timeText", "2:21 PM"}};
+        };
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state.json")));
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win);
+        win->setWidth(1200);
+        win->setHeight(2400);  // tall enough that every delegate is instantiated
+        win->show();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+
+        b.selectChat(QStringLiteral("iMessage;-;+15555550100"));  // the message list only shows for a selected chat
+        QCoreApplication::processEvents();
+        b.setMessagesForTest(QVariantList{
+            textMsg(QStringLiteral("m-emoji1"), QStringLiteral("😂")),
+            textMsg(QStringLiteral("m-emoji3"), QStringLiteral("🎉🔥👍")),
+            textMsg(QStringLiteral("m-text"), QStringLiteral("Text with emoji 👍 stays in a bubble")),
+            imageMsg(QStringLiteral("m-wide"), QString(), QStringLiteral("wide.png"), QStringLiteral("image/png"), widePath),
+            imageMsg(QStringLiteral("m-photo-placeholder"), QStringLiteral("📷 Photo"), QStringLiteral("wide.png"), QStringLiteral("image/png"), widePath),
+            imageMsg(QStringLiteral("m-captioned"), QStringLiteral("Look at this"), QStringLiteral("wide.png"), QStringLiteral("image/png"), widePath),
+            imageMsg(QStringLiteral("m-gif"), QString(), QStringLiteral("anim.gif"), QStringLiteral("image/gif"), gifPath)});
+
+        std::function<void(QQuickItem *, const QString &, QList<QQuickItem *> &)> collect =
+            [&](QQuickItem *item, const QString &name, QList<QQuickItem *> &out) {
+                if (!item) return;
+                if (item->objectName() == name) out.append(item);
+                for (QQuickItem *child : item->childItems()) collect(child, name, out);
+            };
+        auto findIn = [&](QQuickItem *root, const QString &name) -> QQuickItem * {
+            QList<QQuickItem *> found;
+            collect(root, name, found);
+            return found.isEmpty() ? nullptr : found.first();
+        };
+        auto delegateFor = [&](const QString &guid) -> QQuickItem * {
+            QList<QQuickItem *> all;
+            collect(win->contentItem(), QStringLiteral("messageDelegate"), all);
+            for (QQuickItem *d : all) {
+                if (d->property("messageGuid").toString() == guid) return d;
+            }
+            return nullptr;
+        };
+        auto bubbleColor = [&](QQuickItem *d) {
+            QQuickItem *bubble = findIn(d, QStringLiteral("messageBubbleRect"));
+            return bubble ? bubble->property("color").value<QColor>() : QColor();
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(delegateFor(QStringLiteral("m-gif")) != nullptr, 3000);
+
+        // Emoji-only: no bubble, enlarged; one emoji is bigger than three
+        QQuickItem *e1 = delegateFor(QStringLiteral("m-emoji1"));
+        QQuickItem *e3 = delegateFor(QStringLiteral("m-emoji3"));
+        QVERIFY(e1 && e3);
+        QCOMPARE(e1->property("jumboEmojiCount").toInt(), 1);
+        QCOMPARE(e3->property("jumboEmojiCount").toInt(), 3);
+        QVERIFY(e1->property("isBubbleless").toBool());
+        QCOMPARE(bubbleColor(e1).alpha(), 0);
+        // Opening the actions (right-click) doesn't outline a bare emoji or photo
+        auto bubbleBorder = [&](QQuickItem *d) {
+            return findIn(d, QStringLiteral("messageBubbleRect"))->property("border").value<QObject *>()->property("width").toReal();
+        };
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-emoji1"));
+        QCOMPARE(bubbleBorder(e1), 0.0);
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-wide"));
+        QCOMPARE(bubbleBorder(delegateFor(QStringLiteral("m-wide"))), 0.0);
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-text"));
+        QCOMPARE(bubbleBorder(delegateFor(QStringLiteral("m-text"))), 1.0);
+        win->setProperty("pinnedActionMessageGuid", QString());
+        const int font1 = findIn(e1, QStringLiteral("messageTextEdit"))->property("font").value<QFont>().pixelSize();
+        const int font3 = findIn(e3, QStringLiteral("messageTextEdit"))->property("font").value<QFont>().pixelSize();
+        QVERIFY2(font1 > font3 && font3 > theme.fontSize(), qPrintable(QStringLiteral("%1 %2").arg(font1).arg(font3)));
+
+        // Text (even with an emoji) keeps its bubble
+        QQuickItem *txt = delegateFor(QStringLiteral("m-text"));
+        QVERIFY(txt && !txt->property("isBubbleless").toBool());
+        QVERIFY(bubbleColor(txt).alpha() > 0);
+
+        // Photo without text (or with only the "📷 Photo" placeholder): no bubble,
+        // and the wide image keeps its aspect ratio instead of being cropped.
+        for (const QString &guid : {QStringLiteral("m-wide"), QStringLiteral("m-photo-placeholder")}) {
+            QQuickItem *d = delegateFor(guid);
+            QVERIFY(d && d->property("isBubbleless").toBool());
+            QCOMPARE(bubbleColor(d).alpha(), 0);
+            QQuickItem *card = findIn(d, QStringLiteral("inlineImageAttachmentCard"));
+            QVERIFY(card);
+            QTRY_VERIFY_WITH_TIMEOUT(card->property("mediaReady").toBool(), 3000);
+            QVERIFY(card->width() <= 360.0 && card->width() > 200.0);
+            QVERIFY2(qAbs(card->width() / card->height() - 1600.0 / 600.0) < 0.05,
+                     qPrintable(QStringLiteral("%1x%2").arg(card->width()).arg(card->height())));
+            // The corner mask is on only with a GPU scene graph and QtQuick.Effects
+            const bool gpu = win->rendererInterface()->graphicsApi() != QSGRendererInterface::Software;
+            const bool maskLoaded = card->property("cornerMask").value<QObject *>() != nullptr;
+            QCOMPARE(card->property("layer").value<QObject *>()->property("enabled").toBool(), gpu && maskLoaded);
+            QQuickItem *still = findIn(card, QStringLiteral("inlineStillImage"));
+            QVERIFY(still->isVisible());
+            // Decoded at display size, not the source's 1600px
+            const qreal box = card->property("decodeBox").toReal();
+            QVERIFY(box >= 360.0);
+            QVERIFY2(still->implicitWidth() <= box, qPrintable(QString::number(still->implicitWidth())));
+        }
+
+        // Captioned photo stays inside a bubble
+        QQuickItem *cap = delegateFor(QStringLiteral("m-captioned"));
+        QVERIFY(cap && !cap->property("isBubbleless").toBool());
+        QVERIFY(bubbleColor(cap).alpha() > 0);
+
+        // GIF: AnimatedImage, shown at its own (small) size, and playing
+        QQuickItem *gifDelegate = delegateFor(QStringLiteral("m-gif"));
+        QVERIFY(gifDelegate && gifDelegate->property("isBubbleless").toBool());
+        QQuickItem *gifCard = findIn(gifDelegate, QStringLiteral("inlineImageAttachmentCard"));
+        QVERIFY(gifCard && gifCard->property("isAnimated").toBool());
+        QQuickItem *gif = findIn(gifCard, QStringLiteral("inlineAnimatedImage"));
+        QVERIFY(gif);
+        QTRY_VERIFY_WITH_TIMEOUT(gifCard->property("mediaReady").toBool(), 3000);
+        QVERIFY(gif->isVisible());
+        QVERIFY(gif->property("playing").toBool());
+        QCOMPARE(gif->property("frameCount").toInt(), 2);
+        QCOMPARE(qRound(gifCard->width()), 48);   // 40x20 GIF: the card keeps a 48px click target...
+        QCOMPARE(qRound(gif->width()), 40);       // ...but the GIF paints at its native size
+        QCOMPARE(qRound(gif->height()), 20);
+        QCOMPARE(qRound(gif->property("paintedWidth").toReal()), 40);
+        QVERIFY(!gif->property("cache").toBool());  // frames aren't all kept in memory
+        QVERIFY(!findIn(gifCard, QStringLiteral("inlineStillImage"))->isVisible());
+        const int firstFrame = gif->property("currentFrame").toInt();
+        QTRY_VERIFY_WITH_TIMEOUT(gif->property("currentFrame").toInt() != firstFrame, 2000);
+
+        // Scrolled out of view (but still alive in the cache buffer): paused
+        QObject *timeline = win->findChild<QObject *>(QStringLiteral("messageTimelineListView"));
+        QVERIFY(timeline);
+        const qreal savedY = timeline->property("contentY").toReal();
+        timeline->setProperty("stickToBottom", false);
+        // Shrink the view to its top so the GIF (last message) sits below it
+        const qreal savedH = timeline->property("height").toReal();
+        timeline->setProperty("height", 40.0);
+        timeline->setProperty("contentY", timeline->property("originY").toReal() - 42.0);
+        QTRY_VERIFY(!gif->property("playing").toBool());
+        timeline->setProperty("height", savedH);
+        timeline->setProperty("contentY", savedY);
+        QTRY_VERIFY(gif->property("playing").toBool());
+
+        // The photo viewer keeps the GIF type even with an extensionless name
+        QVariantMap viewerItem{{"guid", "att-anim-viewer"}, {"name", "animation"}, {"mimeType", "image/gif"},
+                               {"localUrl", QUrl::fromLocalFile(gifPath).toString()}};
+        QMetaObject::invokeMethod(win, "openPhotoViewer", Q_ARG(QVariant, QVariant(QVariantList{viewerItem})), Q_ARG(QVariant, 0));
+        QObject *viewer = win->findChild<QObject *>(QStringLiteral("photoViewerModal"));
+        QVERIFY(viewer);
+        QTRY_VERIFY(viewer->property("visible").toBool());
+        QCOMPARE(viewer->property("currentPhoto").toMap().value(QStringLiteral("mimeType")).toString(), QStringLiteral("image/gif"));
+        QObject *fullAnimated = win->findChild<QObject *>(QStringLiteral("fullPhotoAnimated"));
+        QVERIFY(fullAnimated);
+        QVERIFY(!fullAnimated->property("source").toUrl().isEmpty());
+
+        // Closing the viewer drops the GIF so its decoded frames aren't kept
+        QMetaObject::invokeMethod(win, "closePhotoViewer");
+        QTRY_VERIFY(!viewer->property("visible").toBool());
+        QVERIFY(fullAnimated->property("source").toUrl().isEmpty());
     }
 
     void testOrphanSmsVerificationCodeWithoutChatJoin() {

@@ -5,6 +5,12 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Added
+- **GIFs play inline:** GIF and WebP attachments animate in the conversation and in the photo viewer (`AnimatedImage`). Animated WebP needs Qt's WebP image plugin (`qt6-imageformats`). GIFs pause while scrolled off screen.
+- **Photos and emoji without text are shown without a bubble**, like iOS Messages. A photo sent on its own shows with rounded corners and no bubble behind it; a message of one to three emoji is shown large, with no bubble. Photos with a caption, and text that contains emoji, keep their bubble.
+- **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
+
+### Changed
+- **Inline photos keep their aspect ratio:** Photos are no longer cropped to a fixed box. Each is scaled down to fit the message column (at most 360×360 without a bubble, 320 wide inside one) and never scaled up. They're decoded at display size rather than full resolution, so large photos load faster and use far less memory. Rounded corners use `QtQuick.Effects`; with the software renderer, or where that module isn't installed, photos show with square corners.
 - **Threads, like Messages on iOS and macOS:**
   - Clicking a quoted reply opens a thread view with the original message and every reply to it.
   - Choosing the original (**Show in conversation**) scrolls the timeline to it and briefly outlines it.
@@ -22,8 +28,6 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 - **Contact photos instead of initials:** `bluepill-server` serves each contact's AddressBook photo at `/api/v1/contact/<id>/avatar`. That handles the photo stored inline, with or without the leading marker byte, and the newer `Images/` file reference. The client downloads photos only for people you have chats with, 4 at a time, caches them for a day, and shows them as circles in the chat list, the pinned row and the conversation header. Under **On your Mac** it lists every other populated field: middle name, nickname, company, job title, department, all phones and emails with their labels, addresses, URLs, birthday and note. `bluepill-server` now returns these fields from the AddressBook (labels, `middleName`, `jobTitle`, `department`, `addresses`, `urls`, `note`, `birthday`), reading only the columns that exist on that macOS version.
 - **Edit sent iMessages:** right-click a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back, and your unsent draft is restored when you finish or cancel the edit.
 - **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
-
-### Changed
 - **Message actions open on right-click:** hovering a message no longer outlines it or pops up the tapback / Reply / Copy / Delete bar. Right-click a message or photo to open the bar, and left-click elsewhere or press Esc to close it. Right-click used to copy the message; that's now the bar's **Copy** button.
 - **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
 

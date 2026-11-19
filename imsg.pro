@@ -19,7 +19,8 @@ SOURCES += \
 HEADERS += \
     src/theme.h \
     src/translator.h \
-    src/backend.h
+    src/backend.h \
+    src/emoji_ranges.h
 
 RESOURCES += \
     src/resources.qrc
