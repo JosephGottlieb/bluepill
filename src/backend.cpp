@@ -4150,6 +4150,7 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
                 auto &chatMap = m_chatMessagesCache[c.guid];
                 for (auto it = chatMap.begin(); it != chatMap.end(); ++it) {
                     QJsonObject m = it.value();
+                    if (m.value(QStringLiteral("isFromMe")).toBool()) continue;
                     if (!m.value(QStringLiteral("isRead")).toBool()) {
                         m.insert(QStringLiteral("isRead"), true);
                         it.value() = m;
@@ -4167,9 +4168,12 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
                 auto &chatMap = m_chatMessagesCache[c.guid];
                 for (auto it = chatMap.begin(); it != chatMap.end(); ++it) {
                     QJsonObject m = it.value();
+                    if (m.value(QStringLiteral("isFromMe")).toBool()) continue;
                     const bool shouldBeUnread = unreadGuids.contains(it.key());
-                    m.insert(QStringLiteral("isRead"), !shouldBeUnread);
-                    it.value() = m;
+                    if (m.value(QStringLiteral("isRead")).toBool() != !shouldBeUnread) {
+                        m.insert(QStringLiteral("isRead"), !shouldBeUnread);
+                        it.value() = m;
+                    }
                 }
             }
             int count = 0;
@@ -4868,9 +4872,8 @@ void Backend::bumpServerEndpointGeneration() {
 static bool isTapbackOrAssociatedMessage(const QJsonObject &m) {
     const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
     const int assocTypeInt = m.value(QStringLiteral("associatedMessageType")).toInt(0);
-    const QString assocGuid = m.value(QStringLiteral("associatedMessageGuid")).toString().trimmed();
     const QString assocEmoji = m.value(QStringLiteral("associatedMessageEmoji")).toString().trimmed();
-    if (assocTypeInt >= 2000 || !assocGuid.isEmpty() || !assocEmoji.isEmpty()) {
+    if (assocTypeInt >= 2000 || !assocEmoji.isEmpty()) {
         return true;
     }
     return !Backend::mapReactionEmoji(assocType, Backend::extractMessageText(m)).isEmpty();
@@ -6590,12 +6593,22 @@ QVariantList Backend::buildMessageListFromApi(
         }
     }
 
-    // Find latest outgoing message index for delivery/read receipt
+    auto isSkippedTapbackRow = [&](const QJsonObject &m) -> bool {
+        const QString guid = m.value(QStringLiteral("guid")).toString();
+        const QString assocGuid = normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString());
+        const QString effectiveAssocGuid = !assocGuid.isEmpty() ? assocGuid : resolvedReactionTargetByGuid.value(guid);
+        const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
+        const QString assocEmoji = m.value(QStringLiteral("associatedMessageEmoji")).toString().trimmed();
+        const QString text = extractMessageText(m);
+        return !effectiveAssocGuid.isEmpty() && (!mapReactionEmoji(assocType, text).isEmpty() || !assocEmoji.isEmpty());
+    };
+
+    // Find latest outgoing message index for delivery/read receipt (must match visible timeline filtering)
     int latestOutgoingIdx = -1;
     QString latestOutgoingGuid;
     for (int i = chronological.size() - 1; i >= 0; --i) {
         const QJsonObject &m = chronological[i];
-        if (isTapbackOrAssociatedMessage(m) || isHiddenTimelinePlaceholder(m)) continue;
+        if (isSkippedTapbackRow(m) || isHiddenTimelinePlaceholder(m)) continue;
         if (m.value(QStringLiteral("isFromMe")).toBool()) {
             latestOutgoingIdx = i;
             latestOutgoingGuid = m.value(QStringLiteral("guid")).toString();
@@ -6606,7 +6619,7 @@ QVariantList Backend::buildMessageListFromApi(
     if (latestOutgoingIdx >= 0) {
         for (int i = latestOutgoingIdx + 1; i < chronological.size(); ++i) {
             const QJsonObject &m = chronological[i];
-            if (isTapbackOrAssociatedMessage(m) || isHiddenTimelinePlaceholder(m)) continue;
+            if (isSkippedTapbackRow(m) || isHiddenTimelinePlaceholder(m)) continue;
             if (!m.value(QStringLiteral("isFromMe")).toBool()) {
                 hasLaterIncomingReply = true;
                 break;
@@ -6620,14 +6633,10 @@ QVariantList Backend::buildMessageListFromApi(
 
     for (const QJsonObject &m : chronological) {
         const QString guid = m.value(QStringLiteral("guid")).toString();
-        const QString assocGuid = normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString());
-        const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
         const QString text = extractMessageText(m);
 
         // Skip tapback messages from main timeline if they belong to a parent
-        const QString effectiveAssocGuid = !assocGuid.isEmpty() ? assocGuid : resolvedReactionTargetByGuid.value(guid);
-        const QString assocEmoji = m.value(QStringLiteral("associatedMessageEmoji")).toString().trimmed();
-        if (!effectiveAssocGuid.isEmpty() && (!mapReactionEmoji(assocType, text).isEmpty() || !assocEmoji.isEmpty())) {
+        if (isSkippedTapbackRow(m)) {
             continue;
         }
 
@@ -7079,6 +7088,10 @@ static QJsonObject mergeCachedMessageObject(const QJsonObject &existing, const Q
             }
         } else if (isFromMe && key == QStringLiteral("isSent")) {
             if (it.value().toBool() || !merged.value(QStringLiteral("isSent")).toBool()) {
+                merged.insert(key, it.value());
+            }
+        } else if (isFromMe && key == QStringLiteral("isRead")) {
+            if (it.value().toBool() || !merged.value(QStringLiteral("isRead")).toBool()) {
                 merged.insert(key, it.value());
             }
         } else if (isFromMe && (key == QStringLiteral("dateDelivered") || key == QStringLiteral("dateRead"))) {
@@ -7625,11 +7638,15 @@ void Backend::loadChatMessages(const QString &chatGuid) {
                 handleNetworkSuccess();
                 const QJsonArray arr = QJsonDocument::fromJson(fallbackReply->readAll()).object().value(QStringLiteral("data")).toArray();
                 reconcileChatMessages(chatGuid, arr, true);
+                const bool prevHasMore = m_chatHasMoreMessages.value(chatGuid, false);
+                const bool nextHasMore = (arr.size() >= 150);
                 m_chatMessageOffset[chatGuid] = arr.size();
-                m_chatHasMoreMessages[chatGuid] = (arr.size() >= 150);
+                m_chatHasMoreMessages[chatGuid] = nextHasMore;
                 saveMessagesCache();
                 if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
-                emit olderMessagesChanged();
+                if (prevHasMore != nextHasMore) {
+                    emit olderMessagesChanged();
+                }
                 rebuildSelectedChatMessages();
             });
             return;
@@ -7637,11 +7654,15 @@ void Backend::loadChatMessages(const QString &chatGuid) {
         handleNetworkSuccess();
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
         reconcileChatMessages(chatGuid, arr, true);
+        const bool prevHasMore = m_chatHasMoreMessages.value(chatGuid, false);
+        const bool nextHasMore = (arr.size() >= 150);
         m_chatMessageOffset[chatGuid] = arr.size();
-        m_chatHasMoreMessages[chatGuid] = (arr.size() >= 150);
+        m_chatHasMoreMessages[chatGuid] = nextHasMore;
         saveMessagesCache();
         if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
-        emit olderMessagesChanged();
+        if (prevHasMore != nextHasMore) {
+            emit olderMessagesChanged();
+        }
         rebuildSelectedChatMessages();
     });
 }

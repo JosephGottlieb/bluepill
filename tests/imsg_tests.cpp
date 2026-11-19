@@ -10745,6 +10745,120 @@ private slots:
         QVERIFY(flickable->property("contentHeight").toReal() > flickable->height());
     }
 
+    void testDeliveredReceiptStabilityAcrossBackgroundPollsAndReconcile() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_delivered_bounce.json")));
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+16268203709");
+        const QJsonObject chatObj{
+            {QStringLiteral("guid"), chatGuid},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("+16268203709")},
+            {QStringLiteral("displayName"), QStringLiteral("Edgar")},
+            {QStringLiteral("style"), 45}
+        };
+
+        // Outgoing message 1 (normal)
+        const QJsonObject outMsg1{
+            {QStringLiteral("guid"), QStringLiteral("C4AFB157-764C-4772-BA20-212749690356")},
+            {QStringLiteral("text"), QStringLiteral("no I'm testing tapback and it's not working")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), true},
+            {QStringLiteral("dateDelivered"), 1795124735362LL},
+            {QStringLiteral("dateRead"), 0},
+            {QStringLiteral("isRead"), false},
+            {QStringLiteral("dateCreated"), 1795124734812LL},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        // Outgoing custom emoji reaction (tapback, hidden from timeline)
+        const QJsonObject outReact{
+            {QStringLiteral("guid"), QStringLiteral("7001A031-61C7-424F-9243-F19343E3F86D")},
+            {QStringLiteral("text"), QStringLiteral("Reacted 😆 to “Is this a correction?”")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), true},
+            {QStringLiteral("isRead"), false},
+            {QStringLiteral("associatedMessageType"), 2006},
+            {QStringLiteral("associatedMessageEmoji"), QStringLiteral("😆")},
+            {QStringLiteral("associatedMessageGuid"), QStringLiteral("p:0/02D0DBDF-2CBA-4A6D-A87B-253D249D9802")},
+            {QStringLiteral("dateCreated"), 1795124747525LL},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+        // Latest outgoing visible message with associatedMessageGuid set and associatedMessageType == 0
+        const QJsonObject outMsg2{
+            {QStringLiteral("guid"), QStringLiteral("FE902C4A-8552-423A-91F4-C57392909BB8")},
+            {QStringLiteral("text"), QStringLiteral("Latest outgoing message")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("isSent"), true},
+            {QStringLiteral("isDelivered"), true},
+            {QStringLiteral("dateDelivered"), 1795127266291LL},
+            {QStringLiteral("dateRead"), 0},
+            {QStringLiteral("isRead"), false},
+            {QStringLiteral("associatedMessageType"), 0},
+            {QStringLiteral("associatedMessageGuid"), QStringLiteral("p:0/C51D201A-D549-4E47-AF21-2D92B6D32DEE")},
+            {QStringLiteral("dateCreated"), 1795127266116LL},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}
+        };
+
+        const QJsonArray pollPayload{outMsg2, outReact, outMsg1};
+        b.ingestMessagesForTest(pollPayload, true);
+        b.selectChat(chatGuid);
+
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->resize(1180, 820);
+        win->show();
+        QTest::qWait(80);
+
+        QQuickItem *listView = win->findChild<QQuickItem *>(QStringLiteral("messageTimelineListView"));
+        QVERIFY(listView != nullptr);
+
+        // Verify the latest visible outgoing message has "Delivered" immediately after build/rebuild
+        QCOMPARE(b.messages().size(), 2);
+        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("guid")).toString(),
+                 QStringLiteral("FE902C4A-8552-423A-91F4-C57392909BB8"));
+        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(),
+                 QStringLiteral("Delivered"));
+
+        const qreal baselineContentHeight = listView->property("contentHeight").toReal();
+        const qreal baselineContentY = listView->property("contentY").toReal();
+        QSignalSpy messagesChangedSpy(&b, &Backend::messagesChanged);
+
+        // Simulate alternating reconcileServerUnreadMessages (every 10s) and pollDelta (every 2.5s)
+        for (int cycle = 0; cycle < 3; ++cycle) {
+            b.reconcileUnreadMessagesForTest(QJsonArray{});
+            QCoreApplication::processEvents();
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(),
+                     QStringLiteral("Delivered"));
+
+            b.ingestMessagesForTest(pollPayload, false);
+            QCoreApplication::processEvents();
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(),
+                     QStringLiteral("Delivered"));
+
+            b.reconcileChatMessagesForTest(chatGuid, pollPayload);
+            QCoreApplication::processEvents();
+            QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(),
+                     QStringLiteral("Delivered"));
+        }
+
+        // Zero spurious messagesChanged emissions and zero timeline height/scroll bounce
+        QCOMPARE(messagesChangedSpy.count(), 0);
+        QCOMPARE(listView->property("contentHeight").toReal(), baselineContentHeight);
+        QCOMPARE(listView->property("contentY").toReal(), baselineContentY);
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

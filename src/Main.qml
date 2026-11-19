@@ -4376,7 +4376,7 @@ ApplicationWindow {
                                                     width: parent.fittedW
                                                     height: parent.fittedH
                                                     source: parent.isAnimated ? "" : parent.resolvedImgUrl
-                                                    asynchronous: true
+                                                    asynchronous: !parent.resolvedImgUrl.startsWith("file:")
                                                     cache: true
                                                     autoTransform: true
                                                     smooth: true
