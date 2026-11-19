@@ -8079,6 +8079,79 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
         partIndex = computeTextPartIndex(m_chatMessagesCache.value(resolvedChatGuid).value(resolvedMsgGuid));
     }
 
+    const QJsonObject msgObj = findCachedMessage(resolvedMsgGuid);
+    const bool offline = m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() ||
+                         resolvedMsgGuid.startsWith(QStringLiteral("temp-"));
+    if (offline) {
+        applyLocalUnsend(resolvedMsgGuid, resolvedChatGuid);
+        emit toastMessage(QStringLiteral("↩ Message unsent"));
+        return;
+    }
+    const qint64 sentAt = msgObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    if (sentAt > 0 && QDateTime::currentMSecsSinceEpoch() - sentAt > kMessageEditWindowMs) {
+        emit toastMessage(QStringLiteral("⚠ Messages can only be unsent within 2 minutes"));
+        return;
+    }
+
+    // The Mac's helper needs the chat the message is actually in (a merged
+    // sibling chat may have a different GUID than the one shown).
+    const QString sendChatGuid = messageOwnChatGuid(msgObj, resolvedChatGuid);
+    const QString encodedMsgGuid = QString::fromUtf8(QUrl::toPercentEncoding(resolvedMsgGuid));
+    QJsonObject body;
+    body.insert(QStringLiteral("chatGuid"), sendChatGuid);
+    body.insert(QStringLiteral("partIndex"), partIndex);
+
+    QNetworkRequest unsendReq = makeRequest(QStringLiteral("/api/v1/message/%1/unsend").arg(encodedMsgGuid));
+    unsendReq.setPriority(QNetworkRequest::HighPriority);
+    QNetworkReply *reply = m_sendNam.post(unsendReq, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, resolvedMsgGuid, resolvedChatGuid, sendChatGuid, encodedMsgGuid]() {
+        reply->deleteLater();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+        if (reply->error() != QNetworkReply::NoError || httpStatus != 200) {
+            // Keep the message: it's still on everyone's devices.
+            QString why = root.value(QStringLiteral("message")).toString().trimmed();
+            if (why.isEmpty()) why = reply->errorString();
+            emit toastMessage(QStringLiteral("⚠ Couldn't unsend: %1").arg(why));
+            return;
+        }
+        applyLocalUnsend(resolvedMsgGuid, resolvedChatGuid);
+        emit toastMessage(QStringLiteral("↩ Message unsent across iCloud devices"));
+        if (!sendChatGuid.isEmpty()) {
+            const QString encodedChatGuid = QString::fromUtf8(QUrl::toPercentEncoding(sendChatGuid));
+            QNetworkRequest delReq = makeRequest(QStringLiteral("/api/v1/chat/%1/%2").arg(encodedChatGuid, encodedMsgGuid));
+            delReq.setPriority(QNetworkRequest::HighPriority);
+            QNetworkReply *delReply = m_sendNam.deleteResource(delReq);
+            connect(delReply, &QNetworkReply::finished, delReply, &QNetworkReply::deleteLater);
+        }
+    });
+}
+
+QJsonObject Backend::findCachedMessage(const QString &messageGuid, QString *chatKey) const {
+    for (auto it = m_chatMessagesCache.constBegin(); it != m_chatMessagesCache.constEnd(); ++it) {
+        const auto found = it.value().constFind(messageGuid);
+        if (found != it.value().constEnd()) {
+            if (chatKey) *chatKey = it.key();
+            return found.value();
+        }
+    }
+    if (chatKey) chatKey->clear();
+    return QJsonObject();
+}
+
+QString Backend::messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid) {
+    const QString original = msgObj.value(QStringLiteral("originalChatGuid")).toString().trimmed();
+    if (!original.isEmpty()) return original;
+    const QJsonArray chats = msgObj.value(QStringLiteral("chats")).toArray();
+    for (const QJsonValue &v : chats) {
+        const QString g = v.toObject().value(QStringLiteral("guid")).toString().trimmed();
+        if (!g.isEmpty()) return g;
+    }
+    const QString direct = msgObj.value(QStringLiteral("chatGuid")).toString().trimmed();
+    return direct.isEmpty() ? fallbackChatGuid : direct;
+}
+
+void Backend::applyLocalUnsend(const QString &resolvedMsgGuid, const QString &resolvedChatGuid) {
     m_deletedMessageGuids.insert(resolvedMsgGuid);
     m_pendingDeliveryMessages.remove(resolvedMsgGuid);
     m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
@@ -8118,31 +8191,69 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
     }
     saveAppState();
     saveMessagesCache();
-    emit toastMessage(QStringLiteral("↩ Message unsent across iCloud devices"));
+}
 
-    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || resolvedMsgGuid.startsWith(QStringLiteral("temp-"))) {
+void Backend::editMessage(const QString &messageGuid, const QString &newText) {
+    const QString msgGuid = messageGuid.trimmed();
+    const QString text = newText.trimmed();
+    if (msgGuid.isEmpty() || text.isEmpty()) return;
+    QString chatKey;
+    QJsonObject msgObj = findCachedMessage(msgGuid, &chatKey);
+    if (msgObj.isEmpty() || !msgObj.value(QStringLiteral("isFromMe")).toBool()) return;
+    const QString oldText = msgObj.value(QStringLiteral("text")).toString();
+    if (extractMessageText(msgObj) == text) return;
+    const qint64 sentAt = msgObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    if (sentAt > 0 && QDateTime::currentMSecsSinceEpoch() - sentAt > kMessageEditWindowMs) {
+        emit toastMessage(QStringLiteral("⚠ Messages can only be edited within 2 minutes"));
         return;
     }
+    const QJsonValue oldDateEdited = msgObj.value(QStringLiteral("dateEdited"));
+    const QJsonValue oldAttributed = msgObj.value(QStringLiteral("attributedBody"));
+    const int partIndex = computeTextPartIndex(msgObj);
 
-    const QString encodedMsgGuid = QString::fromUtf8(QUrl::toPercentEncoding(resolvedMsgGuid));
-    QJsonObject body;
-    body.insert(QStringLiteral("partIndex"), partIndex);
-
-    QNetworkRequest unsendReq = makeRequest(QStringLiteral("/api/v1/message/%1/unsend").arg(encodedMsgGuid));
-    unsendReq.setPriority(QNetworkRequest::HighPriority);
-    QNetworkReply *reply = m_sendNam.post(
-        unsendReq,
-        QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, resolvedChatGuid, encodedMsgGuid]() {
-        reply->deleteLater();
-        if (!resolvedChatGuid.isEmpty()) {
-            const QString encodedChatGuid = QString::fromUtf8(QUrl::toPercentEncoding(resolvedChatGuid));
-            const QString delPath = QStringLiteral("/api/v1/chat/%1/%2").arg(encodedChatGuid, encodedMsgGuid);
-            QNetworkRequest delReq = makeRequest(delPath);
-            delReq.setPriority(QNetworkRequest::HighPriority);
-            QNetworkReply *delReply = m_sendNam.deleteResource(delReq);
-            connect(delReply, &QNetworkReply::finished, delReply, &QNetworkReply::deleteLater);
+    auto applyText = [this, chatKey, msgGuid](const QString &t, const QJsonValue &dateEdited, const QJsonValue &attributed) {
+        auto chatIt = m_chatMessagesCache.find(chatKey);
+        if (chatIt == m_chatMessagesCache.end()) return;
+        auto msgIt = chatIt.value().find(msgGuid);
+        if (msgIt == chatIt.value().end()) return;
+        QJsonObject m = msgIt.value();
+        m.insert(QStringLiteral("text"), t);
+        if (dateEdited.isUndefined()) m.remove(QStringLiteral("dateEdited"));
+        else m.insert(QStringLiteral("dateEdited"), dateEdited);
+        if (attributed.isUndefined()) m.remove(QStringLiteral("attributedBody"));
+        else m.insert(QStringLiteral("attributedBody"), attributed);
+        msgIt.value() = m;
+        if (!m_selectedChatGuid.isEmpty() &&
+            (chatKey == m_selectedChatGuid || isSameConversation(chatKey, m_selectedChatGuid))) {
+            rebuildSelectedChatMessages();
         }
+        refreshChatPreviewFromCache(chatKey);
+        saveMessagesCache();
+    };
+    // Show the edit right away (the old attributed body would override the new text)
+    applyText(text, QJsonValue(QDateTime::currentMSecsSinceEpoch()), QJsonValue(QJsonValue::Undefined));
+
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || msgGuid.startsWith(QStringLiteral("temp-"))) {
+        return;
+    }
+    QJsonObject body;
+    body.insert(QStringLiteral("chatGuid"), messageOwnChatGuid(msgObj, chatKey));
+    body.insert(QStringLiteral("editedMessage"), text);
+    body.insert(QStringLiteral("backwardsCompatibilityMessage"), QStringLiteral("Edited to “%1”").arg(text));
+    body.insert(QStringLiteral("partIndex"), partIndex);
+    const QString encoded = QString::fromUtf8(QUrl::toPercentEncoding(msgGuid));
+    QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/message/%1/edit").arg(encoded));
+    req.setPriority(QNetworkRequest::HighPriority);
+    QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, applyText, oldText, oldDateEdited, oldAttributed]() {
+        reply->deleteLater();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+        if (reply->error() == QNetworkReply::NoError && httpStatus == 200) return;
+        applyText(oldText, oldDateEdited, oldAttributed);
+        QString why = root.value(QStringLiteral("message")).toString().trimmed();
+        if (why.isEmpty()) why = reply->errorString();
+        emit toastMessage(QStringLiteral("⚠ Couldn't edit: %1").arg(why));
     });
 }
 

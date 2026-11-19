@@ -21,6 +21,37 @@ ApplicationWindow {
     property string replyTargetGuid: ""
     property string replyTargetSender: ""
     property string replyTargetText: ""
+    // Composer edit mode: the sent message being edited ("" when not editing)
+    property string editTargetGuid: ""
+    // Ticks so Edit/Unsend disappear once a message is older than the edit window
+    property double nowMs: Date.now()
+    Timer {
+        interval: 5000
+        running: true
+        repeat: true
+        onTriggered: root.nowMs = Date.now()
+    }
+    function canEditOrUnsend(m) {
+        if (!m || !m.isFromMe || !(m.isIMessage || m.service === "iMessage")) return false
+        var g = m.guid || ""
+        if (g.length === 0 || g.indexOf("temp-") === 0 || m.isFailed) return false
+        var sent = Number(m.dateCreated || 0)
+        return sent > 0 && root.nowMs - sent < backend.messageEditWindowMs
+    }
+    function startEditing(guid, text) {
+        root.replyTargetGuid = ""
+        root.replyTargetSender = ""
+        root.replyTargetText = ""
+        root.editTargetGuid = guid
+        composerInput.text = text || ""
+        composerInput.forceActiveFocus()
+        composerInput.cursorPosition = composerInput.text.length
+    }
+    function cancelEditing() {
+        if (root.editTargetGuid === "") return
+        root.editTargetGuid = ""
+        composerInput.text = ""
+    }
     property string stagedAttachmentPath: ""
     property string stagedAttachmentName: ""
     property string stagedAttachmentChatGuid: ""
@@ -95,6 +126,14 @@ ApplicationWindow {
 
     function sendComposerContent() {
         if (backend.selectedChatGuid.length === 0) return
+        if (root.editTargetGuid !== "") {
+            var editGuid = root.editTargetGuid
+            var edited = composerInput.text.trim()
+            root.editTargetGuid = ""
+            composerInput.text = ""
+            if (edited.length > 0) backend.editMessage(editGuid, edited)
+            return
+        }
         if (root.stagedAttachmentPath.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
             root.stagedAttachmentPath = ""
             root.stagedAttachmentName = ""
@@ -755,6 +794,7 @@ ApplicationWindow {
             var sameConv = (root.lastDraftChatGuid === newGuid) || (root.lastDraftChatGuid !== "" && newGuid !== "" && backend.isSameConversation(root.lastDraftChatGuid, newGuid))
             if (!sameConv) {
                 root.clearActionMenu()
+                root.cancelEditing()
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
                 root.replyTargetText = ""
@@ -1165,6 +1205,8 @@ ApplicationWindow {
         if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
             root.clearStagedAttachment()
             root.showToast("✕ " + i18n.tr("Attachment cancelled"))
+        } else if (root.editTargetGuid !== "") {
+            root.cancelEditing()
         } else if (root.replyTargetGuid !== "") {
             root.replyTargetGuid = ""
             root.replyTargetSender = ""
@@ -4013,11 +4055,54 @@ ApplicationWindow {
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
+                                                    root.cancelEditing()
                                                     root.replyTargetGuid = msgDelegate.modelData.guid
                                                     root.replyTargetSender = msgDelegate.modelData.senderName
                                                     root.replyTargetText = msgDelegate.modelData.text
                                                     root.clearActionMenu()
                                                     composerInput.forceActiveFocus()
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            id: editMsgBtn
+                                            objectName: "editMsgBtn"
+                                            visible: root.canEditOrUnsend(msgDelegate.modelData) && (msgDelegate.modelData.text || "").trim().length > 0
+                                            height: 30
+                                            implicitWidth: editBtnRow.implicitWidth + 14
+                                            radius: 15
+                                            color: editBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                            border.width: 1
+                                            border.color: editBtnMouse.containsMouse ? theme.accent : theme.muted
+
+                                            RowLayout {
+                                                id: editBtnRow
+                                                anchors.centerIn: parent
+                                                spacing: 4
+                                                Text {
+                                                    text: "✎"
+                                                    font.pixelSize: theme.fontSize - 1
+                                                    color: theme.accent
+                                                }
+                                                Text {
+                                                    text: i18n.tr("Edit")
+                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.bold: true
+                                                    color: theme.brightForeground
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                id: editBtnMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var mGuid = msgDelegate.modelData.guid
+                                                    var mText = msgDelegate.modelData.text || ""
+                                                    root.clearActionMenu()
+                                                    root.startEditing(mGuid, mText)
                                                 }
                                             }
                                         }
@@ -4109,7 +4194,9 @@ ApplicationWindow {
 
                                         Rectangle {
                                             id: unsendMsgBtn
-                                            visible: Boolean(msgDelegate.modelData.isFromMe && (msgDelegate.modelData.isIMessage || msgDelegate.modelData.service === "iMessage"))
+                                            objectName: "unsendMsgBtn"
+                                            // iMessage allows unsending for 2 minutes after sending
+                                            visible: root.canEditOrUnsend(msgDelegate.modelData)
                                             height: 30
                                             implicitWidth: unsendBtnRow.implicitWidth + 14
                                             radius: 15
@@ -4990,6 +5077,54 @@ ApplicationWindow {
                     }
                 }
 
+                // Editing banner above Composer
+                Rectangle {
+                    objectName: "editingBanner"
+                    visible: backend.selectedChatGuid.length > 0 && root.editTargetGuid !== ""
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    color: theme.selection
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 3
+                        color: theme.accent
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 8
+
+                        Text {
+                            text: "✎"
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.accent
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Editing message") + " · " + i18n.tr("Enter to save, Esc to cancel")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.accent
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            text: "✕"
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.foreground
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.cancelEditing()
+                            }
+                        }
+                    }
+                }
+
                 // Active Reply Context Banner above Composer
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0 && root.replyTargetGuid !== ""
@@ -5630,6 +5765,7 @@ ApplicationWindow {
                                 anchors.rightMargin: 8
                                 topPadding: 10
                                 bottomPadding: 14
+                                objectName: "composerInput"
                                 leftPadding: 4
                                 rightPadding: 4
                                 placeholderText: i18n.tr("Type an iMessage... (:smile: for emoji, Enter to send)")
@@ -5942,7 +6078,7 @@ ApplicationWindow {
 
                             Text {
                                 anchors.centerIn: parent
-                                text: i18n.tr("Send") + " ↑"
+                                text: root.editTargetGuid !== "" ? i18n.tr("Save") : (i18n.tr("Send") + " ↑")
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
                                 color: parent.canSendNow ? "#ffffff" : theme.darkForeground

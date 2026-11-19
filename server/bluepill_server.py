@@ -4784,32 +4784,80 @@ class BluePillEngine:
             "dateCreated": now_ms,
         }
 
-    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+    def _chat_guid_for_message(self, msg_guid: str) -> str:
+        """Chat a message belongs to in chat.db ("" when unknown)."""
+        mg = (msg_guid or "").strip()
+        if not mg or not os.path.exists(self.db_path):
+            return ""
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        try:
+            conn = self._open_chat_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT c.guid
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    JOIN chat c ON c.ROWID = cmj.chat_id
+                    WHERE m.guid = ? OR m.guid = ?
+                    LIMIT 1
+                    """,
+                    (mg, norm_mg),
+                ).fetchone()
+            finally:
+                conn.close()
+            return str(row[0] or "").strip() if row else ""
+        except Exception:
+            return ""
+
+    def _message_action_chat_guid(self, msg_guid: str, body: Dict[str, Any]) -> str:
         chat_guid = (body.get("chatGuid") or "").strip()
+        if chat_guid and self._message_exists_in_chat(msg_guid, chat_guid):
+            return chat_guid
+        return self._chat_guid_for_message(msg_guid) or chat_guid
+
+    def _run_message_action(self, action: str, data: Dict[str, Any]) -> Tuple[int, str]:
+        """Send an edit/unsend to the Messages helper. Returns (http_status, error)."""
+        sent, _ = self._send_helper_payload_with_tx(action, data, wait_timeout=3.0)
+        state = getattr(self._tx_local, "last_state", "")
+        if state == "disconnected":
+            return 503, "The Messages helper (Private API) isn't connected on the Mac"
+        if not sent:
+            return 502, "Messages refused the request"
+        return 200, ""
+
+    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], str]:
+        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+        if not edited:
+            return 400, {}, "editedMessage is required"
+        chat_guid = self._message_action_chat_guid(msg_guid, body)
+        if not chat_guid:
+            return 404, {}, "Message not found"
         part_index = int(body.get("partIndex", 0) or 0)
-        self._send_helper_payload(
+        status, err = self._run_message_action(
             "edit-message",
             {
                 "chatGuid": chat_guid,
                 "messageGuid": msg_guid,
                 "editedMessage": edited,
-                "backwardsCompatibilityMessage": edited,
+                "backwardsCompatibilityMessage": (body.get("backwardsCompatibilityMessage") or edited),
                 "partIndex": part_index,
             },
         )
         now_ms = int(time.time() * 1000)
-        return {"guid": msg_guid, "text": edited, "dateEdited": now_ms}
+        return status, ({"guid": msg_guid, "text": edited, "dateEdited": now_ms} if status == 200 else {}), err
 
-    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], str]:
+        chat_guid = self._message_action_chat_guid(msg_guid, body)
+        if not chat_guid:
+            return 404, {}, "Message not found"
         part_index = int(body.get("partIndex", 0) or 0)
-        chat_guid = (body.get("chatGuid") or "").strip()
-        self._send_helper_payload(
+        status, err = self._run_message_action(
             "unsend-message",
             {"chatGuid": chat_guid, "messageGuid": msg_guid, "partIndex": part_index},
         )
         now_ms = int(time.time() * 1000)
-        return {"guid": msg_guid, "text": "", "dateRetracted": now_ms}
+        return status, ({"guid": msg_guid, "text": "", "dateRetracted": now_ms} if status == 200 else {}), err
 
     def mark_chat_read(self, chat_guid: str, read: bool = True) -> Dict[str, Any]:
         guids_to_mark = [chat_guid]
@@ -10022,13 +10070,15 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         m_edit = re.match(r"^/api/v1/message/([^/]+)/edit$", path)
         if m_edit:
             guid = urllib.parse.unquote(m_edit.group(1))
-            self._send_json(200, self.engine.edit_message(guid, body))
+            status, data, err = self.engine.edit_message(guid, body)
+            self._send_json(status, data if status == 200 else None, err or "Success")
             return
 
         m_unsend = re.match(r"^/api/v1/message/([^/]+)/unsend$", path)
         if m_unsend:
             guid = urllib.parse.unquote(m_unsend.group(1))
-            self._send_json(200, self.engine.unsend_message(guid, body))
+            status, data, err = self.engine.unsend_message(guid, body)
+            self._send_json(status, data if status == 200 else None, err or "Success")
             return
 
         m_read = re.match(r"^/api/v1/chat/([^/]+)/(read|unread)$", path)
@@ -10238,6 +10288,13 @@ def run_selftest(engine: BluePillEngine) -> int:
         enable_background_daemons=False,
     )
     test_eng.photos_library_path = os.path.join(test_eng._config_dir, "Photos Library.photoslibrary")
+    # Edit/unsend report failures instead of always answering 200
+    st, _, err = test_eng.unsend_message("selftest-msg", {"chatGuid": "iMessage;-;+15555550100"})
+    assert st == 503 and "helper" in err, f"unsend without helper: {st} {err}"
+    st, _, _ = test_eng.edit_message("selftest-msg", {"chatGuid": "iMessage;-;+15555550100"})
+    assert st == 400, f"edit without text: {st}"
+    st, _, _ = test_eng.unsend_message("selftest-msg", {})
+    assert st == 404, f"unsend with unknown chat: {st}"
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
     launchctl_calls: List[List[str]] = []
     test_eng._run_launchctl = lambda args: (

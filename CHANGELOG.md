@@ -4,7 +4,13 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+### Added
+- **Edit sent iMessages:** hover a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back.
+
 ### Fixed
+- **Unsend works:** the client now tells the Mac which chat the message is in. Previously the Messages helper got an empty chat, so nothing was unsent, yet the message vanished locally and was deleted from the Mac. The message is now removed only after the Mac confirms. Otherwise a toast says why, such as the Private API helper not being connected.
+- **Edit and Unsend are offered only within 2 minutes of sending,** and only for your own iMessages. The buttons disappear once a message is older than that.
+- **`bluepill-server` edit/unsend endpoints report failures:** they look up the message's chat in `chat.db` when none is given. They answer `503` when the Messages helper isn't connected, `502` when it refuses, and `404` for an unknown message, instead of always answering `200`.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
 

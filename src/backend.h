@@ -68,6 +68,8 @@ struct MessageModel {
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool connected READ connected NOTIFY statusChanged)
+    // How long after sending a message it can still be edited or unsent.
+    Q_PROPERTY(int messageEditWindowMs READ messageEditWindowMs CONSTANT)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY statusChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl NOTIFY configChanged)
@@ -286,6 +288,9 @@ public:
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
+    Q_INVOKABLE void editMessage(const QString &messageGuid, const QString &newText);
+    static constexpr int kMessageEditWindowMs = 2 * 60 * 1000;
+    int messageEditWindowMs() const { return kMessageEditWindowMs; }
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
@@ -540,6 +545,11 @@ signals:
     void pendingDeliveryCheckFinishedForTest();
 
 private:
+    // Finds a cached message; chatKey gets the m_chatMessagesCache key it's under.
+    QJsonObject findCachedMessage(const QString &messageGuid, QString *chatKey = nullptr) const;
+    // The chat a message actually belongs to on the Mac (not the merged canonical chat).
+    static QString messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid);
+    void applyLocalUnsend(const QString &messageGuid, const QString &chatGuid);
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
     QNetworkRequest makeSocketIoRequest(const QList<QPair<QString, QString>> &extraQueryItems = {}, int timeoutMs = 85000) const;
     QUrl buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems = {}) const;

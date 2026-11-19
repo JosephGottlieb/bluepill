@@ -15,6 +15,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QtTest>
+#include <QScopeGuard>
 
 #include "backend.h"
 #include "theme.h"
@@ -1129,8 +1130,20 @@ private slots:
         const QString stateFile = tempDir.filePath(QStringLiteral("state.json"));
         const QString deletedFile = tempDir.filePath(QStringLiteral("deleted_messages.json"));
 
+        // Offline: unsend applies locally at once (with a server it waits for the Mac).
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
         Backend b(false);
         b.setStateFilePath(stateFile);
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config.json")));  // never the real config
 
         const qint64 baseTs = QDateTime::currentMSecsSinceEpoch() - 3600000LL;
         auto makeMsg = [&](const QString &guid, const QString &chatGuid, const QString &text, bool fromMe, qint64 ts) {
@@ -2338,6 +2351,94 @@ private slots:
         dummyWin.setProperty("showPhotoViewer", false);
         QKeyEvent passRight(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
+    }
+
+    void testEditMessageAndTwoMinuteEditUnsendWindow() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_edit.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_edit.json")));
+        QCOMPARE(b.messageEditWindowMs(), 120000);
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto msg = [&](const char *guid, const char *text, bool fromMe, qint64 ts) {
+            return QJsonObject{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                               {QStringLiteral("isFromMe"), fromMe}, {QStringLiteral("isSent"), fromMe},
+                               {QStringLiteral("service"), QStringLiteral("iMessage")}, {QStringLiteral("dateCreated"), ts},
+                               {QStringLiteral("chats"), QJsonArray{chatObj}}};
+        };
+        b.ingestMessagesForTest(QJsonArray{msg("m-theirs", "Hi", false, now - 60000),
+                                           msg("m-old", "Old one", true, now - 10 * 60000),
+                                           msg("m-new", "Teh typo", true, now - 30000)}, true);
+        b.selectChat(chatGuid);
+        auto byGuid = [&](const QString &g) {
+            for (const QVariant &v : b.messages()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("guid")).toString() == g) return m;
+            }
+            return QVariantMap();
+        };
+
+        b.editMessage(QStringLiteral("m-new"), QStringLiteral("The typo, fixed"));
+        QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("The typo, fixed"));
+        QVERIFY(byGuid(QStringLiteral("m-new")).value(QStringLiteral("isEdited")).toBool());
+
+        b.editMessage(QStringLiteral("m-old"), QStringLiteral("Too late"));      // past the window
+        QCOMPARE(byGuid(QStringLiteral("m-old")).value(QStringLiteral("text")).toString(), QStringLiteral("Old one"));
+        b.editMessage(QStringLiteral("m-theirs"), QStringLiteral("Not mine"));   // not from me
+        QCOMPARE(byGuid(QStringLiteral("m-theirs")).value(QStringLiteral("text")).toString(), QStringLiteral("Hi"));
+
+        // QML shows Edit/Unsend only for my iMessages inside the window
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *win = engine.rootObjects().first();
+        auto allowed = [&](const QVariantMap &m) {
+            QVariant r;
+            QMetaObject::invokeMethod(win, "canEditOrUnsend", Q_RETURN_ARG(QVariant, r), Q_ARG(QVariant, QVariant(m)));
+            return r.toBool();
+        };
+        QVERIFY(allowed(byGuid(QStringLiteral("m-new"))));
+        QVERIFY(!allowed(byGuid(QStringLiteral("m-old"))));
+        QVERIFY(!allowed(byGuid(QStringLiteral("m-theirs"))));
+        QVariantMap sms = byGuid(QStringLiteral("m-new"));
+        sms.insert(QStringLiteral("isIMessage"), false);
+        sms.insert(QStringLiteral("service"), QStringLiteral("SMS"));
+        QVERIFY(!allowed(sms));
+        QVariantMap pending = byGuid(QStringLiteral("m-new"));
+        pending.insert(QStringLiteral("guid"), QStringLiteral("temp-123"));
+        QVERIFY(!allowed(pending));
+
+        // Edit mode: Save edits the message instead of sending a new one
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("The typo, fixed")));
+        QCOMPARE(win->property("editTargetGuid").toString(), QStringLiteral("m-new"));
+        QObject *composer = win->findChild<QObject *>(QStringLiteral("composerInput"));
+        QVERIFY(composer);
+        composer->setProperty("text", QStringLiteral("Final wording"));
+        const int before = b.messages().size();
+        QMetaObject::invokeMethod(win, "sendComposerContent");
+        QCOMPARE(win->property("editTargetGuid").toString(), QString());
+        QCOMPARE(b.messages().size(), before);
+        QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("Final wording"));
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
@@ -6539,6 +6640,17 @@ private slots:
     void testRebuildEchoMatchesOnlyCacheRowsAndDeleteUnsendRestoresReceipt() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
+        // Offline: unsend applies locally at once (with a server it waits for the Mac).
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_echo.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_echo.json")));
