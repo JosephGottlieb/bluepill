@@ -4225,7 +4225,7 @@ ApplicationWindow {
                                            : (modelData.isFromMe
                                               ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
                                               : "#1e2430")
-                                    border.width: msgDelegate.isBubbleless ? (root.activeActionMessageGuid === modelData.guid ? 1 : 0) : 1
+                                    border.width: msgDelegate.isBubbleless ? 0 : 1  // no outline on bare photos/emoji, even with actions open
                                     border.color: (root.activeActionMessageGuid === modelData.guid)
                                                   ? theme.brightForeground
                                                   : (modelData.isFromMe

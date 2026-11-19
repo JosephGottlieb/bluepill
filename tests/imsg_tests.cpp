@@ -2903,6 +2903,17 @@ private slots:
         QCOMPARE(e3->property("jumboEmojiCount").toInt(), 3);
         QVERIFY(e1->property("isBubbleless").toBool());
         QCOMPARE(bubbleColor(e1).alpha(), 0);
+        // Opening the actions (right-click) doesn't outline a bare emoji or photo
+        auto bubbleBorder = [&](QQuickItem *d) {
+            return findIn(d, QStringLiteral("messageBubbleRect"))->property("border").value<QObject *>()->property("width").toReal();
+        };
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-emoji1"));
+        QCOMPARE(bubbleBorder(e1), 0.0);
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-wide"));
+        QCOMPARE(bubbleBorder(delegateFor(QStringLiteral("m-wide"))), 0.0);
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-text"));
+        QCOMPARE(bubbleBorder(delegateFor(QStringLiteral("m-text"))), 1.0);
+        win->setProperty("pinnedActionMessageGuid", QString());
         const int font1 = findIn(e1, QStringLiteral("messageTextEdit"))->property("font").value<QFont>().pixelSize();
         const int font3 = findIn(e3, QStringLiteral("messageTextEdit"))->property("font").value<QFont>().pixelSize();
         QVERIFY2(font1 > font3 && font3 > theme.fontSize(), qPrintable(QStringLiteral("%1 %2").arg(font1).arg(font3)));
