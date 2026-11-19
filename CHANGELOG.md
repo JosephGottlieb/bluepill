@@ -5,13 +5,13 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Added
-- **Edit sent iMessages:** hover a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back.
+- **Edit sent iMessages:** right-click a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back, and your unsent draft is restored when you finish or cancel the edit.
 
 ### Changed
 - **Message actions open on right-click:** hovering a message no longer outlines it or pops up the tapback / Reply / Copy / Delete bar. Right-click a message or photo to open the bar, and left-click elsewhere or press Esc to close it. Right-click used to copy the message; that's now the bar's **Copy** button.
 
 ### Fixed
-- **Unsend works:** the client now tells the Mac which chat the message is in. Previously the Messages helper got an empty chat, so nothing was unsent, yet the message vanished locally and was deleted from the Mac. The message is now removed only after the Mac confirms. Otherwise a toast says why, such as the Private API helper not being connected.
+- **Unsend works:** the client now tells the Mac which chat the message is in. Previously the Messages helper got an empty chat, so nothing was unsent, yet the message vanished locally and was deleted from the Mac. The message is now removed only after the Mac confirms (a helper that times out without confirming leaves it in place). Otherwise a toast says why, such as the Private API helper not being connected.
 - **Edit and Unsend are offered only within 2 minutes of sending,** and only for your own iMessages. The buttons disappear once a message is older than that.
 - **`bluepill-server` edit/unsend endpoints report failures:** they look up the message's chat in `chat.db` when none is given. They answer `503` when the Messages helper isn't connected, `502` when it refuses, and `404` for an unknown message, instead of always answering `200`.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.

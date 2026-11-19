@@ -550,6 +550,12 @@ private:
     // The chat a message actually belongs to on the Mac (not the merged canonical chat).
     static QString messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid);
     void applyLocalUnsend(const QString &messageGuid, const QString &chatGuid);
+    // Edits to one message can overlap; only the newest outstanding edit may
+    // roll back, and it rolls back to the last text the Mac confirmed.
+    struct EditSnapshot { QString text; QJsonValue dateEdited; QJsonValue attributed; quint64 seq = 0; };
+    struct EditTracking { quint64 latestSeq = 0; int pending = 0; EditSnapshot confirmed; };
+    QHash<QString, EditTracking> m_editTracking;
+    static bool parseJsonReplyObject(const QByteArray &bytes, QJsonObject *out);
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
     QNetworkRequest makeSocketIoRequest(const QList<QPair<QString, QString>> &extraQueryItems = {}, int timeoutMs = 85000) const;
     QUrl buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems = {}) const;

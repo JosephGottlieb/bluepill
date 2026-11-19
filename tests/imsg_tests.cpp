@@ -2446,6 +2446,128 @@ private slots:
         QCOMPARE(win->property("editTargetGuid").toString(), QString());
         QCOMPARE(b.messages().size(), before);
         QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("Final wording"));
+
+        // An unsent draft survives editing (saved and cancelled), and effect/schedule are hidden meanwhile
+        QObject *effectBtn = win->findChild<QObject *>(QStringLiteral("composerEffectBtn"));
+        QObject *scheduleBtn = win->findChild<QObject *>(QStringLiteral("composerScheduleBtn"));
+        QVERIFY(effectBtn && scheduleBtn);
+        QVERIFY(effectBtn->property("visible").toBool());
+        composer->setProperty("text", QStringLiteral("half-written draft"));
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("Final wording"));
+        QVERIFY(!effectBtn->property("visible").toBool());
+        QVERIFY(!scheduleBtn->property("visible").toBool());
+        QMetaObject::invokeMethod(win, "cancelEditing");
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
+        QVERIFY(effectBtn->property("visible").toBool());
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
+        composer->setProperty("text", QStringLiteral("Final wording!"));
+        QMetaObject::invokeMethod(win, "sendComposerContent");
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
+    }
+
+    void testOverlappingEditsAndNonJsonRepliesDontClobber() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        // Fake relay: edit requests wait until the test answers them, keyed by the edited text
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QString, QTcpSocket *> pendingEdits;
+        QHash<QTcpSocket *, QByteArray> buffers;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &buf = buffers[sock];
+                    buf += sock->readAll();
+                    const int headerEnd = buf.indexOf("\r\n\r\n");
+                    if (headerEnd < 0) return;
+                    const QByteArray head = buf.left(headerEnd).toLower();
+                    int len = 0;
+                    const int cl = head.indexOf("content-length:");
+                    if (cl >= 0) len = head.mid(cl + 15, head.indexOf('\r', cl) - cl - 15).trimmed().toInt();
+                    if (buf.size() < headerEnd + 4 + len) return;
+                    const QByteArray body = buf.mid(headerEnd + 4, len);
+                    const QByteArray reqLine = buf.left(buf.indexOf('\r'));
+                    buf.clear();
+                    if (reqLine.contains("/edit")) {
+                        pendingEdits.insert(QJsonDocument::fromJson(body).object().value(QStringLiteral("editedMessage")).toString(), sock);
+                        return;
+                    }
+                    const QByteArray ok = R"({"status":200,"data":[]})";
+                    sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
+                                QByteArray::number(ok.size()) + "\r\n\r\n" + ok);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        auto answer = [&](const QString &editedText, int status, const QByteArray &body) {
+            QTcpSocket *sock = pendingEdits.take(editedText);
+            QVERIFY(sock);
+            sock->write("HTTP/1.1 " + QByteArray::number(status) + " X\r\nConnection: close\r\nContent-Length: " +
+                        QByteArray::number(body.size()) + "\r\n\r\n" + body);
+            sock->disconnectFromHost();
+        };
+        qputenv("BLUEPILL_SERVER_URL", QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()).toUtf8());
+        qputenv("BLUEPILL_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_edits.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_edits.json")));
+        b.loadCredentials();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto mine = [&](const char *guid, const char *text) {
+            return QJsonObject{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                               {QStringLiteral("isFromMe"), true}, {QStringLiteral("isSent"), true},
+                               {QStringLiteral("service"), QStringLiteral("iMessage")}, {QStringLiteral("dateCreated"), now - 10000},
+                               {QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}}}}};
+        };
+        b.ingestMessagesForTest(QJsonArray{mine("m-1", "Original"), mine("m-2", "Second original")}, true);
+        b.selectChat(chatGuid);
+        auto textOf = [&](const QString &g) {
+            for (const QVariant &v : b.messages())
+                if (v.toMap().value(QStringLiteral("guid")).toString() == g) return v.toMap().value(QStringLiteral("text")).toString();
+            return QString();
+        };
+        const QByteArray okJson = R"({"status":200,"data":{}})";
+
+        // Edit A, then B before A answers; B succeeds, then A fails: B must stay
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit A"));
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit B"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 2, 3000);
+        answer(QStringLiteral("Edit B"), 200, okJson);
+        QTRY_COMPARE_WITH_TIMEOUT(textOf(QStringLiteral("m-1")), QStringLiteral("Edit B"), 3000);
+        answer(QStringLiteral("Edit A"), 502, R"({"status":502,"message":"refused"})");
+        QTest::qWait(300);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit B"));
+
+        // Both fail (older first): the newest failure rolls back to the last confirmed text
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit C"));
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit D"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 2, 3000);
+        answer(QStringLiteral("Edit C"), 502, R"({"status":502,"message":"refused"})");
+        QTest::qWait(200);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit D"));  // D still outstanding
+        answer(QStringLiteral("Edit D"), 502, R"({"status":502,"message":"refused"})");
+        QTRY_COMPARE_WITH_TIMEOUT(textOf(QStringLiteral("m-1")), QStringLiteral("Edit B"), 3000);
+
+        // A 200 that isn't JSON (proxy login page) is not a confirmation
+        b.editMessage(QStringLiteral("m-2"), QStringLiteral("Proxy edit"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        answer(QStringLiteral("Proxy edit"), 200, "<html><body>Sign in to continue</body></html>");
+        QTRY_COMPARE_WITH_TIMEOUT(textOf(QStringLiteral("m-2")), QStringLiteral("Second original"), 3000);
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {

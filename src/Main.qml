@@ -38,10 +38,15 @@ ApplicationWindow {
         var sent = Number(m.dateCreated || 0)
         return sent > 0 && root.nowMs - sent < backend.messageEditWindowMs
     }
+    // The unsent draft that was in the composer when editing started
+    property string preEditDraft: ""
     function startEditing(guid, text) {
         root.replyTargetGuid = ""
         root.replyTargetSender = ""
         root.replyTargetText = ""
+        if (root.editTargetGuid === "") root.preEditDraft = composerInput.text
+        effectMenuPopup.visible = false
+        scheduleMenuPopup.visible = false
         root.editTargetGuid = guid
         composerInput.text = text || ""
         composerInput.forceActiveFocus()
@@ -50,7 +55,8 @@ ApplicationWindow {
     function cancelEditing() {
         if (root.editTargetGuid === "") return
         root.editTargetGuid = ""
-        composerInput.text = ""
+        composerInput.text = root.preEditDraft
+        root.preEditDraft = ""
     }
     property string stagedAttachmentPath: ""
     property string stagedAttachmentName: ""
@@ -60,12 +66,15 @@ ApplicationWindow {
     property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
+    // The photo that was right-clicked, so Copy Image copies that one
+    property string pinnedActionAttachmentGuid: ""
     // The tapback / reply / copy / delete bar opens on right-click only (hovering
     // a message neither outlines it nor shows the bar).
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid
 
     function clearActionMenu() {
         pinnedActionMessageGuid = ""
+        pinnedActionAttachmentGuid = ""
         hoveredActionMessageGuid = ""
     }
 
@@ -132,7 +141,8 @@ ApplicationWindow {
             var editGuid = root.editTargetGuid
             var edited = composerInput.text.trim()
             root.editTargetGuid = ""
-            composerInput.text = ""
+            composerInput.text = root.preEditDraft
+            root.preEditDraft = ""
             if (edited.length > 0) backend.editMessage(editGuid, edited)
             return
         }
@@ -3810,6 +3820,12 @@ ApplicationWindow {
                         function copyPrimaryImageAttachment() {
                             var imgList = modelData.imageAttachments || []
                             var firstImg = imgList.length > 0 ? imgList[0] : null
+                            // Prefer the photo that was right-clicked
+                            if (root.pinnedActionMessageGuid === modelData.guid && root.pinnedActionAttachmentGuid !== "") {
+                                for (var ci = 0; ci < imgList.length; ++ci) {
+                                    if (imgList[ci] && imgList[ci].guid === root.pinnedActionAttachmentGuid) { firstImg = imgList[ci]; break }
+                                }
+                            }
                             var guid = (firstImg && firstImg.guid) ? firstImg.guid : (modelData.attachmentGuid || "")
                             var rawUrl = (firstImg && firstImg.localUrl) ? firstImg.localUrl : (msgDelegate.liveAttachmentUrl || modelData.attachmentLocalUrl || "")
                             var resolvedUrl = msgDelegate.resolveAttachmentUrl(guid, rawUrl)
@@ -4330,6 +4346,7 @@ ApplicationWindow {
                                             if (mouse.button === Qt.RightButton) {
                                                 // Right-click opens (or closes) this message's actions
                                                 root.pinnedActionMessageGuid = (root.pinnedActionMessageGuid === modelData.guid) ? "" : modelData.guid
+                                                root.pinnedActionAttachmentGuid = ""
                                                 return
                                             }
                                             // Left-click just dismisses an open action bar
@@ -4422,7 +4439,9 @@ ApplicationWindow {
                                                         if (mouse.button === Qt.RightButton) {
                                                             // Same as the bubble: right-click opens the message's actions (Copy is there)
                                                             var mg = msgDelegate.modelData.guid
-                                                            root.pinnedActionMessageGuid = (root.pinnedActionMessageGuid === mg) ? "" : mg
+                                                            const reopen = root.pinnedActionMessageGuid !== mg || root.pinnedActionAttachmentGuid !== (modelData.guid || "")
+                                                            root.pinnedActionMessageGuid = reopen ? mg : ""
+                                                            root.pinnedActionAttachmentGuid = reopen ? (modelData.guid || "") : ""
                                                             return
                                                         }
                                                         var rawList = imageAttachmentRepeater.model || []
@@ -4754,6 +4773,8 @@ ApplicationWindow {
                                                 TapHandler {
                                                     acceptedButtons: Qt.LeftButton
                                                     onTapped: (eventPoint) => {
+                                                        // A left tap in the text closes an open action bar (a drag-select isn't a tap)
+                                                        if (root.pinnedActionMessageGuid !== "") root.clearActionMenu()
                                                         var lnk = msgText.linkAt(eventPoint.position.x, eventPoint.position.y)
                                                         if (!lnk || lnk.length === 0) {
                                                             lnk = msgText.hoveredLink
@@ -5401,7 +5422,8 @@ ApplicationWindow {
                 Rectangle {
                     id: stagedAttachmentBar
                     objectName: "stagedAttachmentBar"
-                    visible: backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
+                    // Hidden while editing: its Send must never touch the message being edited
+                    visible: root.editTargetGuid === "" && backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
                     Layout.fillWidth: true
                     Layout.preferredHeight: 64
                     color: theme.darkBackground
@@ -5962,6 +5984,8 @@ ApplicationWindow {
                         // Expressive Send Effect Menu Button (✨)
                         Rectangle {
                             id: effectBtn
+                            objectName: "composerEffectBtn"
+                            visible: root.editTargetGuid === ""
                             Layout.preferredWidth: 42
                             Layout.preferredHeight: 42
                             Layout.alignment: Qt.AlignVCenter
@@ -5995,6 +6019,8 @@ ApplicationWindow {
                         // Send Later Schedule Button (🕒)
                         Rectangle {
                             id: scheduleBtn
+                            objectName: "composerScheduleBtn"
+                            visible: root.editTargetGuid === ""
                             Layout.preferredWidth: 42
                             Layout.preferredHeight: 42
                             Layout.alignment: Qt.AlignVCenter
@@ -10662,6 +10688,7 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             effectMenuPopup.visible = false;
+                            if (root.editTargetGuid !== "") return;
                             var txt = composerInput.text.trim();
                             if (txt.length === 0) {
                                 root.showToast("Type a message to send with effect");
@@ -10736,6 +10763,7 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             scheduleMenuPopup.visible = false;
+                            if (root.editTargetGuid !== "") return;
                             var txt = composerInput.text.trim();
                             if (txt.length === 0) {
                                 root.showToast("Type a message to schedule");
