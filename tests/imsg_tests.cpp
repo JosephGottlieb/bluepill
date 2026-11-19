@@ -2707,6 +2707,28 @@ private slots:
         QVERIFY2(!listView->property("atYBeginning").toBool() && midOffsetFromTop > 150.0,
                  "Mid-chat scroll position must be strictly below the top of the chat");
 
+        // contentY - originY is not a stable position for a ListView with variable-height
+        // delegates: originY is Qt's size estimate and shifts when delegates are rebuilt even
+        // though nothing on screen moves. Anchor on the message actually shown mid-viewport.
+        struct ViewAnchor { int index = -1; qreal topInView = 0.0; };
+        auto viewAnchor = [&]() {
+            ViewAnchor a;
+            const qreal cy = listView->property("contentY").toReal();
+            const qreal probeY = cy + listView->height() / 2.0;
+            QMetaObject::invokeMethod(listView, "indexAt", Q_RETURN_ARG(int, a.index),
+                                      Q_ARG(qreal, listView->width() / 2.0), Q_ARG(qreal, probeY));
+            QQuickItem *item = nullptr;
+            if (a.index >= 0) {
+                QMetaObject::invokeMethod(listView, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item),
+                                          Q_ARG(int, a.index));
+            }
+            if (item) a.topInView = item->y() - cy;
+            return a;
+        };
+        const ViewAnchor midAnchor = viewAnchor();
+        QVERIFY2(midAnchor.index > 0 && midAnchor.index < 34,
+                 qPrintable(QStringLiteral("Expected a mid-chat message in view, got index %1").arg(midAnchor.index)));
+
         // Perform a tapback while scrolled up in the middle of Alpine Trail Crew -> must stay at mid-chat and never jump to top!
         b.sendReaction(alpineChatGuid, QStringLiteral("MSG-ALPINE-20"), QStringLiteral("👍"));
         QCoreApplication::processEvents();
@@ -2717,9 +2739,11 @@ private slots:
         QCOMPARE(listView->property("stickToBottom").toBool(), false);
         QVERIFY2(!listView->property("atYBeginning").toBool() && afterTapbackOffsetFromTop > 150.0,
                  "Tapback while scrolled up must NEVER reset messageListView to the top of the chat");
-        QVERIFY2(qAbs(afterTapbackOffsetFromTop - midOffsetFromTop) < 120.0,
-                 qPrintable(QStringLiteral("Expected scroll offset near %1 after tapback, got %2")
-                                .arg(midOffsetFromTop).arg(afterTapbackOffsetFromTop)));
+        const ViewAnchor afterAnchor = viewAnchor();
+        QVERIFY2(afterAnchor.index == midAnchor.index && qAbs(afterAnchor.topInView - midAnchor.topInView) < 8.0,
+                 qPrintable(QStringLiteral("Expected message %1 at %2px in view after tapback, got message %3 at %4px")
+                                .arg(midAnchor.index).arg(midAnchor.topInView)
+                                .arg(afterAnchor.index).arg(afterAnchor.topInView)));
     }
 
     void testReactionPillHoverTooltipAndGroupSenderNames() {
