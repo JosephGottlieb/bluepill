@@ -2977,8 +2977,8 @@ private slots:
     void testServerUrlDefaultsToHttpAndRelayPort() {
         auto n = [](const char *s) { return Backend::normalizeServerEndpointUrl(QString::fromUtf8(s)); };
         // Bare host -> http:// + default relay port
-        QCOMPARE(n("mbp.tail1234.ts.net"), QStringLiteral("http://mbp.tail1234.ts.net:1235"));
-        QCOMPARE(n("  100.64.0.7/ "), QStringLiteral("http://100.64.0.7:1235"));
+        QCOMPARE(n("mac-relay.example.com"), QStringLiteral("http://mac-relay.example.com:1235"));
+        QCOMPARE(n("  192.0.2.7/ "), QStringLiteral("http://192.0.2.7:1235"));
         QCOMPARE(n("my-mac"), QStringLiteral("http://my-mac:1235"));
         // Explicit port is kept
         QCOMPARE(n("my-mac:1234"), QStringLiteral("http://my-mac:1234"));
@@ -3005,9 +3005,9 @@ private slots:
         };
         QCOMPARE(split("my-mac:8080"), QStringLiteral("my-mac|8080"));
         QCOMPARE(split("https://relay.example.com:8443/bb/"), QStringLiteral("https://relay.example.com/bb|8443"));
-        QCOMPARE(split("http://100.64.0.7:1235", true), QStringLiteral("http://100.64.0.7|"));
-        QCOMPARE(split("http://100.64.0.7:1235", false), QStringLiteral("http://100.64.0.7|1235"));
-        QCOMPARE(split("http://[fd7a::1]:9000"), QStringLiteral("http://[fd7a::1]|9000"));
+        QCOMPARE(split("http://192.0.2.7:1235", true), QStringLiteral("http://192.0.2.7|"));
+        QCOMPARE(split("http://192.0.2.7:1235", false), QStringLiteral("http://192.0.2.7|1235"));
+        QCOMPARE(split("http://[2001:db8::2]:9000"), QStringLiteral("http://[2001:db8::2]|9000"));
         QCOMPARE(split("my-mac"), QStringLiteral("my-mac|"));
         QCOMPARE(split("user@mac.local"), QStringLiteral("user@mac.local|"));
         QCOMPARE(split("my-mac:99999"), QStringLiteral("my-mac:99999|"));
@@ -3024,9 +3024,9 @@ private slots:
         QCOMPARE(compose("user@mac.local", "4000"), QStringLiteral("ssh://user@mac.local"));
         QCOMPARE(compose("", "4000"), QString());
         // Round trip: what the dialog loads composes back to the saved URL
-        const QVariantMap loaded = Backend::splitServerUrl(QStringLiteral("http://mbp.tail1234.ts.net:1235"), true);
+        const QVariantMap loaded = Backend::splitServerUrl(QStringLiteral("http://mac-relay.example.com:1235"), true);
         QCOMPARE(Backend::composeServerUrl(loaded.value("url").toString(), loaded.value("port").toString()),
-                 QStringLiteral("http://mbp.tail1234.ts.net:1235"));
+                 QStringLiteral("http://mac-relay.example.com:1235"));
     }
 
     void testSettingsDialogPortFieldCarryOverAndSave() {
@@ -3056,10 +3056,10 @@ private slots:
         };
 
         // Saved default-port URL loads as host + greyed (empty) port
-        call("loadPrimaryServerFields", QStringLiteral("http://mbp.tail1234.ts.net:1235"));
-        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("http://mbp.tail1234.ts.net"));
+        call("loadPrimaryServerFields", QStringLiteral("http://mac-relay.example.com:1235"));
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("http://mac-relay.example.com"));
         QCOMPARE(portIn->property("text").toString(), QString());
-        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("http://mbp.tail1234.ts.net:1235"));
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("http://mac-relay.example.com:1235"));
 
         // Legacy portless https config keeps 443 when re-saved
         call("loadPrimaryServerFields", QStringLiteral("https://relay.example.com"));
@@ -3083,16 +3083,16 @@ private slots:
     void testParseTailscaleMacPeers() {
         const QByteArray json = R"({
           "BackendState": "Running",
-          "Self": {"OS": "linux", "HostName": "laptop", "DNSName": "laptop.tail-x.ts.net.", "Online": true},
+          "Self": {"OS": "linux", "HostName": "laptop", "DNSName": "laptop.tailnet.example.com.", "Online": true},
           "Peer": {
-            "k1": {"OS": "macOS", "HostName": "Studio", "DNSName": "studio.tail-x.ts.net.",
-                   "TailscaleIPs": ["fd7a:115c:a1e0::1", "100.64.0.9"], "Online": true},
-            "k2": {"OS": "macOS", "HostName": "Old MBP", "DNSName": "old-mbp.tail-x.ts.net.",
-                   "TailscaleIPs": ["100.64.0.10"], "Online": false},
-            "k3": {"OS": "linux", "HostName": "nas", "DNSName": "nas.tail-x.ts.net.",
-                   "TailscaleIPs": ["100.64.0.11"], "Online": true},
+            "k1": {"OS": "macOS", "HostName": "Studio", "DNSName": "studio.tailnet.example.com.",
+                   "TailscaleIPs": ["2001:db8::1", "192.0.2.9"], "Online": true},
+            "k2": {"OS": "macOS", "HostName": "Old Mac", "DNSName": "old-mac.tailnet.example.com.",
+                   "TailscaleIPs": ["192.0.2.10"], "Online": false},
+            "k3": {"OS": "linux", "HostName": "nas", "DNSName": "nas.tailnet.example.com.",
+                   "TailscaleIPs": ["192.0.2.11"], "Online": true},
             "k4": {"OS": "macOS", "HostName": "Air", "DNSName": "",
-                   "TailscaleIPs": ["100.64.0.12"], "Online": true}
+                   "TailscaleIPs": ["192.0.2.12"], "Online": true}
           }
         })";
         QString state;
@@ -3102,11 +3102,11 @@ private slots:
         // Sorted by name: Air, Studio
         const QVariantMap air = peers[0].toMap();
         QCOMPARE(air.value("name").toString(), QStringLiteral("Air"));
-        QCOMPARE(air.value("url").toString(), QStringLiteral("http://100.64.0.12:1235"));
+        QCOMPARE(air.value("url").toString(), QStringLiteral("http://192.0.2.12:1235"));
         const QVariantMap studio = peers[1].toMap();
-        QCOMPARE(studio.value("host").toString(), QStringLiteral("studio.tail-x.ts.net"));
-        QCOMPARE(studio.value("ip").toString(), QStringLiteral("100.64.0.9"));
-        QCOMPARE(studio.value("url").toString(), QStringLiteral("http://studio.tail-x.ts.net:1235"));
+        QCOMPARE(studio.value("host").toString(), QStringLiteral("studio.tailnet.example.com"));
+        QCOMPARE(studio.value("ip").toString(), QStringLiteral("192.0.2.9"));
+        QCOMPARE(studio.value("url").toString(), QStringLiteral("http://studio.tailnet.example.com:1235"));
         QCOMPARE(studio.value("probeState").toString(), QStringLiteral("pending"));
 
         QString stopped;

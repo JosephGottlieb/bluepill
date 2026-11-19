@@ -93,7 +93,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     cat << EOF_CFG > "${CONFIG_FILE}"
 {
   "host": "0.0.0.0",
-  "port": 1234,
+  "port": 1235,
   "password": "${GEN_PWD}",
   "helperPort": 45670,
   "enableBackgroundDaemons": true
@@ -102,13 +102,17 @@ EOF_CFG
     chmod 600 "${CONFIG_FILE}"
 fi
 
+# NOTE: bluepill-server reads only "password" from server.json; host/port come from
+# --host/--port (or BLUEPILL_HOST/BLUEPILL_PORT). Without --host it binds 127.0.0.1,
+# so add --host 0.0.0.0 (or the Mac's Tailscale IP) to the LaunchAgent for remote clients.
+
 # 2.4 Run Server Self-Test
 timeout 15s bluepill-server --selftest </dev/null
 
 # 2.5 Deploy LaunchAgent
 PLIST="${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist"
 BIN_PATH="$(which bluepill-server)"
-PORT=$(jq -r '.port // 1234' "${CONFIG_FILE}")
+PORT=$(jq -r '.port // 1235' "${CONFIG_FILE}")
 PWD=$(jq -r '.password // ""' "${CONFIG_FILE}")
 
 mkdir -p "${HOME}/Library/LaunchAgents"
@@ -180,7 +184,7 @@ mkdir -p "${CLIENT_DIR}"
 chmod 700 "${CLIENT_DIR}"
 
 CLIENT_CFG="${CLIENT_DIR}/config.json"
-RELAY_URL="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1234}"
+RELAY_URL="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"
 RELAY_TOKEN="${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}"
 
 cat << EOF_CC > "${CLIENT_CFG}"
@@ -232,7 +236,7 @@ echo "[✓] Linux Desktop Client configured."
 Run this verification block to report final status:
 
 ```bash
-RELAY_ADDR="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1234}"
+RELAY_ADDR="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"
 RELAY_PWD="${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}"
 
 # 1. Ping

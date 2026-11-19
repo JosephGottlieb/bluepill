@@ -98,7 +98,7 @@ if [[ ! -f "$CONFIG_FILE" ]]; then
     cat << EOF_CFG > "${CONFIG_FILE}"
 {
   "host": "0.0.0.0",
-  "port": 1234,
+  "port": 1235,
   "password": "${GENERATED_KEY}",
   "helperPort": 45670,
   "enableBackgroundDaemons": true
@@ -110,6 +110,8 @@ else
     echo "Configuration already exists at ${CONFIG_FILE}"
 fi
 ```
+
+> **Note:** `bluepill-server` reads only `password` from `server.json`. The listen address and port come from `--host` / `--port` (or `BLUEPILL_HOST` / `BLUEPILL_PORT`), so the LaunchAgent below binds to `127.0.0.1` unless you add `--host 0.0.0.0` (or the Mac's Tailscale IP) to `ProgramArguments`.
 
 ### Step 2.4: Execute Built-In Self-Test
 Verify that typedstream serialization and database engines pass all assertions:
@@ -124,7 +126,7 @@ Configure automatic startup on user login:
 ```bash
 PLIST_PATH="${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist"
 BINARY_PATH="$(which bluepill-server)"
-SERVER_PORT=$(jq -r '.port // 1234' "${CONFIG_FILE}")
+SERVER_PORT=$(jq -r '.port // 1235' "${CONFIG_FILE}")
 SERVER_PWD=$(jq -r '.password // ""' "${CONFIG_FILE}")
 
 mkdir -p "${HOME}/Library/LaunchAgents"
@@ -217,7 +219,7 @@ mkdir -p "${CLIENT_CONFIG_DIR}"
 chmod 700 "${CLIENT_CONFIG_DIR}"
 
 CLIENT_CONFIG="${CLIENT_CONFIG_DIR}/config.json"
-RELAY_URL="http://127.0.0.1:1234" # Or ssh://user@mac-host / https://relay.example.com
+RELAY_URL="http://127.0.0.1:1235" # Or ssh://user@mac-host / https://relay.example.com
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 
 cat << EOF_CLI > "${CLIENT_CONFIG}"
@@ -279,7 +281,7 @@ fi
 Run this non-interactive verification script to validate complete connectivity across all components:
 
 ```bash
-RELAY_HOST="127.0.0.1:1234" # Or your configured relay address
+RELAY_HOST="127.0.0.1:1235" # Or your configured relay address
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 
 echo "=== BluePill End-to-End Validation ==="

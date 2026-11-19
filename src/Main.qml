@@ -8346,7 +8346,7 @@ ApplicationWindow {
                                     root.showServerConfigModal = false
                                 }
                                 Text {
-                                    text: "my-mac.tailnet.ts.net  (or https://relay.example.com)"
+                                    text: "mac-relay.example.com  (or https://relay.example.com)"
                                     color: theme.darkForeground
                                     visible: !serverUrlInput.text && !serverUrlInput.activeFocus
                                     anchors.verticalCenter: parent.verticalCenter

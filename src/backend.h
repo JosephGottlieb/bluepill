@@ -147,8 +147,8 @@ public:
     QString serverPassword() const { return m_password; }
     bool hasPasswordConfigured() const { return !m_password.isEmpty(); }
     bool needsSetup() const { return !m_demoMode && (m_serverUrl.isEmpty() || (!m_serverUrl.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) && m_password.isEmpty())); }
-    QVariantList tailscaleRelays() const { return m_tailscaleRelays; }
-    QString tailscaleStatus() const { return m_tailscaleStatus; }
+    const QVariantList &tailscaleRelays() const { return m_tailscaleRelays; }
+    const QString &tailscaleStatus() const { return m_tailscaleStatus; }
     bool tailscaleScanning() const { return m_tailscaleScanning; }
     QString searchQuery() const { return m_searchQuery; }
     QString filterMode() const { return m_filterMode; }

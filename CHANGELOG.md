@@ -10,6 +10,11 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ### Added
 - **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
 
+### Documentation
+- Use the Homebrew relay port `1235` everywhere the docs referred to the BluePill relay on `1234` (server.json examples, LaunchAgent plists, reverse-proxy targets, Tailscale Serve, Web UI URLs, agent playbooks). BlueBubbles' own default `1234` is still mentioned where it applies.
+- Document the Settings Port field, Tailscale relay discovery, and when to enter `443` (TLS reverse proxy / Tailscale Serve).
+- Note that `bluepill-server` takes its listen address from `--host` / `--port` (not `server.json`) and listens on `127.0.0.1` unless it's given `--host`.
+
 ## [1.2.2] - 2026-11-18
 
 ### Fixed

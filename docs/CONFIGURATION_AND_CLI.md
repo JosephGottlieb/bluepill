@@ -5,9 +5,16 @@
 `BluePill` stores its server configuration in `~/.config/bluepill/config.json` with strict `0600` (`-rw-------`) owner-only permissions.
 - **Automatic Migration from `imsg`:** If `~/.config/bluepill/config.json` does not exist on first launch and `~/.config/imsg/config.json` is present, `BluePill` automatically migrates your configuration and credentials seamlessly.
 - **GUI Settings & Server Setup (`Ctrl+,`):** Press `Ctrl+,` or click **`⚙ Settings`** in the top bar at any time to configure:
-  - **Primary Server URL:** `https://bluepill.example.com` (BluePill Relay or BlueBubbles Server) or `ssh://user@mac-host` (Direct SSH mode)
-  - **Failover Server URL (Optional):** `https://backup-relay.example.com`
+  - **Primary Server URL + Port:** `mac-relay.example.com` (BluePill Relay), `https://bluepill.example.com` (behind TLS) or `ssh://user@mac-host` (Direct SSH mode)
+    - A URL without a scheme uses `http://`, because `bluepill-server` serves plain HTTP unless it's started with `--tls-cert`/`--tls-key`.
+    - The **Port** field shows the default `1235` greyed out. Leave it empty to use `1235` for both `http://` and `https://`. Enter `443` for a TLS reverse proxy or Tailscale Serve, or `1234` for a BlueBubbles Server on its default port.
+    - A port typed into the URL (`host:8080`) moves into the Port field when you leave the URL field.
+    - Port is ignored for `ssh://` URLs.
+  - **Macs on your Tailscale network:** If `tailscale` is installed and connected, Settings lists the online macOS peers on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. A Mac shown as *No relay on :1235* may be running `bluepill-server` without `--host`, so it only listens on `127.0.0.1`.
+  - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token
+
+URLs in `config.json` and in environment variables are used **as written**: no default port is added when they're loaded. Include the port explicitly (e.g. `http://mac-relay.example.com:1235`).
 
 Example `~/.config/bluepill/config.json`:
 ```json

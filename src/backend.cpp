@@ -1418,6 +1418,9 @@ void Backend::discoverTailscaleRelays() {
             const QString url = relays[i].toMap().value(QStringLiteral("url")).toString();
             QNetworkRequest req(QUrl(url + QStringLiteral("/api/v1/ping")));
             req.setTransferTimeout(3000);
+            QSslConfiguration ssl = req.sslConfiguration();
+            ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
+            req.setSslConfiguration(ssl);
             QNetworkReply *reply = m_nam.get(req);
             connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
                 reply->deleteLater();
