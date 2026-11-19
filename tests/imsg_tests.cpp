@@ -2353,6 +2353,42 @@ private slots:
                                                           "<body>Please enable cookies to continue to this site.</body></html>")));
         QVERIFY(!Backend::isDecodableImageData(QByteArray()));
         QVERIFY(!Backend::isDecodableImageData(png.left(20)));  // truncated
+
+        // Tiny but valid images are accepted (a 1x1 BMP is 58 bytes)
+        QImage dot(1, 1, QImage::Format_RGB888);
+        dot.fill(Qt::red);
+        QByteArray bmp;
+        QBuffer bmpBuf(&bmp);
+        QVERIFY(bmpBuf.open(QIODevice::WriteOnly));
+        QVERIFY(dot.save(&bmpBuf, "BMP"));
+        QVERIFY2(bmp.size() < 64, qPrintable(QString::number(bmp.size())));
+        QVERIFY(Backend::isDecodableImageData(bmp));
+
+        // Intact header, corrupt or missing pixel data: rejected because the image is decoded
+        QImage noisy(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < noisy.height(); ++y)
+            for (int x = 0; x < noisy.width(); ++x)
+                noisy.setPixel(x, y, qRgb((x * 37 + y * 11) % 256, (x * y) % 256, (x ^ y) % 256));
+        QByteArray noisyPng;
+        QBuffer noisyBuf(&noisyPng);
+        QVERIFY(noisyBuf.open(QIODevice::WriteOnly));
+        QVERIFY(noisy.save(&noisyBuf, "PNG"));
+        QVERIFY(Backend::isDecodableImageData(noisyPng));
+        QVERIFY(!Backend::isDecodableImageData(noisyPng.left(noisyPng.size() * 2 / 3)));
+        QByteArray corrupt = noisyPng;
+        for (int i = corrupt.size() / 3; i < corrupt.size() * 2 / 3; ++i) corrupt[i] = char(0xA5);
+        QVERIFY(!Backend::isDecodableImageData(corrupt));
+
+        // Cached thumbnails go through the same check
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString good = dir.filePath(QStringLiteral("good_thumb.jpg"));
+        const QString bad = dir.filePath(QStringLiteral("bad_thumb.jpg"));
+        { QFile f(good); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(bmp); }
+        { QFile f(bad); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(corrupt); }
+        QVERIFY(Backend::isDecodableImageFile(good));
+        QVERIFY(!Backend::isDecodableImageFile(bad));
+        QVERIFY(!Backend::isDecodableImageFile(dir.filePath(QStringLiteral("missing.jpg"))));
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
