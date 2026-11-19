@@ -227,6 +227,11 @@ jobs:
           ]
           body = "\n".join(body_parts)
 
+          summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+          if summary_path:
+              with open(summary_path, "a", encoding="utf-8") as sf:
+                  sf.write(body + "\n")
+
           comments_url = f"https://api.github.com/repos/{repo}/issues/{pr_num}/comments"
           req_get = urllib.request.Request(comments_url, headers={
               "Authorization": f"Bearer {token}",
@@ -253,8 +258,14 @@ jobs:
               },
               method=method
           )
-          with urllib.request.urlopen(req_post, timeout=15) as r:
-              print("Posted CodeRabbit-style AI PR review comment:", r.status)
+          try:
+              with urllib.request.urlopen(req_post, timeout=15) as r:
+                  print("Posted CodeRabbit-style AI PR review comment:", r.status)
+          except urllib.error.HTTPError as e:
+              if e.code in (401, 403):
+                  print(f"Fork PR has read-only GITHUB_TOKEN (HTTP {e.code}); walkthrough written to GITHUB_STEP_SUMMARY")
+              else:
+                  raise
 
           try:
               req_lbl = urllib.request.Request(

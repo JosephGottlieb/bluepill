@@ -10,6 +10,7 @@
   <a href="https://aur.archlinux.org/packages/bluepill"><img src="https://img.shields.io/badge/Arch_Linux-AUR_bluepill-1793d1?logo=arch-linux&logoColor=white" alt="AUR Package" /></a>
   <a href="https://github.com/nertwork/homebrew-tap"><img src="https://img.shields.io/badge/Homebrew-nertwork%2Ftap%2Fbluepill-FBB040?logo=homebrew&logoColor=white" alt="Homebrew Tap" /></a>
   <a href="https://coderabbit.ai"><img src="https://img.shields.io/coderabbit/prs/github/nertwork/bluepill?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fbluepill&labelColor=171717&color=FF570A&label=CodeRabbit+Reviews" alt="CodeRabbit Pull Request Reviews" /></a>
+  <a href="https://github.com/nertwork/bluepill/graphs/contributors"><img src="https://img.shields.io/github/contributors/nertwork/bluepill?color=0a84ff&label=Contributors" alt="Contributors" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-9ece6a.svg" alt="License: MIT" /></a>
 </p>
 
@@ -155,6 +156,17 @@ Every commit and Pull Request on `nertwork/bluepill` is verified by GitHub Actio
 - **`Arch Linux Build, Unit Tests & Package`:** Builds `bluepill` (C++20 / Qt6) inside `archlinux:latest`, runs the full offscreen QtTest suite (`QT_QPA_PLATFORM=offscreen ./bin/test`), verifies offscreen `--demo-screenshot` rendering, and builds the Arch Linux package with `makepkg`.
 - **`Static Analysis (cppcheck / qmllint) & CodeRabbit-Style AI Review`:** Runs `cppcheck --library=qt` and Qt6 `qmllint` on every PR and posts a detailed walkthrough.
 - **`Documentation Sync (gh-pages)` & `Release`:** Automatically publishes updated docs to [GitHub Pages](https://nertwork.github.io/bluepill/) on `main`, and builds Arch `.pkg.tar.zst` archives plus Homebrew universal bottles (`bluepill-*.all.bottle.tar.gz`) on version tags (`v*`).
+
+---
+
+## Community & Contributors
+
+Thank you to everyone contributing code, bug reports, testing, and platform improvements to **BluePill**!
+
+- **[@nertwork](https://github.com/nertwork) (James Farr Gomez)** — Creator & Maintainer (C++20/Qt6 Linux client, macOS `bluepill-server` relay, `IMCore` bridge, Web UI, Arch AUR & Homebrew packaging).
+- **[@JosephGottlieb](https://github.com/JosephGottlieb) (Joseph Gottlieb)** — macOS 26 (`any;` chat GUID) iMessage/RCS/SMS service resolution with dated evidence tracking & offscreen unit test suite ([#36](https://github.com/nertwork/bluepill/pull/36) / [#28](https://github.com/nertwork/bluepill/issues/28)), and 3-field Server Setup & Tailscale discovery ([#35](https://github.com/nertwork/bluepill/pull/35) / [#29](https://github.com/nertwork/bluepill/issues/29)).
+
+See the full **[GitHub Contributors Graph](https://github.com/nertwork/bluepill/graphs/contributors)** and our **[Contributing Guide](CONTRIBUTING.md)** to get involved.
 
 ---
 
