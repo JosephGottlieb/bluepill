@@ -9,6 +9,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
   - Clicking a quoted reply opens a thread view with the original message and every reply to it.
   - Choosing the original (**Show in conversation**) scrolls the timeline to it and briefly outlines it.
   - Messages that have replies show **N Replies** underneath, which opens the same view.
+  - A reply box at the bottom adds a reply to the thread without leaving it (Enter sends, Shift+Enter adds a line).
   - Esc closes it.
 
 ### Fixed

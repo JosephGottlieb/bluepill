@@ -2410,6 +2410,16 @@ private slots:
         QVERIFY(threadList);
         QTRY_COMPARE(threadList->property("count").toInt(), 3);
 
+        // Replying from the thread view adds a reply to this thread
+        QObject *replyInput = win->findChild<QObject *>(QStringLiteral("threadReplyInput"));
+        QVERIFY(replyInput);
+        replyInput->setProperty("text", QStringLiteral("Rye, obviously"));
+        QMetaObject::invokeMethod(win, "sendThreadReply");
+        QCOMPARE(replyInput->property("text").toString(), QString());
+        QTRY_COMPARE(threadList->property("count").toInt(), 4);
+        const QVariantList after = b.threadMessages(QStringLiteral("m-root"));
+        QCOMPARE(after.last().toMap().value(QStringLiteral("text")).toString(), QStringLiteral("Rye, obviously"));
+
         // Choosing the original closes the thread, scrolls there and flashes it
         QMetaObject::invokeMethod(win, "jumpToMessage", Q_ARG(QVariant, QStringLiteral("m-root")));
         QVERIFY(!win->property("showThreadView").toBool());

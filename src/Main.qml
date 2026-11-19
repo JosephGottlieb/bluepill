@@ -381,6 +381,15 @@ ApplicationWindow {
         root.clearActionMenu()
         root.threadRootGuid = rootGuid
         root.showThreadView = true
+        threadReplyInput.text = ""
+        threadReplyInput.forceActiveFocus()
+    }
+    function sendThreadReply() {
+        var text = threadReplyInput.text.trim()
+        if (text.length === 0 || backend.selectedChatGuid.length === 0 || root.threadRootGuid.length === 0) return
+        backend.sendMessage(backend.selectedChatGuid, text, root.threadRootGuid)
+        threadReplyInput.text = ""
+        threadList.positionViewAtEnd()
     }
     function jumpToMessage(guid) {
         var idx = backend.messageIndexForGuid(guid || "")
@@ -8663,6 +8672,61 @@ ApplicationWindow {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: root.jumpToMessage(threadItem.modelData.guid)
+                        }
+                    }
+                }
+
+                // Reply to the thread without leaving it
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(120, Math.max(40, Math.ceil(threadReplyInput.contentHeight) + threadReplyInput.topPadding + threadReplyInput.bottomPadding))
+                        radius: theme.radius
+                        color: theme.background
+                        border.width: 1
+                        border.color: threadReplyInput.activeFocus ? theme.accent : theme.muted
+                        TextArea {
+                            id: threadReplyInput
+                            objectName: "threadReplyInput"
+                            anchors.fill: parent
+                            anchors.leftMargin: 6
+                            anchors.rightMargin: 6
+                            topPadding: 9
+                            bottomPadding: 9
+                            placeholderText: i18n.tr("Reply to thread… (Enter to send)")
+                            placeholderTextColor: theme.darkForeground
+                            color: theme.brightForeground
+                            font.pixelSize: theme.fontSize
+                            wrapMode: TextArea.Wrap
+                            background: Item {}
+                            Keys.onReturnPressed: function(event) {
+                                if (event.modifiers & Qt.ShiftModifier) { event.accepted = false; return }
+                                root.sendThreadReply()
+                            }
+                            Keys.onEnterPressed: root.sendThreadReply()
+                            Keys.onEscapePressed: root.showThreadView = false
+                        }
+                    }
+                    Rectangle {
+                        objectName: "threadReplySendBtn"
+                        Layout.preferredWidth: 70
+                        Layout.preferredHeight: 40
+                        radius: theme.radius
+                        readonly property bool canSend: threadReplyInput.text.trim().length > 0
+                        color: canSend ? theme.accent : theme.lighterBackground
+                        Text {
+                            anchors.centerIn: parent
+                            text: i18n.tr("Reply")
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: parent.canSend ? "#ffffff" : theme.darkForeground
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.sendThreadReply()
                         }
                     }
                 }
