@@ -10,7 +10,7 @@
     - The **Port** field shows the default `1235` greyed out. Leave it empty to use `1235` for both `http://` and `https://`. Enter `443` for a TLS reverse proxy or Tailscale Serve, or `1234` for a BlueBubbles Server on its default port.
     - A port typed into the URL (`host:8080`) moves into the Port field when you leave the URL field.
     - Port is ignored for `ssh://` URLs.
-    - The client sends the relay password over plain `http://` only to localhost, Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `*.ts.net`) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, `*.local`). A public host needs `https://`, and Settings shows a warning when an `http://` URL would be refused.
+    - The client sends the relay password over plain `http://` only to localhost, Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `*.ts.net`, or a custom-domain name that resolves only to devices on your tailnet, confirmed with `tailscale status`) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, `*.local`). A public host needs `https://`, and Settings shows a warning when an `http://` URL would be refused.
   - **Macs on your Tailscale network:** If `tailscale` is installed and connected, Settings lists the online macOS peers on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. A Mac shown as *No relay on :1235* may be running `bluepill-server` without `--host`, so it only listens on `127.0.0.1`.
   - **Failover Server URL (Optional):** `https://backup-relay.example.com:443`. Include the port inline; without one, `1235` is used.
   - **API Password / Key:** Your relay password/token

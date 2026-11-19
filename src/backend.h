@@ -1,8 +1,10 @@
 #include <atomic>
+#include <functional>
 #pragma once
 
 #include <QFileSystemWatcher>
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -78,6 +80,8 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList tailscaleRelays READ tailscaleRelays NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(QString tailscaleStatus READ tailscaleStatus NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(bool tailscaleScanning READ tailscaleScanning NOTIFY tailscaleRelaysChanged)
+    // Bumped when a host name is confirmed as a tailnet node (see verifyTailnetHosts).
+    Q_PROPERTY(int verifiedTailnetHostsRevision READ verifiedTailnetHostsRevision NOTIFY verifiedTailnetHostsChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY filterChanged)
     Q_PROPERTY(QString filterMode READ filterMode WRITE setFilterMode NOTIFY filterChanged)
     Q_PROPERTY(QString selectedChatGuid READ selectedChatGuid NOTIFY selectedChatChanged)
@@ -282,6 +286,16 @@ public:
     // Parses `tailscale status --json` into online macOS peers:
     // [{name, host, ip, url}] (url = http://<MagicDNS name>:1235).
     static QVariantList parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState = nullptr);
+    // Every Tailscale IP of this node and its peers in `tailscale status --json`.
+    static QSet<QString> parseTailscaleNodeIps(const QByteArray &statusJson);
+    // True when every address is a Tailscale address that belongs to a tailnet node.
+    static bool addressesAreTailnetNodes(const QList<QHostAddress> &addresses, const QSet<QString> &nodeIps);
+    // Host names (e.g. a custom-domain Tailscale FQDN) confirmed to resolve only to tailnet nodes.
+    static bool isVerifiedTailnetHost(const QString &host);
+    static void markVerifiedTailnetHost(const QString &host);
+    int verifiedTailnetHostsRevision() const { return m_verifiedTailnetHostsRevision; }
+    // Settings: check a typed http:// host name in the background.
+    Q_INVOKABLE void verifyTailnetHostForUrl(const QString &url);
     Q_INVOKABLE void discoverTailscaleRelays();
     Q_INVOKABLE void openWebUi();
     Q_INVOKABLE void setHistorySyncDays(int days);
@@ -546,6 +560,7 @@ signals:
     void statusChanged();
     void configChanged();
     void tailscaleRelaysChanged();
+    void verifiedTailnetHostsChanged();
     void loadingChanged();
     void filterChanged();
     void selectedChatChanged();
@@ -655,6 +670,12 @@ private:
     bool m_tailscaleScanning = false;
     int m_tailscalePendingProbes = 0;
     void setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning);
+    // http:// host names that need a tailnet check before the password may be sent.
+    QStringList hostsNeedingTailnetVerification() const;
+    void verifyTailnetHosts(const QStringList &hosts, std::function<void()> done);
+    QSet<QString> m_tailnetHostsChecked;      // checked this session (verified or not)
+    QSet<QString> m_tailnetHostsInFlight;
+    int m_verifiedTailnetHostsRevision = 0;
     void probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback);
     QHash<QString, qint64> m_chatServiceDates;  // chat guid -> date of message that set entry.service
     bool m_chatServiceEmitPending = false;

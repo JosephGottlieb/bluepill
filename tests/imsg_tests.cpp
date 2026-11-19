@@ -3026,6 +3026,34 @@ private slots:
         QVERIFY(!ok("http://evil.ts.net.example.com:1235"));
         QVERIFY(!ok("http://my-mac:1235"));
         QVERIFY(ok("https://relay.example.com"));
+        // Custom-domain Tailscale FQDNs: trusted only once confirmed as a tailnet node
+        const QByteArray status = R"({
+          "BackendState": "Running",
+          "Self": {"TailscaleIPs": ["100.100.1.1", "fd7a:115c:a1e0::1"]},
+          "Peer": {"k1": {"TailscaleIPs": ["100.100.1.2", "fd7a:115c:a1e0::2"]},
+                   "k2": {"TailscaleIPs": ["100.100.1.3"]}}})";
+        const QSet<QString> nodeIps = Backend::parseTailscaleNodeIps(status);
+        QCOMPARE(nodeIps.size(), 5);
+        QVERIFY(nodeIps.contains(QStringLiteral("100.100.1.2")) && nodeIps.contains(QStringLiteral("fd7a:115c:a1e0::2")));
+        auto nodes = [&nodeIps](std::initializer_list<const char *> ips) {
+            QList<QHostAddress> list;
+            for (const char *ip : ips) list.append(QHostAddress(QString::fromLatin1(ip)));
+            return Backend::addressesAreTailnetNodes(list, nodeIps);
+        };
+        QVERIFY(nodes({"100.100.1.2"}));
+        QVERIFY(nodes({"100.100.1.2", "fd7a:115c:a1e0::2"}));
+        QVERIFY(nodes({"::ffff:100.100.1.3"}));
+        QVERIFY(!nodes({"100.100.9.9"}));                 // CGNAT range but not a tailnet node
+        QVERIFY(!nodes({"100.100.1.2", "203.0.113.5"}));  // any non-tailnet answer fails
+        QVERIFY(!nodes({}));
+        QVERIFY(Backend::parseTailscaleNodeIps("not json").isEmpty());
+
+        QVERIFY(!ok("http://relay.tail.example.com:1235/api/v1/ping"));
+        Backend::markVerifiedTailnetHost(QStringLiteral("Relay.Tail.Example.com"));
+        QVERIFY(ok("http://relay.tail.example.com:1235/api/v1/ping"));
+        QVERIFY(ok("ws://RELAY.tail.example.com:1235/socket.io/"));
+        QVERIFY(!ok("http://other.tail.example.com:1235"));
+
         // QML helper: SSH and empty fields never warn
         QVERIFY(Backend::isPasswordTransportAllowed(QStringLiteral("ssh://user@mac.local")));
         QVERIFY(Backend::isPasswordTransportAllowed(QString()));

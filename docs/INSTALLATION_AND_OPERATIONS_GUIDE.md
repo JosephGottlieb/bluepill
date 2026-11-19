@@ -555,7 +555,7 @@ BluePill supports two primary connection methods between Linux workstations and 
 - Full two-way push event delivery via WebSockets.
 - URL Format: `http://192.168.1.50:1235` or `https://bluepill.example.com:443`.
 - In **⚙ Settings**, a URL without a scheme uses `http://`, and an empty **Port** field uses `1235` for both `http://` and `https://`. A port typed into the URL (`host:8080`) moves into the Port field.
-- The client sends the relay password over plain `http://` only to localhost, Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `*.ts.net`) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, `*.local`). A public host needs `https://`, and Settings shows a warning when an `http://` URL would be refused.
+- The client sends the relay password over plain `http://` only to localhost, Tailscale (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `*.ts.net`, or a custom-domain name that resolves only to devices on your tailnet, confirmed with `tailscale status`) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, `*.local`). A public host needs `https://`, and Settings shows a warning when an `http://` URL would be refused.
 - **Tailscale:** if `tailscale` is installed and connected on the Linux client, Settings lists the online Macs on your tailnet, checks each for a relay on `:1235`, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. The relay must be started with `--host` (see [Configuration & Self-Test](#configuration--self-test)) to be reachable.
 
 #### Method 2: Direct SSH Transport (`ssh://`)

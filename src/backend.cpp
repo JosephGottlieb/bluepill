@@ -136,6 +136,7 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
+#include <QHostInfo>
 #include <QThreadPool>
 #include <QUrl>
 #include <QUrlQuery>
@@ -143,6 +144,7 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <algorithm>
 #include <iostream>
 #include <limits>
+#include <memory>
 
 static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObject &obj,
                                       bool simulatePrePermFail = false, bool simulatePostPermFail = false) {
@@ -1443,6 +1445,138 @@ QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QStri
     return out;
 }
 
+static QSet<QString> &verifiedTailnetHostSet() {
+    static QSet<QString> hosts;
+    return hosts;
+}
+
+// ::ffff:a.b.c.d -> a.b.c.d, so mapped answers compare like plain IPv4.
+static QHostAddress unmapIPv4(const QHostAddress &raw) {
+    if (raw.protocol() == QAbstractSocket::IPv6Protocol) {
+        bool isV4 = false;
+        const QHostAddress v4(raw.toIPv4Address(&isV4));
+        if (isV4) return v4;
+    }
+    return raw;
+}
+
+static bool isTailscaleAddress(const QHostAddress &raw) {
+    const QHostAddress addr = unmapIPv4(raw);
+    static const auto kCgnat = QHostAddress::parseSubnet(QStringLiteral("100.64.0.0/10"));
+    static const auto kTsV6 = QHostAddress::parseSubnet(QStringLiteral("fd7a:115c:a1e0::/48"));
+    return addr.isInSubnet(kCgnat) || addr.isInSubnet(kTsV6);
+}
+
+QSet<QString> Backend::parseTailscaleNodeIps(const QByteArray &statusJson) {
+    QSet<QString> out;
+    const QJsonObject root = QJsonDocument::fromJson(statusJson).object();
+    auto addNode = [&out](const QJsonObject &node) {
+        for (const QJsonValue &v : node.value(QStringLiteral("TailscaleIPs")).toArray()) {
+            const QHostAddress a(v.toString());
+            if (!a.isNull()) out.insert(unmapIPv4(a).toString());
+        }
+    };
+    addNode(root.value(QStringLiteral("Self")).toObject());
+    const QJsonObject peers = root.value(QStringLiteral("Peer")).toObject();
+    for (auto it = peers.constBegin(); it != peers.constEnd(); ++it) addNode(it.value().toObject());
+    return out;
+}
+
+bool Backend::addressesAreTailnetNodes(const QList<QHostAddress> &addresses, const QSet<QString> &nodeIps) {
+    if (addresses.isEmpty()) return false;
+    for (const QHostAddress &raw : addresses) {
+        // 100.64.0.0/10 is also carrier-grade NAT space, so the range alone isn't
+        // enough: the address must belong to a node that tailscale reports.
+        const QHostAddress a = unmapIPv4(raw);
+        if (!isTailscaleAddress(a) || !nodeIps.contains(a.toString())) return false;
+    }
+    return true;
+}
+
+bool Backend::isVerifiedTailnetHost(const QString &host) {
+    return verifiedTailnetHostSet().contains(host.trimmed().toLower());
+}
+
+void Backend::markVerifiedTailnetHost(const QString &host) {
+    const QString h = host.trimmed().toLower();
+    if (!h.isEmpty()) verifiedTailnetHostSet().insert(h);
+}
+
+QStringList Backend::hostsNeedingTailnetVerification() const {
+    QStringList hosts;
+    for (const QString &raw : {m_serverUrl, m_secondaryServerUrl}) {
+        const QUrl u(raw.trimmed());
+        if (u.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0) continue;
+        const QString host = u.host().toLower();
+        if (host.isEmpty() || !QHostAddress(host).isNull()) continue;  // IPs are judged directly
+        if (isTrustedPasswordTransportUrl(u)) continue;                // localhost, *.ts.net, *.local, verified
+        if (m_tailnetHostsChecked.contains(host) || hosts.contains(host)) continue;
+        hosts.append(host);
+    }
+    return hosts;
+}
+
+void Backend::verifyTailnetHosts(const QStringList &hosts, std::function<void()> done) {
+    QStringList todo;
+    for (const QString &h : hosts) {
+        const QString host = h.trimmed().toLower();
+        if (host.isEmpty() || isVerifiedTailnetHost(host) || m_tailnetHostsInFlight.contains(host)) continue;
+        todo.append(host);
+    }
+    if (todo.isEmpty() || qEnvironmentVariableIntValue("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY") == 1) {
+        for (const QString &h : todo) m_tailnetHostsChecked.insert(h);
+        if (done) done();
+        return;
+    }
+    const QString exe = QStandardPaths::findExecutable(QStringLiteral("tailscale"));
+    if (exe.isEmpty()) {  // can't confirm tailnet membership without tailscale
+        for (const QString &h : todo) m_tailnetHostsChecked.insert(h);
+        if (done) done();
+        return;
+    }
+    for (const QString &h : todo) m_tailnetHostsInFlight.insert(h);
+
+    auto *proc = new QProcess(this);
+    auto *killTimer = new QTimer(proc);
+    killTimer->setSingleShot(true);
+    connect(killTimer, &QTimer::timeout, proc, [proc]() { proc->kill(); });
+    auto finish = [this, todo, done](const QSet<QString> &nodeIps) {
+        auto remaining = std::make_shared<int>(todo.size());
+        for (const QString &host : todo) {
+            QHostInfo::lookupHost(host, this, [this, host, nodeIps, remaining, done](const QHostInfo &info) {
+                m_tailnetHostsInFlight.remove(host);
+                m_tailnetHostsChecked.insert(host);
+                if (info.error() == QHostInfo::NoError && addressesAreTailnetNodes(info.addresses(), nodeIps)) {
+                    markVerifiedTailnetHost(host);
+                    ++m_verifiedTailnetHostsRevision;
+                    emit verifiedTailnetHostsChanged();
+                }
+                if (--(*remaining) == 0 && done) done();
+            });
+        }
+    };
+    connect(proc, &QProcess::errorOccurred, this, [proc, finish](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart) return;
+        proc->deleteLater();
+        finish({});
+    });
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [proc, finish](int, QProcess::ExitStatus status) {
+        proc->deleteLater();
+        finish(status == QProcess::NormalExit ? parseTailscaleNodeIps(proc->readAllStandardOutput()) : QSet<QString>{});
+    });
+    proc->start(exe, {QStringLiteral("status"), QStringLiteral("--json")});
+    killTimer->start(5000);
+}
+
+void Backend::verifyTailnetHostForUrl(const QString &url) {
+    const QUrl u(url.trimmed());
+    if (u.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0) return;
+    const QString host = u.host().toLower();
+    if (host.isEmpty() || !QHostAddress(host).isNull() || isTrustedPasswordTransportUrl(u)) return;
+    verifyTailnetHosts({host}, nullptr);
+}
+
 void Backend::setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning) {
     m_tailscaleRelays = relays;
     m_tailscaleStatus = status;
@@ -1656,6 +1790,9 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         }
     }
     m_lastConfiguredBaseUrl = normPrimary;
+    for (const QString &u : {normPrimary, normSecondary}) {
+        m_tailnetHostsChecked.remove(QUrl(u).host().toLower());  // re-check edited hosts
+    }
 
     if (m_serverUrl != normPrimary) {
         bumpServerEndpointGeneration();
@@ -2358,6 +2495,8 @@ bool Backend::isTrustedPasswordTransportUrl(const QUrl &url) {
         }
         // Tailscale: WireGuard already encrypts the tunnel end to end.
         if (host.endsWith(QStringLiteral(".ts.net"))) return true;
+        // A custom-domain name confirmed to resolve only to tailnet nodes.
+        if (isVerifiedTailnetHost(host)) return true;
         // Private networks (bluepill-server serves plain HTTP on :1235 by
         // default): RFC 1918, link-local, IPv6 ULA, mDNS names. Public
         // hosts still need https:// for the password.
@@ -2775,6 +2914,15 @@ void Backend::refreshAll() {
             emit statusChanged();
             return;
         }
+    }
+    // A custom-domain Tailscale name (e.g. relay.tail.example.com) over http://
+    // is only trusted once it's confirmed to resolve to a tailnet node.
+    const QStringList unverifiedHosts = hostsNeedingTailnetVerification();
+    if (!unverifiedHosts.isEmpty()) {
+        m_serverStatus = QStringLiteral("Checking Tailscale address...");
+        emit statusChanged();
+        verifyTailnetHosts(unverifiedHosts, [this]() { refreshAll(); });
+        return;
     }
     if (!m_connected && m_chats.isEmpty()) {
         m_serverStatus = QStringLiteral("Connecting...");

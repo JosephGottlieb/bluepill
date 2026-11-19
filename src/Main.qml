@@ -384,6 +384,7 @@ ApplicationWindow {
     // Primary server URL is edited as two fields: URL (no port) + Port.
     function loadPrimaryServerFields(url) {
         var raw = url || ""
+        backend.verifyTailnetHostForUrl(raw)
         var parts = backend.splitServerUrl(raw, true)
         var explicit = backend.splitServerUrl(raw, false).port
         serverUrlInput.text = parts.url
@@ -8999,7 +9000,10 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize
                                 selectByMouse: true
                                 KeyNavigation.tab: serverPortInput
-                                onEditingFinished: root.carryOverPrimaryServerPort()
+                                onEditingFinished: {
+                                    root.carryOverPrimaryServerPort()
+                                    backend.verifyTailnetHostForUrl(root.composedPrimaryServerUrl())
+                                }
                                 Keys.onReturnPressed: {
                                     backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
                                     root.showServerConfigModal = false
@@ -9062,9 +9066,11 @@ ApplicationWindow {
                     Text {
                         objectName: "serverUrlCleartextWarning"
                         Layout.fillWidth: true
+                        // Re-evaluated when a custom-domain Tailscale name is confirmed.
                         visible: serverUrlInput.text.trim().length > 0 && !primaryServerFields.isSshUrl
+                                 && backend.verifiedTailnetHostsRevision >= 0
                                  && !backend.isPasswordTransportAllowed(root.composedPrimaryServerUrl())
-                        text: i18n.tr("Plain http:// only works on localhost, Tailscale, or a private LAN address. For a public host, use https:// (a TLS reverse proxy).")
+                        text: i18n.tr("Plain http:// only works on localhost, Tailscale (a *.ts.net name, a Tailscale IP, or a name that resolves to a device on your tailnet), or a private LAN address. For a public host, use https:// (a TLS reverse proxy).")
                         font.pixelSize: theme.fontSize - 3
                         color: theme.red
                         wrapMode: Text.WordWrap
