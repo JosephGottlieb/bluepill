@@ -5,6 +5,11 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Fixed
+- **The pinned row shows your Mac's pinned conversations:**
+  - **What changed:** it reads the Mac's pins (`GET /api/v1/pinned`) in the Mac's order, instead of showing the four most recent chats when nothing was pinned locally.
+  - **Right-click:** on a pinned contact it opens the conversation menu instead of silently pinning that chat, which used to hide the other three.
+  - **Pin / Unpin:** the menu has **Pin** / **Unpin**. Unpinning a Mac pin hides it here and survives restarts, and pinning any chat adds it after the Mac's pins.
+  - **With nothing pinned,** the row is hidden.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
 

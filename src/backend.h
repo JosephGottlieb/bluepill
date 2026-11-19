@@ -268,6 +268,10 @@ public:
     Q_INVOKABLE bool isChatMuted(const QString &chatGuid) const;
     Q_INVOKABLE void togglePinChat(const QString &chatGuid);
     Q_INVOKABLE bool isChatPinned(const QString &chatGuid) const;
+    // Pins: the Mac's (Messages' pinned conversations), minus ones unpinned here, plus ones pinned here
+    QStringList macPinnedChatGuids() const;
+    QStringList effectivePinnedChatGuids() const;
+    void setMacPins(const QList<QVariantMap> &pins);
 
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setFilterMode(const QString &mode);
@@ -669,6 +673,9 @@ private:
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;
     bool m_stayOnHomePage = false;
+    QList<QVariantMap> m_macPins;          // from GET /api/v1/pinned
+    QSet<QString> m_unpinnedMacChats;      // Mac pins hidden here
+    void fetchMacPins();
 
     QString m_searchQuery;
     QString m_filterMode = QStringLiteral("all");

@@ -2919,23 +2919,40 @@ private slots:
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
         b.loadDemoData();
 
-        // By default, pinnedChats returns top 4 demo conversations
-        const QVariantList defaultPins = b.pinnedChats();
-        QCOMPARE(defaultPins.size(), 4);
-        QCOMPARE(defaultPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
+        // The row shows the Mac's pins (demo mode fakes three), not the most recent chats
+        const QVariantList macPins = b.pinnedChats();
+        QCOMPARE(macPins.size(), 3);
+        QCOMPARE(macPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
+        const QString alexGuid = macPins.first().toMap().value(QStringLiteral("guid")).toString();
 
-        // Explicitly pin Elena Vance -> pinnedChats now contains only explicitly pinned chats
+        // No Mac pins and none added here: the row is empty
+        b.setMacPins({});
+        QCOMPARE(b.pinnedChats().size(), 0);
+        QCOMPARE(b.isChatPinned(alexGuid), false);
+
+        // Mac pins come back in the Mac's order; one given by chat identifier only still resolves
         const QString elenaGuid = QStringLiteral("iMessage;-;elena.vance@example.com");
-        QCOMPARE(b.isChatPinned(elenaGuid), false);
-        b.togglePinChat(elenaGuid);
-        QCOMPARE(b.isChatPinned(elenaGuid), true);
-        QCOMPARE(b.pinnedChats().size(), 1);
-        QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), elenaGuid);
+        b.setMacPins({QVariantMap{{"guid", "any;-;elena.vance@example.com"}, {"chatIdentifier", "elena.vance@example.com"}},
+                      QVariantMap{{"guid", alexGuid}}});
+        QCOMPARE(b.pinnedChats().size(), 2);
+        QCOMPARE(b.pinnedChats().at(0).toMap().value(QStringLiteral("guid")).toString(), elenaGuid);
+        QVERIFY(b.isChatPinned(alexGuid));
 
-        // Unpin Elena Vance -> falls back to top 4
+        // Unpinning a Mac pin hides it here; pinning it again brings it back
         b.togglePinChat(elenaGuid);
         QCOMPARE(b.isChatPinned(elenaGuid), false);
-        QCOMPARE(b.pinnedChats().size(), 4);
+        QCOMPARE(b.pinnedChats().size(), 1);
+        b.togglePinChat(elenaGuid);
+        QVERIFY(b.isChatPinned(elenaGuid));
+
+        // Pinning another chat adds it after the Mac's pins
+        const QString otherGuid = b.chats().last().toMap().value(QStringLiteral("guid")).toString();
+        QVERIFY(!b.isChatPinned(otherGuid));
+        b.togglePinChat(otherGuid);
+        QCOMPARE(b.pinnedChats().size(), 3);
+        QCOMPARE(b.pinnedChats().last().toMap().value(QStringLiteral("guid")).toString(), otherGuid);
+        b.togglePinChat(otherGuid);
+        QCOMPARE(b.pinnedChats().size(), 2);
     }
 
     void testBluePillEditedExpressiveAndFailureBadges() {

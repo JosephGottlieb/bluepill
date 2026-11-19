@@ -466,6 +466,11 @@ void Backend::loadAppState() {
         const QString g = v.toString().trimmed();
         if (!g.isEmpty() && !m_pinnedChats.contains(g)) m_pinnedChats.append(g);
     }
+    m_unpinnedMacChats.clear();
+    for (const QJsonValue &v : obj.value(QStringLiteral("unpinnedMacChats")).toArray()) {
+        const QString g = v.toString().trimmed();
+        if (!g.isEmpty()) m_unpinnedMacChats.insert(g);
+    }
 
     m_readWatermarks.clear();
     const QJsonObject wmObj = obj.value(QStringLiteral("readWatermarks")).toObject();
@@ -684,6 +689,9 @@ bool Backend::saveAppState() const {
     }
     root.insert(QStringLiteral("mutedChats"), mutedArr);
     root.insert(QStringLiteral("pinnedChats"), pinnedArr);
+    QJsonArray unpinnedArr;
+    for (const QString &g : m_unpinnedMacChats) unpinnedArr.append(g);
+    root.insert(QStringLiteral("unpinnedMacChats"), unpinnedArr);
     root.insert(QStringLiteral("readWatermarks"), wmObj);
     root.insert(QStringLiteral("unreadOverrides"), uoObj);
     root.insert(QStringLiteral("deletedMessageGuids"), delMsgsArr);
@@ -1208,11 +1216,15 @@ bool Backend::isChatMuted(const QString &chatGuid) const {
 void Backend::togglePinChat(const QString &chatGuid) {
     const QString target = chatGuid.isEmpty() ? m_selectedChatGuid : chatGuid;
     if (target.isEmpty()) return;
-    if (m_pinnedChats.contains(target)) {
+    const bool fromMac = macPinnedChatGuids().contains(target);
+    if (isChatPinned(target)) {
+        // A Mac pin is hidden here (the Mac keeps it); a local pin is removed.
         m_pinnedChats.removeAll(target);
+        if (fromMac) m_unpinnedMacChats.insert(target);
         emit toastMessage(QStringLiteral("📌 Conversation unpinned"));
     } else {
-        m_pinnedChats.append(target);
+        if (fromMac) m_unpinnedMacChats.remove(target);
+        else if (!m_pinnedChats.contains(target)) m_pinnedChats.append(target);
         emit toastMessage(QStringLiteral("📌 Conversation pinned"));
     }
     saveAppState();
@@ -1220,7 +1232,59 @@ void Backend::togglePinChat(const QString &chatGuid) {
 }
 
 bool Backend::isChatPinned(const QString &chatGuid) const {
-    return !chatGuid.isEmpty() && m_pinnedChats.contains(chatGuid);
+    return !chatGuid.isEmpty() && effectivePinnedChatGuids().contains(chatGuid);
+}
+
+QStringList Backend::macPinnedChatGuids() const {
+    // Resolve the Mac's pins (chat GUIDs or identifiers) to chats in the list
+    QStringList out;
+    for (const QVariantMap &pin : m_macPins) {
+        const QString pg = pin.value(QStringLiteral("guid")).toString();
+        const QString pid = normalizeHandle(pin.value(QStringLiteral("chatIdentifier")).toString());
+        const QString canon = resolveCanonicalChatGuid(pg);
+        for (const ChatEntry &c : m_chats) {
+            const bool match = c.guid == pg || c.guid == canon || isSameConversation(c.guid, pg) ||
+                               (!pid.isEmpty() && !c.isGroup && normalizeHandle(c.chatIdentifier) == pid);
+            if (match) {
+                if (!out.contains(c.guid)) out.append(c.guid);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+QStringList Backend::effectivePinnedChatGuids() const {
+    QStringList out;
+    for (const QString &g : macPinnedChatGuids()) {
+        if (!m_unpinnedMacChats.contains(g)) out.append(g);
+    }
+    for (const QString &g : m_pinnedChats) {
+        if (!out.contains(g)) out.append(g);
+    }
+    return out;
+}
+
+void Backend::fetchMacPins() {
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    QNetworkReply *reply = m_nam.get(makeRequest(QStringLiteral("/api/v1/pinned")));
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) return;
+        const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
+        QList<QVariantMap> pins;
+        for (const QJsonValue &v : arr) {
+            const QVariantMap m = v.toObject().toVariantMap();
+            if (!m.value(QStringLiteral("guid")).toString().isEmpty()) pins.append(m);
+        }
+        setMacPins(pins);
+    });
+}
+
+void Backend::setMacPins(const QList<QVariantMap> &pins) {
+    if (pins == m_macPins) return;
+    m_macPins = pins;
+    emit chatsChanged();
 }
 
 bool Backend::omarchyDnd() const {
@@ -2496,6 +2560,7 @@ void Backend::refreshAll() {
     fetchChatsMetadata();
     fetchRecentMessages(0);
     fetchUnreadStateFromServer();
+    fetchMacPins();
     startSocketIoClient();
     // Defer heavy macOS AddressBook contact export so it never blocks BlueBubbles's
     // single-threaded Node.js event loop during initial startup/sync
@@ -4968,21 +5033,15 @@ QVariantList Backend::pinnedChats() const {
         map.insert(QStringLiteral("pinned"), true);
         result.append(map);
     };
-    if (!m_pinnedChats.isEmpty()) {
-        for (const QString &pinGuid : m_pinnedChats) {
-            for (const ChatEntry &c : m_chats) {
-                if (c.guid == pinGuid) {
-                    appendEntry(c);
-                    break;
-                }
+    // The Mac's pins (in its order), minus any unpinned here, then pins added
+    // here. Nothing pinned means an empty row, not the most recent chats.
+    for (const QString &pinGuid : effectivePinnedChatGuids()) {
+        for (const ChatEntry &c : m_chats) {
+            if (c.guid == pinGuid) {
+                appendEntry(c);
+                break;
             }
         }
-        return result;
-    }
-    // Default when no manual pins are saved: surface up to top 4 active chats
-    const int maxPins = qMin<int>(4, m_chats.size());
-    for (int i = 0; i < maxPins; ++i) {
-        appendEntry(m_chats.at(i));
     }
     return result;
 }
@@ -10260,6 +10319,11 @@ void Backend::loadDemoData() {
     m_demoChatMessages.clear();
     m_demoChatMessages.insert(c1.guid, demoMsgs);
     m_messages = demoMsgs;
+    // Demo "Mac" pins so the pinned row isn't empty
+    m_macPins.clear();
+    for (int i = 0; i < qMin<int>(3, m_chats.size()); ++i) {
+        m_macPins.append(QVariantMap{{QStringLiteral("guid"), m_chats.at(i).guid}, {QStringLiteral("pinIndex"), i}});
+    }
 
     emit configChanged();
     emit statusChanged();
