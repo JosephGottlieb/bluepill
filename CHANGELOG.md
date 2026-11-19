@@ -7,17 +7,30 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ### Added
 - **GIFs play inline:** GIF and WebP attachments animate in the conversation and in the photo viewer (`AnimatedImage`). Animated WebP needs Qt's WebP image plugin (`qt6-imageformats`). GIFs pause while scrolled off screen.
 - **Photos and emoji without text are shown without a bubble**, like iOS Messages. A photo sent on its own shows with rounded corners and no bubble behind it; a message of one to three emoji is shown large, with no bubble. Photos with a caption, and text that contains emoji, keep their bubble.
+- **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
 
 ### Changed
 - **Inline photos keep their aspect ratio:** Photos are no longer cropped to a fixed box. Each is scaled down to fit the message column (at most 360×360 without a bubble, 320 wide inside one) and never scaled up. They're decoded at display size rather than full resolution, so large photos load faster and use far less memory. Rounded corners use `QtQuick.Effects`; with the software renderer, or where that module isn't installed, photos show with square corners.
+- **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
 
 ### Fixed
+- **Link previews no longer save HTML pages as thumbnails:** when a site answered an `og:image` or oEmbed thumbnail URL with an HTML error or consent page, the page was saved as `*_thumb.jpg`. The preview showed an empty image area and logged "Unsupported image format" on every repaint. Thumbnails are now saved only if they decode as an image.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
-
 - **Service evidence is ordered by date:** a chat's service from `lastMessage` in chat metadata or from a message keeps its date, and newer evidence wins in either direction. Participant-only metadata never overrides message evidence. Chats created from a message use the embedded chat's `serviceName`, `lastMessage` and participants. A change to the selected chat's service notifies the header, and merged sibling chats keep the refined service.
+- **Settings re-save never moves or invalidates an endpoint:** an unchanged primary or failover URL is kept exactly as saved (for example, `https://relay` stays on 443). Endpoint changes are compared by effective scheme, host, port and path, so an equivalent URL such as `https://relay:443` no longer discards pending iCloud Hub edits.
+- **Legacy URLs keep `https://`:** scheme-less URLs from `config.json`, environment variables and the keyring keep the historical `https://` default. The new `http://` + `1235` defaults apply only to values entered in Settings.
+- **`http://` relays on Tailscale and private LANs can authenticate again:** v1.2.3 only sent the password over `http://` to localhost, so the `http://` default and discovered relays could connect but every authenticated request failed. Tailscale addresses (`100.64.0.0/10`, `fd7a:115c:a1e0::/48`, `*.ts.net`) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, `*.local`) are now allowed. Public hosts still need `https://`, and Settings warns before saving one over `http://`.
+- **Custom-domain Tailscale names work over `http://`:** a name like `relay.tail.example.com` that isn't `*.ts.net` is trusted once it resolves only to Tailscale addresses that `tailscale status --json` lists as tailnet nodes. The range alone isn't enough, since `100.64.0.0/10` is also carrier-grade NAT space. The check runs in the background before connecting and is cached for the session.
+  Requests wait for the check instead of being refused at startup, and pressing Sync or saving Settings while it runs no longer crashes the app.
+- **`https://user@host` URLs keep their port:** only `ssh://` and scheme-less `user@host` are treated as SSH, so the Port field and re-saves work for URLs with user info. Endpoint paths and user names are compared case-sensitively.
+- **Tailscale relay rows are keyboard-selectable** (Tab, then Return or Space), and discovery probes never buffer more than 4 KiB of a peer's reply.
+- **Tailscale discovery works without MagicDNS:** if a peer's DNS name doesn't resolve (e.g. `--accept-dns=false`), the probe retries the peer's Tailscale IP.
 
 ### Documentation
+- Use the Homebrew relay port `1235` everywhere the docs referred to the BluePill relay on `1234` (server.json examples, LaunchAgent plists, reverse-proxy targets, Tailscale Serve, Web UI URLs, agent playbooks). BlueBubbles' own default `1234` is still mentioned where it applies.
+- Document the Settings Port field, Tailscale relay discovery, and when to enter `443` (TLS reverse proxy / Tailscale Serve).
+- Note that `bluepill-server` takes its listen address from `--host` / `--port` (not `server.json`) and listens on `127.0.0.1` unless it's given `--host`.
 - `docs/ARCHITECTURE.md` explains how the client resolves a chat's service for macOS 26 `any;` GUIDs.
 
 ## [1.2.3] - 2026-11-18
