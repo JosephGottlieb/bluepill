@@ -1608,6 +1608,7 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
             }
         }
 
+        const QVariantMap record = c.toVariantMap();
         const QJsonArray phones = c.value(QStringLiteral("phoneNumbers")).toArray();
         for (const QJsonValue &pv : phones) {
             QString addr;
@@ -1620,6 +1621,7 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
             if (!norm.isEmpty()) {
                 m_contactNames.insert(norm, display);
                 m_contactRawAddresses.insert(norm, canonicalizeAddress(addr));
+                m_contactRecords.insert(norm, record);
                 if (!avatarUrl.isEmpty()) m_contactAvatars.insert(norm, avatarUrl);
             }
         }
@@ -1636,6 +1638,7 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
             if (!norm.isEmpty()) {
                 m_contactNames.insert(norm, display);
                 m_contactRawAddresses.insert(norm, canonicalizeAddress(addr));
+                m_contactRecords.insert(norm, record);
                 if (!avatarUrl.isEmpty()) m_contactAvatars.insert(norm, avatarUrl);
             }
         }
@@ -5302,6 +5305,60 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
             fetchContactsRemote();
         });
     }
+}
+
+QVariantMap Backend::contactDetails(const QString &address) const {
+    QVariantMap out;
+    const QVariantMap rec = m_contactRecords.value(normalizeHandle(address));
+    out.insert(QStringLiteral("found"), !rec.isEmpty());
+    if (rec.isEmpty()) return out;
+    auto str = [&rec](const char *key) { return rec.value(QString::fromLatin1(key)).toString().trimmed(); };
+    out.insert(QStringLiteral("firstName"), str("firstName"));
+    out.insert(QStringLiteral("lastName"), str("lastName"));
+
+    // Every populated field, in Contacts' order, for the "On your Mac" list
+    QVariantList rows;
+    auto addRow = [&rows](const QString &label, const QString &value) {
+        if (value.trimmed().isEmpty()) return;
+        rows.append(QVariantMap{{QStringLiteral("label"), label}, {QStringLiteral("value"), value.trimmed()}});
+    };
+    addRow(QStringLiteral("Middle name"), str("middleName"));
+    addRow(QStringLiteral("Nickname"), str("nickname"));
+    addRow(QStringLiteral("Company"), str("organization"));
+    addRow(QStringLiteral("Job title"), str("jobTitle"));
+    addRow(QStringLiteral("Department"), str("department"));
+    auto addList = [&](const char *key, const QString &kind, QString *firstValue) {
+        for (const QVariant &v : rec.value(QString::fromLatin1(key)).toList()) {
+            const QVariantMap m = v.toMap();
+            const QString value = v.typeId() == QMetaType::QString ? v.toString() : m.value(QStringLiteral("address")).toString();
+            const QString label = m.value(QStringLiteral("label")).toString().trimmed();
+            if (firstValue && firstValue->isEmpty()) *firstValue = value.trimmed();
+            addRow(label.isEmpty() ? kind : QStringLiteral("%1 (%2)").arg(kind, label), value);
+        }
+    };
+    QString firstPhone, firstEmail;
+    addList("phoneNumbers", QStringLiteral("Phone"), &firstPhone);
+    addList("emails", QStringLiteral("Email"), &firstEmail);
+    addList("addresses", QStringLiteral("Address"), nullptr);
+    addList("urls", QStringLiteral("URL"), nullptr);
+    const QString birthday = str("birthday");
+    if (!birthday.isEmpty()) {
+        const QDate d = QDate::fromString(birthday, Qt::ISODate);
+        if (d.isValid()) addRow(QStringLiteral("Birthday"), QLocale().toString(d, QLocale::LongFormat));
+        else if (birthday.startsWith(QStringLiteral("--"))) {
+            const QDate md = QDate::fromString(QStringLiteral("2000") + birthday.mid(1), Qt::ISODate);
+            addRow(QStringLiteral("Birthday"), md.isValid() ? QLocale().toString(md, QStringLiteral("MMMM d")) : birthday);
+        } else addRow(QStringLiteral("Birthday"), birthday);
+    }
+    addRow(QStringLiteral("Note"), str("note"));
+    out.insert(QStringLiteral("rows"), rows);
+
+    // Prefill the editable phone/email with the chat's own address when it's one of them
+    const QString canon = canonicalizeAddress(address);
+    const bool isEmail = address.contains(QLatin1Char('@'));
+    out.insert(QStringLiteral("phone"), isEmail ? firstPhone : (canon.isEmpty() ? firstPhone : canon));
+    out.insert(QStringLiteral("email"), isEmail ? address.trimmed() : firstEmail);
+    return out;
 }
 
 void Backend::syncContactsNow() {

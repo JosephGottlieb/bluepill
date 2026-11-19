@@ -189,6 +189,34 @@ def apple_ts_to_epoch_ms(val: Any) -> int:
     return int(v * 1000 + APPLE_EPOCH_OFFSET_MS)
 
 
+
+def _sqlite_columns(conn: sqlite3.Connection, table: str) -> set:
+    """Column names of a table ("" set when the table doesn't exist)."""
+    try:
+        return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def _clean_ab_label(raw: Any) -> str:
+    """AddressBook labels look like "_$!<Mobile>!$_"; custom labels are plain text."""
+    label = str(raw or "").strip()
+    m = re.match(r"^_\$!<(.+)>!\$_$", label)
+    return (m.group(1) if m else label).strip()
+
+
+def _ab_birthday(raw: Any, yearless: bool = False) -> str:
+    """ZBIRTHDAY is seconds since 2001-01-01 UTC. Returns YYYY-MM-DD, or --MM-DD without a year."""
+    try:
+        dt = datetime.datetime(2001, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    # Contacts stores the day at noon UTC, or at local midnight (07:00 UTC in
+    # California, 15:00 the day before in Tokyo); +11h lands each on its day.
+    dt = (dt + datetime.timedelta(hours=11)).replace(hour=0, minute=0, second=0, microsecond=0)
+    # Apple stores year-less birthdays in 1604.
+    return dt.strftime("--%m-%d") if yearless or dt.year == 1604 else dt.strftime("%Y-%m-%d")
+
 def epoch_ms_to_apple_ns(epoch_ms: int) -> int:
     """Convert Unix epoch milliseconds to Apple chat.db nanoseconds since 2001-01-01."""
     if epoch_ms <= 0:
@@ -1933,44 +1961,80 @@ class BluePillEngine:
                 uri = f"file:{urllib.parse.quote(os.path.abspath(db_file))}?mode=ro"
                 conn = sqlite3.connect(uri, uri=True, timeout=2.0)
                 conn.row_factory = sqlite3.Row
+                rec_cols = _sqlite_columns(conn, "ZABCDRECORD")
+                optional = [c for c in ("ZMIDDLENAME", "ZNICKNAME", "ZORGANIZATION", "ZNAME", "ZJOBTITLE",
+                                        "ZDEPARTMENT", "ZBIRTHDAY", "ZBIRTHDAYYEARLESS") if c in rec_cols]
+                where = " OR ".join(f"{c} IS NOT NULL" for c in ("ZFIRSTNAME", "ZLASTNAME", "ZORGANIZATION", "ZNICKNAME")
+                                    if c in rec_cols) or "1"
                 records = conn.execute(
-                    """
-                    SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME, ZMIDDLENAME,
-                           ZNICKNAME, ZORGANIZATION, ZNAME
-                    FROM ZABCDRECORD
-                    WHERE ZFIRSTNAME IS NOT NULL
-                       OR ZLASTNAME IS NOT NULL
-                       OR ZORGANIZATION IS NOT NULL
-                       OR ZNICKNAME IS NOT NULL
-                    """
+                    f"SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME{''.join(', ' + c for c in optional)} "
+                    f"FROM ZABCDRECORD WHERE {where}"
                 ).fetchall()
                 if not records:
                     conn.close()
                     continue
 
-                phones_by_owner: Dict[int, List[Dict[str, str]]] = {}
-                try:
-                    for prow in conn.execute(
-                        "SELECT ZOWNER, ZFULLNUMBER, ZLABEL FROM ZABCDPHONENUMBER WHERE ZFULLNUMBER IS NOT NULL"
-                    ):
-                        owner = prow["ZOWNER"]
-                        num = (prow["ZFULLNUMBER"] or "").strip()
-                        if owner and num:
-                            phones_by_owner.setdefault(int(owner), []).append({"address": num})
-                except sqlite3.Error:
-                    pass
+                def labeled(table: str, value_col: str) -> Dict[int, List[Dict[str, str]]]:
+                    out: Dict[int, List[Dict[str, str]]] = {}
+                    cols = _sqlite_columns(conn, table)
+                    if not cols or value_col not in cols or "ZOWNER" not in cols:
+                        return out
+                    label_sel = ", ZLABEL" if "ZLABEL" in cols else ""
+                    try:
+                        for row in conn.execute(
+                            f"SELECT ZOWNER, {value_col}{label_sel} FROM {table} WHERE {value_col} IS NOT NULL"
+                        ):
+                            owner = row["ZOWNER"]
+                            val = str(row[value_col] or "").strip()
+                            if owner and val:
+                                entry = {"address": val}
+                                label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
+                                if label:
+                                    entry["label"] = label
+                                out.setdefault(int(owner), []).append(entry)
+                    except sqlite3.Error:
+                        pass
+                    return out
 
-                emails_by_owner: Dict[int, List[Dict[str, str]]] = {}
-                try:
-                    for erow in conn.execute(
-                        "SELECT ZOWNER, ZADDRESS, ZLABEL FROM ZABCDEMAILADDRESS WHERE ZADDRESS IS NOT NULL"
-                    ):
-                        owner = erow["ZOWNER"]
-                        addr = (erow["ZADDRESS"] or "").strip()
-                        if owner and addr:
-                            emails_by_owner.setdefault(int(owner), []).append({"address": addr})
-                except sqlite3.Error:
-                    pass
+                phones_by_owner = labeled("ZABCDPHONENUMBER", "ZFULLNUMBER")
+                emails_by_owner = labeled("ZABCDEMAILADDRESS", "ZADDRESS")
+                urls_by_owner = labeled("ZABCDURLADDRESS", "ZURL")
+
+                addresses_by_owner: Dict[int, List[Dict[str, str]]] = {}
+                pa_cols = _sqlite_columns(conn, "ZABCDPOSTALADDRESS")
+                parts = [c for c in ("ZSTREET", "ZCITY", "ZSTATE", "ZZIPCODE", "ZCOUNTRYNAME") if c in pa_cols]
+                if "ZOWNER" in pa_cols and parts:
+                    label_sel = ", ZLABEL" if "ZLABEL" in pa_cols else ""
+                    try:
+                        for row in conn.execute(f"SELECT ZOWNER, {', '.join(parts)}{label_sel} FROM ZABCDPOSTALADDRESS"):
+                            street = str(row["ZSTREET"] or "").strip() if "ZSTREET" in parts else ""
+                            city_line = " ".join(
+                                str(row[c] or "").strip() for c in ("ZCITY", "ZSTATE", "ZZIPCODE") if c in parts and row[c]
+                            )
+                            country = str(row["ZCOUNTRYNAME"] or "").strip() if "ZCOUNTRYNAME" in parts else ""
+                            formatted = ", ".join(x for x in (street.replace("\n", ", "), city_line, country) if x)
+                            if row["ZOWNER"] and formatted:
+                                entry = {"address": formatted}
+                                label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
+                                if label:
+                                    entry["label"] = label
+                                addresses_by_owner.setdefault(int(row["ZOWNER"]), []).append(entry)
+                    except sqlite3.Error:
+                        pass
+
+                notes_by_owner: Dict[int, str] = {}
+                note_cols = _sqlite_columns(conn, "ZABCDNOTE")
+                if "ZTEXT" in note_cols and "ZCONTACT" in note_cols:
+                    try:
+                        for row in conn.execute("SELECT ZCONTACT, ZTEXT FROM ZABCDNOTE WHERE ZTEXT IS NOT NULL"):
+                            text = str(row["ZTEXT"] or "").strip()
+                            if row["ZCONTACT"] and text:
+                                notes_by_owner[int(row["ZCONTACT"])] = text
+                    except sqlite3.Error:
+                        pass
+
+                def col(r: sqlite3.Row, name: str) -> str:
+                    return str(r[name] or "").strip() if name in optional else ""
 
                 for r in records:
                     pk = int(r["Z_PK"])
@@ -1980,9 +2044,9 @@ class BluePillEngine:
                         continue
                     first = (r["ZFIRSTNAME"] or "").strip()
                     last = (r["ZLASTNAME"] or "").strip()
-                    org = (r["ZORGANIZATION"] or "").strip()
-                    nick = (r["ZNICKNAME"] or "").strip()
-                    display = f"{first} {last}".strip() or org or nick or (r["ZNAME"] or "").strip()
+                    org = col(r, "ZORGANIZATION")
+                    nick = col(r, "ZNICKNAME")
+                    display = f"{first} {last}".strip() or org or nick or col(r, "ZNAME")
                     if not display:
                         continue
                     uid = (r["ZUNIQUEID"] or str(pk)).strip()
@@ -1994,17 +2058,26 @@ class BluePillEngine:
                     if dedup_key in seen_keys:
                         continue
                     seen_keys.add(dedup_key)
+                    birthday = ""
+                    if "ZBIRTHDAY" in optional and r["ZBIRTHDAY"] is not None:
+                        birthday = _ab_birthday(r["ZBIRTHDAY"], "ZBIRTHDAYYEARLESS" in optional and bool(r["ZBIRTHDAYYEARLESS"]))
                     contacts.append(
                         {
                             "id": uid,
                             "firstName": first,
                             "lastName": last,
+                            "middleName": col(r, "ZMIDDLENAME"),
                             "displayName": display,
                             "nickname": nick,
                             "organization": org,
+                            "jobTitle": col(r, "ZJOBTITLE"),
+                            "department": col(r, "ZDEPARTMENT"),
                             "phoneNumbers": phones,
                             "emails": emails,
-                            "birthday": "",
+                            "addresses": addresses_by_owner.get(pk, []),
+                            "urls": urls_by_owner.get(pk, []),
+                            "note": notes_by_owner.get(pk, ""),
+                            "birthday": birthday,
                             "avatar": "",
                         }
                     )
@@ -10238,6 +10311,48 @@ def run_selftest(engine: BluePillEngine) -> int:
         enable_background_daemons=False,
     )
     test_eng.photos_library_path = os.path.join(test_eng._config_dir, "Photos Library.photoslibrary")
+    # AddressBook contacts return every populated field (labels, addresses, birthday, note...)
+    with tempfile.TemporaryDirectory() as ab_dir:
+        ab_path = os.path.join(ab_dir, "AddressBook-v22.abcddb")
+        ab = sqlite3.connect(ab_path)
+        ab.executescript(
+            """
+            CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, ZUNIQUEID TEXT, ZFIRSTNAME TEXT, ZLASTNAME TEXT,
+                ZMIDDLENAME TEXT, ZNICKNAME TEXT, ZORGANIZATION TEXT, ZNAME TEXT, ZJOBTITLE TEXT,
+                ZDEPARTMENT TEXT, ZBIRTHDAY REAL);
+            CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDPOSTALADDRESS (ZOWNER INTEGER, ZSTREET TEXT, ZCITY TEXT, ZSTATE TEXT,
+                ZZIPCODE TEXT, ZCOUNTRYNAME TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDURLADDRESS (ZOWNER INTEGER, ZURL TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDNOTE (ZCONTACT INTEGER, ZTEXT TEXT);
+            INSERT INTO ZABCDRECORD VALUES (1, 'uid-1', 'Alex', 'Rivera', 'Q', 'Lex', 'Example Co', NULL,
+                'Engineer', 'Platform', 610286400);
+            INSERT INTO ZABCDPHONENUMBER VALUES (1, '+1 (555) 555-0100', '_$!<Mobile>!$_');
+            INSERT INTO ZABCDPHONENUMBER VALUES (1, '+1 (555) 555-0101', 'Studio');
+            INSERT INTO ZABCDEMAILADDRESS VALUES (1, 'user@example.com', '_$!<Home>!$_');
+            INSERT INTO ZABCDPOSTALADDRESS VALUES (1, '1 Example St', 'Springfield', 'CA', '90000', 'USA', '_$!<Work>!$_');
+            INSERT INTO ZABCDURLADDRESS VALUES (1, 'https://example.com', '_$!<HomePage>!$_');
+            INSERT INTO ZABCDNOTE VALUES (1, 'Met at the conference');
+            """
+        )
+        ab.commit()
+        ab.close()
+        ab_eng = BluePillEngine(db_path="/nonexistent/selftest_chat.db", password="x",
+                                enable_background_daemons=False, addressbook_glob=ab_path)
+        ab_eng.bb_config_db_path = "/nonexistent/config.db"
+        found = ab_eng.query_contacts(force_refresh=True)
+        assert len(found) == 1, f"AddressBook contacts: {found}"
+        c0 = found[0]
+        assert c0["middleName"] == "Q" and c0["nickname"] == "Lex" and c0["jobTitle"] == "Engineer", c0
+        assert c0["department"] == "Platform" and c0["organization"] == "Example Co", c0
+        assert c0["phoneNumbers"][0] == {"address": "+1 (555) 555-0100", "label": "Mobile"}, c0["phoneNumbers"]
+        assert c0["phoneNumbers"][1]["label"] == "Studio", c0["phoneNumbers"]
+        assert c0["emails"][0]["label"] == "Home", c0["emails"]
+        assert c0["addresses"][0] == {"address": "1 Example St, Springfield CA 90000, USA", "label": "Work"}, c0["addresses"]
+        assert c0["urls"][0]["address"] == "https://example.com", c0["urls"]
+        assert c0["note"] == "Met at the conference", c0
+        assert c0["birthday"] == "2020-05-04", c0["birthday"]
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
     launchctl_calls: List[List[str]] = []
     test_eng._run_launchctl = lambda args: (

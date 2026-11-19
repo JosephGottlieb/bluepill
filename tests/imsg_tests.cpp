@@ -2340,6 +2340,57 @@ private slots:
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
     }
 
+    void testContactDetailsShowEveryMacField() {
+        Backend backend(false);
+        backend.parseContactsJson(QByteArray(R"([{
+            "id": "uid-1", "firstName": "Alex", "lastName": "Rivera", "middleName": "Q",
+            "displayName": "Alex Rivera", "nickname": "Lex", "organization": "Example Co",
+            "jobTitle": "Engineer", "department": "",
+            "phoneNumbers": [{"address": "+1 (555) 555-0100", "label": "Mobile"}, {"address": "+15555550101"}],
+            "emails": [{"address": "user@example.com", "label": "Home"}],
+            "addresses": [{"address": "1 Example St, Springfield CA 90000", "label": "Work"}],
+            "urls": [], "note": "Met at the conference", "birthday": "2020-05-04"}])"));
+
+        const QVariantMap d = backend.contactDetails(QStringLiteral("+15555550100"));
+        QVERIFY(d.value(QStringLiteral("found")).toBool());
+        QCOMPARE(d.value(QStringLiteral("firstName")).toString(), QStringLiteral("Alex"));
+        QCOMPARE(d.value(QStringLiteral("lastName")).toString(), QStringLiteral("Rivera"));
+        QCOMPARE(d.value(QStringLiteral("email")).toString(), QStringLiteral("user@example.com"));
+        QStringList labels;
+        QStringList values;
+        for (const QVariant &v : d.value(QStringLiteral("rows")).toList()) {
+            labels << v.toMap().value(QStringLiteral("label")).toString();
+            values << v.toMap().value(QStringLiteral("value")).toString();
+        }
+        QCOMPARE(labels, (QStringList{QStringLiteral("Middle name"), QStringLiteral("Nickname"), QStringLiteral("Company"),
+                                      QStringLiteral("Job title"), QStringLiteral("Phone (Mobile)"), QStringLiteral("Phone"),
+                                      QStringLiteral("Email (Home)"), QStringLiteral("Address (Work)"),
+                                      QStringLiteral("Birthday"), QStringLiteral("Note")}));
+        QVERIFY(!labels.contains(QStringLiteral("Department")));  // empty fields are skipped
+        QVERIFY(values.contains(QStringLiteral("Met at the conference")));
+        // Same contact by email; unknown address isn't found
+        QVERIFY(backend.contactDetails(QStringLiteral("USER@example.com")).value(QStringLiteral("found")).toBool());
+        QVERIFY(!backend.contactDetails(QStringLiteral("+15555550199")).value(QStringLiteral("found")).toBool());
+
+        // The dialog lists the rows and fills its inputs from the contact
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *win = engine.rootObjects().first();
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")),
+                                  Q_ARG(QVariant, QStringLiteral("Wrong Title Guess")));
+        QCOMPARE(win->property("contactModalFirstName").toString(), QStringLiteral("Alex"));
+        QCOMPARE(win->property("contactModalLastName").toString(), QStringLiteral("Rivera"));
+        QObject *rows = win->findChild<QObject *>(QStringLiteral("contactDetailRows"));
+        QVERIFY(rows);
+        QTRY_COMPARE(rows->property("count").toInt(), labels.size());
+    }
+
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
         Backend backend(false);
         backend.loadDemoData();

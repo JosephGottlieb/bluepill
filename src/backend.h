@@ -296,6 +296,9 @@ public:
     Q_INVOKABLE void seedDemoData() { loadDemoData(); }
     Q_INVOKABLE void saveContact(const QString &firstName, const QString &lastName, const QString &phone, const QString &email);
     Q_INVOKABLE void syncContactsNow();
+    // A Mac contact's fields for Edit Contact: firstName, lastName, phone, email, and
+    // rows ({label, value}) for every populated field. found=false when unknown.
+    Q_INVOKABLE QVariantMap contactDetails(const QString &address) const;
     Q_INVOKABLE void loadOlderMessages();
 
     // Emoji shortcode & picker helpers
@@ -675,6 +678,7 @@ private:
     QString m_selectedChatGuid;
 
     QHash<QString, QString> m_contactNames;
+    QHash<QString, QVariantMap> m_contactRecords;  // full Mac contact, by normalized handle
     QHash<QString, QString> m_contactRawAddresses;
     QHash<QString, QString> m_contactAvatars;
     QHash<QString, QStringList> m_chatParticipants;

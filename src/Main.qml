@@ -595,6 +595,28 @@ ApplicationWindow {
     property string contactModalLastName: ""
     property string contactModalPhone: ""
     property string contactModalEmail: ""
+    // Populated fields of the Mac contact ({label, value}), shown read-only in the dialog
+    property var contactModalRows: []
+    function openContactModal(address, title) {
+        var d = backend.contactDetails(address || "")
+        if (d.found) {
+            // Fill from the Mac contact instead of guessing from the chat title
+            root.contactModalFirstName = d.firstName || ""
+            root.contactModalLastName = d.lastName || ""
+            root.contactModalPhone = d.phone || ""
+            root.contactModalEmail = d.email || ""
+            root.contactModalRows = d.rows || []
+        } else {
+            var parts = (title || "").split(" ")
+            var isEmail = (address || "").indexOf("@") >= 0
+            root.contactModalFirstName = parts[0] || ""
+            root.contactModalLastName = parts.slice(1).join(" ") || ""
+            root.contactModalPhone = isEmail ? "" : (address || "")
+            root.contactModalEmail = isEmail ? address : ""
+            root.contactModalRows = []
+        }
+        root.showContactModal = true
+    }
     property bool showEmojiPicker: false
     property string emojiPickerCategory: "All"
     property string emojiPickerQuery: ""
@@ -3076,14 +3098,7 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    var parts = backend.selectedChatTitle.split(" ")
-                                    root.contactModalFirstName = parts[0] || ""
-                                    root.contactModalLastName = parts.slice(1).join(" ") || ""
-                                    root.contactModalPhone = backend.selectedChatAddress
-                                    root.contactModalEmail = ""
-                                    root.showContactModal = true
-                                }
+                                onClicked: root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)
                             }
                         }
 
@@ -8480,8 +8495,9 @@ ApplicationWindow {
         }
 
         Rectangle {
+            objectName: "contactModalCard"
             width: 440
-            height: 410
+            height: root.contactModalRows.length > 0 ? Math.min(parent.height - 80, 410 + 34 + root.contactModalRows.length * 40) : 410
             anchors.centerIn: parent
             radius: theme.radius + 2
             color: theme.darkBackground
@@ -8631,7 +8647,51 @@ ApplicationWindow {
                     }
                 }
 
-                Item { Layout.fillHeight: true }
+                // Everything else the Mac has for this contact (read-only)
+                Text {
+                    visible: root.contactModalRows.length > 0
+                    text: i18n.tr("On your Mac")
+                    font.pixelSize: theme.fontSize - 1
+                    font.bold: true
+                    color: theme.accent
+                }
+                ListView {
+                    objectName: "contactDetailRows"
+                    visible: root.contactModalRows.length > 0
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 4
+                    model: root.contactModalRows
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    delegate: RowLayout {
+                        required property var modelData
+                        width: ListView.view.width
+                        spacing: 10
+                        Text {
+                            Layout.preferredWidth: 130
+                            Layout.alignment: Qt.AlignTop
+                            text: modelData.label
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.darkForeground
+                            elide: Text.ElideRight
+                        }
+                        TextEdit {
+                            Layout.fillWidth: true
+                            text: modelData.value
+                            textFormat: TextEdit.PlainText
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.Wrap
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.foreground
+                            selectionColor: theme.selection
+                        }
+                    }
+                }
+
+                Item { Layout.fillHeight: true; visible: root.contactModalRows.length === 0 }
 
                 RowLayout {
                     Layout.fillWidth: true

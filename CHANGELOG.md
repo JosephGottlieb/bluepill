@@ -4,6 +4,9 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+### Added
+- **Edit Contact shows the whole Mac contact:** the dialog now fills the name, phone and email from the contact on the Mac, instead of splitting the chat title. Under **On your Mac** it lists every other populated field: middle name, nickname, company, job title, department, all phones and emails with their labels, addresses, URLs, birthday and note. `bluepill-server` now returns these fields from the AddressBook (labels, `middleName`, `jobTitle`, `department`, `addresses`, `urls`, `note`, `birthday`), reading only the columns that exist on that macOS version.
+
 ### Fixed
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
