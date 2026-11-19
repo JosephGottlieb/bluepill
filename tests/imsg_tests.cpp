@@ -2451,7 +2451,9 @@ private slots:
         replyInput->setProperty("text", QStringLiteral("draft"));
         QKeyEvent shiftEnter(QEvent::KeyPress, Qt::Key_Enter, Qt::ShiftModifier | Qt::KeypadModifier, QStringLiteral("\r"));
         QCoreApplication::sendEvent(replyInput, &shiftEnter);
-        QCOMPARE(replyInput->property("text").toString().trimmed(), QStringLiteral("draft"));
+        const QString afterShiftEnter = replyInput->property("text").toString();
+        QVERIFY2(afterShiftEnter.contains(QLatin1Char('\n')), qPrintable(afterShiftEnter));  // a newline went in
+        QCOMPARE(afterShiftEnter.trimmed(), QStringLiteral("draft"));
         QCOMPARE(b.threadMessages(QStringLiteral("m-root")).size(), 4);
         QTRY_COMPARE(threadList->property("count").toInt(), 4);  // nothing sent
 
