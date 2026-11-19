@@ -5,6 +5,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Fixed
+- **Link previews no longer save HTML pages as thumbnails:** when a site answered an `og:image` or oEmbed thumbnail URL with an HTML error or consent page, the page was saved as `*_thumb.jpg`. The preview showed an empty image area and logged "Unsupported image format" on every repaint. Thumbnails are now saved only if they decode as an image.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
 

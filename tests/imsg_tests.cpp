@@ -2340,6 +2340,21 @@ private slots:
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
     }
 
+    void testLinkPreviewThumbnailMustBeAnImage() {
+        QImage img(80, 40, QImage::Format_RGB32);
+        img.fill(QColor(30, 90, 160));
+        QByteArray png;
+        QBuffer buf(&png);
+        QVERIFY(buf.open(QIODevice::WriteOnly));
+        QVERIFY(img.save(&buf, "PNG"));
+        QVERIFY(Backend::isDecodableImageData(png));
+        // An HTML error/consent page served from an og:image URL is rejected
+        QVERIFY(!Backend::isDecodableImageData(QByteArray("<!DOCTYPE html><html><head><title>Access denied</title></head>"
+                                                          "<body>Please enable cookies to continue to this site.</body></html>")));
+        QVERIFY(!Backend::isDecodableImageData(QByteArray()));
+        QVERIFY(!Backend::isDecodableImageData(png.left(20)));  // truncated
+    }
+
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
         Backend backend(false);
         backend.loadDemoData();

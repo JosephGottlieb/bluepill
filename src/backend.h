@@ -399,6 +399,8 @@ public:
     static QString computeInitials(const QString &title);
     static QString computeAvatarColor(const QString &seed);
     static int computeTextPartIndex(const QJsonObject &msgObj);
+    // True when the bytes are an image Qt can decode (not, say, an HTML error page).
+    static bool isDecodableImageData(const QByteArray &bytes);
     static QString formatExpressiveEffectLabel(const QString &styleId);
     static QString extractFirstUrl(const QString &text);
     static bool isYouTubeUrl(const QString &url);
