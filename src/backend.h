@@ -434,6 +434,7 @@ public:
         m_lastSoundPresetPlayed.clear();
     }
     void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
+    bool tailnetCheckPendingForTest() const { return tailnetCheckPending(); }
 
     // Pure testable helpers
     static QString normalizeHandle(const QString &raw);
@@ -680,6 +681,11 @@ private:
     // http:// host names that need a tailnet check before the password may be sent.
     QStringList hostsNeedingTailnetVerification() const;
     void verifyTailnetHosts(const QStringList &hosts, std::function<void()> done);
+    void notifyTailnetVerifyWaiters();
+    // True while an http:// host still needs (or is getting) its tailnet check.
+    bool tailnetCheckPending() const;
+    QList<std::function<void()>> m_tailnetVerifyWaiters;
+    bool m_resumeAfterTailnetCheck = false;
     QSet<QString> m_tailnetHostsChecked;      // checked this session (verified or not)
     QSet<QString> m_tailnetHostsInFlight;
     int m_verifiedTailnetHostsRevision = 0;

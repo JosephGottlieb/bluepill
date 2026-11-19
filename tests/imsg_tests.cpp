@@ -3064,6 +3064,51 @@ private slots:
         QVERIFY(!Backend::isPasswordTransportAllowed(QStringLiteral("http://relay.example.com:1235")));
     }
 
+    void testTailnetCheckInFlightDefersRequestsWithoutRecursing() {
+        // (Another test marks relay.tail.example.com verified for the process.)
+        // A slow fake `tailscale status` keeps the custom-domain check in flight.
+        QTemporaryDir binDir;
+        QVERIFY(binDir.isValid());
+        QFile fake(binDir.filePath(QStringLiteral("tailscale")));
+        QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write("#!/bin/sh\nsleep 0.4\necho '{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"100.100.1.1\"]},\"Peer\":{}}'\n");
+        fake.close();
+        fake.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+
+        const QByteArray savedPath = qgetenv("PATH");
+        const QByteArray savedUrl = qgetenv("BLUEPILL_SERVER_URL");
+        const QByteArray savedPwd = qgetenv("BLUEPILL_PASSWORD");
+        qputenv("PATH", binDir.path().toLocal8Bit() + ":" + savedPath);
+        qputenv("BLUEPILL_SERVER_URL", "http://studio.tail.example.com:1235");
+        qputenv("BLUEPILL_PASSWORD", "CHANGE_ME_TO_A_SECURE_TOKEN");
+        qunsetenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY");
+        auto restore = qScopeGuard([&]() {
+            qputenv("PATH", savedPath);
+            if (savedUrl.isEmpty()) qunsetenv("BLUEPILL_SERVER_URL"); else qputenv("BLUEPILL_SERVER_URL", savedUrl);
+            if (savedPwd.isEmpty()) qunsetenv("BLUEPILL_PASSWORD"); else qputenv("BLUEPILL_PASSWORD", savedPwd);
+            qputenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY", "1");
+        });
+
+        static QStringList refusals;
+        refusals.clear();
+        const QtMessageHandler prev = qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &msg) {
+            if (msg.contains(QStringLiteral("refusing untrusted/cleartext"))) refusals.append(msg);
+        });
+        auto restoreHandler = qScopeGuard([prev]() { qInstallMessageHandler(prev); });
+
+        Backend backend(false);
+        backend.verifyTailnetHostForUrl(QStringLiteral("http://studio.tail.example.com:1235"));
+        QVERIFY(backend.tailnetCheckPendingForTest());
+        // Sync / Ctrl+R / Save while the check runs used to recurse until the stack overflowed.
+        backend.refreshAll();
+        backend.refreshAll();
+        QCOMPARE(backend.serverStatus(), QStringLiteral("Checking Tailscale address..."));
+        // Opening a chat mid-check waits instead of sending a refused request.
+        backend.selectChat(QStringLiteral("iMessage;-;+15555550100"));
+        QVERIFY(refusals.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.tailnetCheckPendingForTest(), 10000);
+    }
+
     void testResavingUnchangedSettingsKeepsEndpointsAndPendingEdits() {
         // Env vars override config.json; isolate from earlier tests.
         const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",

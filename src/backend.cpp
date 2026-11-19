@@ -145,6 +145,7 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <utility>
 
 static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObject &obj,
                                       bool simulatePrePermFail = false, bool simulatePostPermFail = false) {
@@ -1547,20 +1548,33 @@ QStringList Backend::hostsNeedingTailnetVerification() const {
 
 void Backend::verifyTailnetHosts(const QStringList &hosts, std::function<void()> done) {
     QStringList todo;
+    bool waitForInFlight = false;
     for (const QString &h : hosts) {
         const QString host = h.trimmed().toLower();
-        if (host.isEmpty() || isVerifiedTailnetHost(host) || m_tailnetHostsInFlight.contains(host)) continue;
+        if (host.isEmpty() || isVerifiedTailnetHost(host)) continue;
+        if (m_tailnetHostsInFlight.contains(host)) {
+            waitForInFlight = true;
+            continue;
+        }
         todo.append(host);
     }
-    if (todo.isEmpty() || qEnvironmentVariableIntValue("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY") == 1) {
+    if (todo.isEmpty() && waitForInFlight) {
+        // Another check for this host is running; answer when it finishes.
+        if (done) m_tailnetVerifyWaiters.append(std::move(done));
+        return;
+    }
+    auto finishWithoutCheck = [this, todo, done]() {
         for (const QString &h : todo) m_tailnetHostsChecked.insert(h);
         if (done) done();
+        notifyTailnetVerifyWaiters();
+    };
+    if (todo.isEmpty() || qEnvironmentVariableIntValue("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY") == 1) {
+        finishWithoutCheck();
         return;
     }
     const QString exe = QStandardPaths::findExecutable(QStringLiteral("tailscale"));
     if (exe.isEmpty()) {  // can't confirm tailnet membership without tailscale
-        for (const QString &h : todo) m_tailnetHostsChecked.insert(h);
-        if (done) done();
+        finishWithoutCheck();
         return;
     }
     for (const QString &h : todo) m_tailnetHostsInFlight.insert(h);
@@ -1580,7 +1594,10 @@ void Backend::verifyTailnetHosts(const QStringList &hosts, std::function<void()>
                     ++m_verifiedTailnetHostsRevision;
                     emit verifiedTailnetHostsChanged();
                 }
-                if (--(*remaining) == 0 && done) done();
+                if (--(*remaining) == 0) {
+                    if (done) done();
+                    notifyTailnetVerifyWaiters();
+                }
             });
         }
     };
@@ -1596,6 +1613,23 @@ void Backend::verifyTailnetHosts(const QStringList &hosts, std::function<void()>
     });
     proc->start(exe, {QStringLiteral("status"), QStringLiteral("--json")});
     killTimer->start(5000);
+}
+
+void Backend::notifyTailnetVerifyWaiters() {
+    if (!m_tailnetHostsInFlight.isEmpty()) return;
+    const QList<std::function<void()>> waiters = std::exchange(m_tailnetVerifyWaiters, {});
+    for (const auto &w : waiters) w();
+    if (m_resumeAfterTailnetCheck) {
+        m_resumeAfterTailnetCheck = false;
+        QTimer::singleShot(0, this, [this]() {
+            fetchMissingGroupParticipants();
+            if (!m_selectedChatGuid.isEmpty()) loadChatMessages(m_selectedChatGuid);
+        });
+    }
+}
+
+bool Backend::tailnetCheckPending() const {
+    return !m_tailnetHostsInFlight.isEmpty() || !hostsNeedingTailnetVerification().isEmpty();
 }
 
 void Backend::verifyTailnetHostForUrl(const QString &url) {
@@ -2958,7 +2992,11 @@ void Backend::refreshAll() {
     if (!unverifiedHosts.isEmpty()) {
         m_serverStatus = QStringLiteral("Checking Tailscale address...");
         emit statusChanged();
-        verifyTailnetHosts(unverifiedHosts, [this]() { refreshAll(); });
+        // Deferred so a check that's already in flight (or finishes at once)
+        // can never re-enter refreshAll() recursively.
+        verifyTailnetHosts(unverifiedHosts, [this]() {
+            QTimer::singleShot(0, this, &Backend::refreshAll);
+        });
         return;
     }
     if (!m_connected && m_chats.isEmpty()) {
@@ -3121,6 +3159,10 @@ void Backend::fetchChatsMetadata() {
 
 void Backend::fetchMissingGroupParticipants() {
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    if (tailnetCheckPending()) {
+        m_resumeAfterTailnetCheck = true;
+        return;
+    }
 
     int dispatched = 0;
     for (const ChatEntry &c : m_chats) {
@@ -6951,6 +6993,10 @@ void Backend::rebuildSelectedChatMessages() {
 
 void Backend::loadChatMessages(const QString &chatGuid) {
     if (chatGuid.isEmpty() || m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    if (tailnetCheckPending()) {  // the password can't be sent yet; load once the check ends
+        m_resumeAfterTailnetCheck = true;
+        return;
+    }
 
     const quint64 reqSeq = m_messageRequestSeq;
     QJsonObject enrichBody;
