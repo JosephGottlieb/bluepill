@@ -6867,7 +6867,6 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         m_attachmentRetryCount.remove(attGuid);
         insertCachedAttachmentPath(m_attachmentPaths, attGuid, effectivePath);
         const QString localUrl = QUrl::fromLocalFile(effectivePath).toString();
-        bool anyUpdated = false;
         for (int i = 0; i < m_messages.size(); ++i) {
             QVariantMap map = m_messages[i].toMap();
             bool msgModified = false;
