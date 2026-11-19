@@ -4329,6 +4329,17 @@ ApplicationWindow {
                                                 readonly property Component cornerMask: root.roundedCornerMaskComponent
                                                 layer.enabled: mediaReady && cornerMask !== null && GraphicsInfo.api !== GraphicsInfo.Software
                                                 layer.effect: cornerMask
+                                                // Decode no wider than the widest card (360px at the screen's
+                                                // pixel ratio): a 12 MP photo otherwise decodes and uploads ~48 MB
+                                                // just to be drawn at 360px. Width only: with both bounds set Qt
+                                                // scales to cover the box, so wide images would stay huge.
+                                                readonly property real decodeBox: Math.ceil(360 * Math.max(1, Screen.devicePixelRatio))
+                                                // GIFs play only on screen: ListView keeps delegates up to its
+                                                // cacheBuffer away alive (and "visible") too. Still images skip
+                                                // the check so scrolling doesn't re-evaluate it for every photo.
+                                                readonly property bool inView: isAnimated
+                                                                               && msgDelegate.y + msgDelegate.height > messageListView.contentY
+                                                                               && msgDelegate.y < messageListView.contentY + messageListView.height
 
                                                 Image {
                                                     id: inlineImg
@@ -4339,7 +4350,7 @@ ApplicationWindow {
                                                     cache: true
                                                     autoTransform: true
                                                     smooth: true
-                                                    mipmap: true
+                                                    sourceSize.width: parent.decodeBox
                                                     fillMode: Image.PreserveAspectFit
                                                     visible: !parent.isAnimated && status === Image.Ready
                                                 }
@@ -4353,8 +4364,8 @@ ApplicationWindow {
                                                     cache: true
                                                     smooth: true
                                                     fillMode: Image.PreserveAspectFit
-                                                    // Plays while on screen; delegates scrolled away are destroyed.
-                                                    playing: visible
+                                                    // No sourceSize: AnimatedImage scales small GIFs *up* to it.
+                                                    playing: visible && parent.inView
                                                     visible: parent.isAnimated && status === Image.Ready
                                                 }
 

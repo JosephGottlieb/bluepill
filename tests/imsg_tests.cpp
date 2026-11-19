@@ -2918,7 +2918,12 @@ private slots:
                      qPrintable(QStringLiteral("%1x%2").arg(card->width()).arg(card->height())));
             // Offscreen tests use the software renderer: the corner mask must stay off
             QVERIFY(!card->property("layer").value<QObject *>()->property("enabled").toBool());
-            QVERIFY(findIn(card, QStringLiteral("inlineStillImage"))->isVisible());
+            QQuickItem *still = findIn(card, QStringLiteral("inlineStillImage"));
+            QVERIFY(still->isVisible());
+            // Decoded at display size, not the source's 1600px
+            const qreal box = card->property("decodeBox").toReal();
+            QVERIFY(box >= 360.0);
+            QVERIFY2(still->implicitWidth() <= box, qPrintable(QString::number(still->implicitWidth())));
         }
 
         // Captioned photo stays inside a bubble
@@ -2941,6 +2946,20 @@ private slots:
         QVERIFY(!findIn(gifCard, QStringLiteral("inlineStillImage"))->isVisible());
         const int firstFrame = gif->property("currentFrame").toInt();
         QTRY_VERIFY_WITH_TIMEOUT(gif->property("currentFrame").toInt() != firstFrame, 2000);
+
+        // Scrolled out of view (but still alive in the cache buffer): paused
+        QObject *timeline = win->findChild<QObject *>(QStringLiteral("messageTimelineListView"));
+        QVERIFY(timeline);
+        const qreal savedY = timeline->property("contentY").toReal();
+        timeline->setProperty("stickToBottom", false);
+        // Shrink the view to its top so the GIF (last message) sits below it
+        const qreal savedH = timeline->property("height").toReal();
+        timeline->setProperty("height", 40.0);
+        timeline->setProperty("contentY", timeline->property("originY").toReal() - 42.0);
+        QTRY_VERIFY(!gif->property("playing").toBool());
+        timeline->setProperty("height", savedH);
+        timeline->setProperty("contentY", savedY);
+        QTRY_VERIFY(gif->property("playing").toBool());
     }
 
     void testOrphanSmsVerificationCodeWithoutChatJoin() {
