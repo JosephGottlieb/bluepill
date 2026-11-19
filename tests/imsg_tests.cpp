@@ -2368,6 +2368,20 @@ private slots:
                                       QStringLiteral("Birthday"), QStringLiteral("Note")}));
         QVERIFY(!labels.contains(QStringLiteral("Department")));  // empty fields are skipped
         QVERIFY(values.contains(QStringLiteral("Met at the conference")));
+        // A photo from the Mac replaces the initials
+        Backend withPhoto(false);
+        withPhoto.parseContactsJson(QByteArray(R"([{"id": "uid-9", "firstName": "Sam", "lastName": "Lee",
+            "phoneNumbers": [{"address": "+15555550123"}], "avatar": "/api/v1/contact/uid-9/avatar"}])"));
+        QCOMPARE(withPhoto.contactAvatarApiPathForTest(QStringLiteral("+1 555-555-0123")), QStringLiteral("/api/v1/contact/uid-9/avatar"));
+        QCOMPARE(withPhoto.resolveContactAvatar(QStringLiteral("+15555550123")), QString());
+        QTemporaryDir photoDir;
+        const QString photoFile = photoDir.filePath(QStringLiteral("p.img"));
+        QImage face(32, 32, QImage::Format_RGB32);
+        face.fill(Qt::darkCyan);
+        QVERIFY(face.save(photoFile, "PNG"));
+        withPhoto.applyContactAvatarForTest(QStringLiteral("/api/v1/contact/uid-9/avatar"), photoFile);
+        QCOMPARE(withPhoto.resolveContactAvatar(QStringLiteral("+15555550123")), QUrl::fromLocalFile(photoFile).toString());
+
         // Same contact by email; unknown address isn't found
         QVERIFY(backend.contactDetails(QStringLiteral("USER@example.com")).value(QStringLiteral("found")).toBool());
         QVERIFY(!backend.contactDetails(QStringLiteral("+15555550199")).value(QStringLiteral("found")).toBool());

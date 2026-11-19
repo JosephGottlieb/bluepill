@@ -217,6 +217,38 @@ def _ab_birthday(raw: Any, yearless: bool = False) -> str:
     # Apple stores year-less birthdays in 1604.
     return dt.strftime("--%m-%d") if yearless or dt.year == 1604 else dt.strftime("%Y-%m-%d")
 
+
+def _image_mime(data: bytes) -> str:
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "image/heic"
+    return "image/jpeg"
+
+
+def _ab_image_bytes(blob: Any, images_dir: str) -> bytes:
+    """AddressBook photo blobs are the image itself, often with a leading 0x01
+    marker byte, or (newer macOS) a reference to a file in the source's Images/."""
+    if not blob:
+        return b""
+    data = bytes(blob)
+    if data[:1] == b"\x01":
+        data = data[1:]
+    if data.startswith(b"\xff\xd8") or data.startswith(b"\x89PNG") or data[4:8] == b"ftyp" or data[:4] == b"RIFF":
+        return data
+    ref = data.split(b"\x00", 1)[0].decode("utf-8", errors="ignore").strip()
+    if ref and re.fullmatch(r"[A-Za-z0-9_.:-]{8,128}", ref):
+        path = os.path.join(images_dir, ref)
+        if os.path.isfile(path):
+            try:
+                with open(path, "rb") as fh:
+                    return fh.read(8 * 1024 * 1024)
+            except OSError:
+                return b""
+    return b""
+
 def epoch_ms_to_apple_ns(epoch_ms: int) -> int:
     """Convert Unix epoch milliseconds to Apple chat.db nanoseconds since 2001-01-01."""
     if epoch_ms <= 0:
@@ -1889,6 +1921,7 @@ class BluePillEngine:
 
         contacts: List[Dict[str, Any]] = []
         seen_keys = set()
+        avatar_index: Dict[str, Tuple[str, int]] = {}
 
         # 1. Load from BlueBubbles config.db contact + contact_address tables (if present)
         if os.path.exists(self.bb_config_db_path):
@@ -1962,6 +1995,7 @@ class BluePillEngine:
                 conn = sqlite3.connect(uri, uri=True, timeout=2.0)
                 conn.row_factory = sqlite3.Row
                 rec_cols = _sqlite_columns(conn, "ZABCDRECORD")
+                photo_cols = [c for c in ("ZTHUMBNAILIMAGEDATA", "ZIMAGEDATA") if c in rec_cols]
                 optional = [c for c in ("ZMIDDLENAME", "ZNICKNAME", "ZORGANIZATION", "ZNAME", "ZJOBTITLE",
                                         "ZDEPARTMENT", "ZBIRTHDAY", "ZBIRTHDAYYEARLESS") if c in rec_cols]
                 where = " OR ".join(f"{c} IS NOT NULL" for c in ("ZFIRSTNAME", "ZLASTNAME", "ZORGANIZATION", "ZNICKNAME")
@@ -2058,6 +2092,10 @@ class BluePillEngine:
                     if dedup_key in seen_keys:
                         continue
                     seen_keys.add(dedup_key)
+                    avatar = ""
+                    if photo_cols:
+                        avatar_index[uid] = (db_file, pk)
+                        avatar = f"/api/v1/contact/{urllib.parse.quote(uid, safe='')}/avatar"
                     birthday = ""
                     if "ZBIRTHDAY" in optional and r["ZBIRTHDAY"] is not None:
                         birthday = _ab_birthday(r["ZBIRTHDAY"], "ZBIRTHDAYYEARLESS" in optional and bool(r["ZBIRTHDAYYEARLESS"]))
@@ -2078,7 +2116,7 @@ class BluePillEngine:
                             "urls": urls_by_owner.get(pk, []),
                             "note": notes_by_owner.get(pk, ""),
                             "birthday": birthday,
-                            "avatar": "",
+                            "avatar": avatar,
                         }
                     )
                 conn.close()
@@ -2088,7 +2126,39 @@ class BluePillEngine:
         with self._contacts_lock:
             self._contacts_cache = contacts
             self._contacts_cache_ts = now
+            self._contact_avatar_index = avatar_index
         return contacts
+
+    def contact_avatar(self, contact_id: str) -> Optional[Tuple[bytes, str]]:
+        """(image bytes, mime) for a contact's photo from the AddressBook, or None."""
+        with self._contacts_lock:
+            index = dict(getattr(self, "_contact_avatar_index", {}) or {})
+        if contact_id not in index:
+            self.query_contacts(force_refresh=False)
+            with self._contacts_lock:
+                index = dict(getattr(self, "_contact_avatar_index", {}) or {})
+        loc = index.get(contact_id)
+        if not loc:
+            return None
+        db_file, pk = loc
+        try:
+            uri = f"file:{urllib.parse.quote(os.path.abspath(db_file))}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                cols = [c for c in ("ZTHUMBNAILIMAGEDATA", "ZIMAGEDATA") if c in _sqlite_columns(conn, "ZABCDRECORD")]
+                if not cols:
+                    return None
+                row = conn.execute(f"SELECT {', '.join(cols)} FROM ZABCDRECORD WHERE Z_PK = ?", (pk,)).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        images_dir = os.path.join(os.path.dirname(db_file), "Images")
+        for blob in (row or ()):
+            data = _ab_image_bytes(blob, images_dir)
+            if data:
+                return data, _image_mime(data)
+        return None
 
     def query_pinned_chats(self) -> List[Dict[str, Any]]:
         """Parse ~/Library/Preferences/com.apple.messages.pinning.plist and resolve against chat.db."""
@@ -9697,6 +9767,20 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.query_contacts())
             return
 
+        m_avatar = re.match(r"^/api/v1/contact/([^/]+)/avatar$", path)
+        if m_avatar:
+            found = self.engine.contact_avatar(urllib.parse.unquote(m_avatar.group(1)))
+            if not found:
+                self._send_json(404, None, "No photo for this contact")
+                return
+            data, mime = found
+            self._log_http(200)
+            self.send_response(200)
+            self._send_attachment_common_headers(mime, "avatar", len(data))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         m_chat_msg = re.match(r"^/api/v1/chat/([^/]+)/message$", path)
         if m_chat_msg:
             chat_guid = urllib.parse.unquote(m_chat_msg.group(1))
@@ -10319,7 +10403,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             """
             CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, ZUNIQUEID TEXT, ZFIRSTNAME TEXT, ZLASTNAME TEXT,
                 ZMIDDLENAME TEXT, ZNICKNAME TEXT, ZORGANIZATION TEXT, ZNAME TEXT, ZJOBTITLE TEXT,
-                ZDEPARTMENT TEXT, ZBIRTHDAY REAL);
+                ZDEPARTMENT TEXT, ZBIRTHDAY REAL, ZTHUMBNAILIMAGEDATA BLOB);
             CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT, ZLABEL TEXT);
             CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT, ZLABEL TEXT);
             CREATE TABLE ZABCDPOSTALADDRESS (ZOWNER INTEGER, ZSTREET TEXT, ZCITY TEXT, ZSTATE TEXT,
@@ -10327,7 +10411,7 @@ def run_selftest(engine: BluePillEngine) -> int:
             CREATE TABLE ZABCDURLADDRESS (ZOWNER INTEGER, ZURL TEXT, ZLABEL TEXT);
             CREATE TABLE ZABCDNOTE (ZCONTACT INTEGER, ZTEXT TEXT);
             INSERT INTO ZABCDRECORD VALUES (1, 'uid-1', 'Alex', 'Rivera', 'Q', 'Lex', 'Example Co', NULL,
-                'Engineer', 'Platform', 610286400);
+                'Engineer', 'Platform', 610286400, NULL);
             INSERT INTO ZABCDPHONENUMBER VALUES (1, '+1 (555) 555-0100', '_$!<Mobile>!$_');
             INSERT INTO ZABCDPHONENUMBER VALUES (1, '+1 (555) 555-0101', 'Studio');
             INSERT INTO ZABCDEMAILADDRESS VALUES (1, 'user@example.com', '_$!<Home>!$_');
@@ -10336,6 +10420,8 @@ def run_selftest(engine: BluePillEngine) -> int:
             INSERT INTO ZABCDNOTE VALUES (1, 'Met at the conference');
             """
         )
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        ab.execute("UPDATE ZABCDRECORD SET ZTHUMBNAILIMAGEDATA = ? WHERE Z_PK = 1", (b"\x01" + fake_png,))
         ab.commit()
         ab.close()
         ab_eng = BluePillEngine(db_path="/nonexistent/selftest_chat.db", password="x",
@@ -10353,6 +10439,10 @@ def run_selftest(engine: BluePillEngine) -> int:
         assert c0["urls"][0]["address"] == "https://example.com", c0["urls"]
         assert c0["note"] == "Met at the conference", c0
         assert c0["birthday"] == "2020-05-04", c0["birthday"]
+        assert c0["avatar"] == "/api/v1/contact/uid-1/avatar", c0["avatar"]
+        photo = ab_eng.contact_avatar("uid-1")
+        assert photo and photo[0] == fake_png and photo[1] == "image/png", photo
+        assert ab_eng.contact_avatar("no-such-contact") is None
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
     launchctl_calls: List[List[str]] = []
     test_eng._run_launchctl = lambda args: (

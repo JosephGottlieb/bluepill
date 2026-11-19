@@ -390,6 +390,8 @@ public:
         m_lastSoundPresetPlayed.clear();
     }
     void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
+    QString contactAvatarApiPathForTest(const QString &handle) const { return m_contactAvatarApiPaths.value(normalizeHandle(handle)); }
+    void applyContactAvatarForTest(const QString &apiPath, const QString &file) { applyContactAvatar(apiPath, file); }
 
     // Pure testable helpers
     static QString normalizeHandle(const QString &raw);
@@ -679,6 +681,15 @@ private:
 
     QHash<QString, QString> m_contactNames;
     QHash<QString, QVariantMap> m_contactRecords;  // full Mac contact, by normalized handle
+    // Contact photos served by bluepill-server, fetched for chat participants
+    QHash<QString, QString> m_contactAvatarApiPaths;  // normalized handle -> /api/v1/contact/<id>/avatar
+    QStringList m_contactAvatarQueue;
+    QSet<QString> m_contactAvatarFetchesDone;
+    int m_contactAvatarsInFlight = 0;
+    bool m_avatarRefreshPending = false;
+    void fetchContactAvatarsForChats();
+    void pumpContactAvatarQueue();
+    void applyContactAvatar(const QString &apiPath, const QString &file);
     QHash<QString, QString> m_contactRawAddresses;
     QHash<QString, QString> m_contactAvatars;
     QHash<QString, QStringList> m_chatParticipants;

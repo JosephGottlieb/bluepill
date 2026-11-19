@@ -1609,6 +1609,9 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
         }
 
         const QVariantMap record = c.toVariantMap();
+        // bluepill-server serves AddressBook photos at /api/v1/contact/<id>/avatar
+        const QString avatarApiPath = c.value(QStringLiteral("avatar")).toString().startsWith(QStringLiteral("/api/v1/contact/"))
+                                          ? c.value(QStringLiteral("avatar")).toString() : QString();
         const QJsonArray phones = c.value(QStringLiteral("phoneNumbers")).toArray();
         for (const QJsonValue &pv : phones) {
             QString addr;
@@ -1623,6 +1626,7 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
                 m_contactRawAddresses.insert(norm, canonicalizeAddress(addr));
                 m_contactRecords.insert(norm, record);
                 if (!avatarUrl.isEmpty()) m_contactAvatars.insert(norm, avatarUrl);
+                else if (!avatarApiPath.isEmpty()) m_contactAvatarApiPaths.insert(norm, avatarApiPath);
             }
         }
 
@@ -1640,6 +1644,7 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
                 m_contactRawAddresses.insert(norm, canonicalizeAddress(addr));
                 m_contactRecords.insert(norm, record);
                 if (!avatarUrl.isEmpty()) m_contactAvatars.insert(norm, avatarUrl);
+                else if (!avatarApiPath.isEmpty()) m_contactAvatarApiPaths.insert(norm, avatarApiPath);
             }
         }
     }
@@ -1652,6 +1657,78 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
         emit selectedChatChanged();
     }
     emit contactsChanged();
+    fetchContactAvatarsForChats();
+}
+
+void Backend::fetchContactAvatarsForChats() {
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    // Only people you have a conversation with; the address book can be huge.
+    QSet<QString> queued;
+    for (const ChatEntry &c : std::as_const(m_chats)) {
+        const QStringList handles = c.participantHandles.isEmpty() ? QStringList{c.chatIdentifier} : c.participantHandles;
+        for (const QString &h : handles) {
+            const QString norm = normalizeHandle(h);
+            if (norm.isEmpty() || m_contactAvatars.contains(norm) || queued.contains(norm)) continue;
+            const QString apiPath = m_contactAvatarApiPaths.value(norm);
+            if (apiPath.isEmpty() || m_contactAvatarFetchesDone.contains(apiPath)) continue;
+            queued.insert(norm);
+            if (!m_contactAvatarQueue.contains(apiPath)) m_contactAvatarQueue.append(apiPath);
+        }
+    }
+    pumpContactAvatarQueue();
+}
+
+void Backend::pumpContactAvatarQueue() {
+    while (m_contactAvatarsInFlight < 4 && !m_contactAvatarQueue.isEmpty()) {
+        const QString apiPath = m_contactAvatarQueue.takeFirst();
+        if (m_contactAvatarFetchesDone.contains(apiPath)) continue;
+        m_contactAvatarFetchesDone.insert(apiPath);
+        const QString dir = QDir::homePath() + QStringLiteral("/.cache/imsg/avatars");
+        const QString file = dir + QLatin1Char('/') +
+                             QString::fromLatin1(QCryptographicHash::hash(apiPath.toUtf8(), QCryptographicHash::Sha1).toHex()) +
+                             QStringLiteral(".img");
+        const QFileInfo fi(file);
+        if (fi.exists() && fi.size() > 64 && fi.lastModified().secsTo(QDateTime::currentDateTime()) < 86400) {
+            applyContactAvatar(apiPath, file);  // fresh enough: no request
+            continue;
+        }
+        ++m_contactAvatarsInFlight;
+        QNetworkReply *reply = m_mediaNam.get(makeRequest(apiPath));
+        connect(reply, &QNetworkReply::finished, this, [this, reply, apiPath, dir, file]() {
+            reply->deleteLater();
+            --m_contactAvatarsInFlight;
+            const QByteArray bytes = reply->readAll();
+            QImage probe;
+            if (reply->error() == QNetworkReply::NoError && probe.loadFromData(bytes)) {
+                QDir().mkpath(dir);
+                QFile f(file);
+                if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    f.write(bytes);
+                    f.close();
+                    applyContactAvatar(apiPath, file);
+                }
+            }
+            pumpContactAvatarQueue();
+        });
+    }
+}
+
+void Backend::applyContactAvatar(const QString &apiPath, const QString &file) {
+    const QString url = QUrl::fromLocalFile(file).toString();
+    for (auto it = m_contactAvatarApiPaths.constBegin(); it != m_contactAvatarApiPaths.constEnd(); ++it) {
+        if (it.value() == apiPath) m_contactAvatars.insert(it.key(), url);
+    }
+    // Coalesce: many photos arrive together; refresh the lists once.
+    if (!m_avatarRefreshPending) {
+        m_avatarRefreshPending = true;
+        QTimer::singleShot(150, this, [this]() {
+            m_avatarRefreshPending = false;
+            for (ChatEntry &c : m_chats) rebuildChatPresentation(c);
+            emit chatsChanged();
+            emit selectedChatChanged();
+            emit contactsChanged();
+        });
+    }
 }
 
 QString Backend::resolveContactName(const QString &handle) const {

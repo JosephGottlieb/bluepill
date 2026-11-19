@@ -1941,12 +1941,12 @@ ApplicationWindow {
                                             border.width: modelData.guid === backend.selectedChatGuid ? 2 : (pinTileMouse.containsMouse ? 1 : 0)
                                             border.color: modelData.guid === backend.selectedChatGuid ? theme.brightForeground : theme.accent
 
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: modelData.initials || "#"
-                                                font.pixelSize: theme.fontSize - 1
-                                                font.bold: true
-                                                color: "#ffffff"
+                                            RoundAvatar {
+                                                anchors.fill: parent
+                                                color: "transparent"
+                                                source: modelData.avatarUrl || ""
+                                                initials: modelData.initials || "#"
+                                                fontPixelSize: theme.fontSize - 1
                                             }
 
                                             // Unread badge dot on pinned avatar
@@ -2037,31 +2037,14 @@ ApplicationWindow {
                                 anchors.margins: 10
                                 spacing: 10
 
-                                // Avatar Circle
-                                Rectangle {
+                                // Avatar Circle (contact photo, or initials)
+                                RoundAvatar {
                                     Layout.preferredWidth: 44
                                     Layout.preferredHeight: 44
-                                    radius: 22
                                     color: modelData.avatarColor
-                                    clip: true
-
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: modelData.initials
-                                        font.pixelSize: theme.fontSize
-                                        font.bold: true
-                                        color: "#ffffff"
-                                        visible: avatarImg.status !== Image.Ready
-                                    }
-
-                                    Image {
-                                        id: avatarImg
-                                        anchors.fill: parent
-                                        source: modelData.avatarUrl || ""
-                                        autoTransform: true
-                                        fillMode: Image.PreserveAspectCrop
-                                        visible: status === Image.Ready
-                                    }
+                                    source: modelData.avatarUrl || ""
+                                    initials: modelData.initials
+                                    fontPixelSize: theme.fontSize
                                 }
 
                                 // Title, Service badge, Preview
@@ -2971,21 +2954,12 @@ ApplicationWindow {
                                 border.width: 1.5
                                 border.color: Qt.rgba(1, 1, 1, 0.22)
 
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: backend.selectedChatInitials
-                                    font.pixelSize: theme.fontSize + 1
-                                    font.bold: true
-                                    color: "#ffffff"
-                                    visible: headerAvatar.status !== Image.Ready
-                                }
-                                Image {
-                                    id: headerAvatar
+                                RoundAvatar {
                                     anchors.fill: parent
+                                    color: "transparent"
                                     source: backend.selectedChatAvatar
-                                    autoTransform: true
-                                    fillMode: Image.PreserveAspectCrop
-                                    visible: status === Image.Ready
+                                    initials: backend.selectedChatInitials
+                                    fontPixelSize: theme.fontSize + 1
                                 }
                             }
 
