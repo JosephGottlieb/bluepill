@@ -2410,6 +2410,19 @@ private slots:
         QVERIFY(threadList);
         QTRY_COMPARE(threadList->property("count").toInt(), 3);
 
+        // The thread card sits over the open conversation, never over the sidebar
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("threadViewCard"));
+        auto *pane = win->findChild<QQuickItem *>(QStringLiteral("conversationPane"));
+        auto *sidebar = win->findChild<QQuickItem *>(QStringLiteral("leftSidebarPane"));
+        QVERIFY(card && pane && sidebar);
+        QTRY_VERIFY(card->width() > 0);
+        const QRectF cardRect = card->mapRectToScene(QRectF(0, 0, card->width(), card->height()));
+        const QRectF paneRect = pane->mapRectToScene(QRectF(0, 0, pane->width(), pane->height()));
+        const QRectF sideRect = sidebar->mapRectToScene(QRectF(0, 0, sidebar->width(), sidebar->height()));
+        QVERIFY2(!cardRect.intersects(sideRect), "thread card overlaps the conversation list");
+        QVERIFY(paneRect.contains(cardRect));
+        QVERIFY(qAbs(cardRect.center().x() - paneRect.center().x()) <= 1.0);
+
         // Replying from the thread view adds a reply to this thread
         QObject *replyInput = win->findChild<QObject *>(QStringLiteral("threadReplyInput"));
         QVERIFY(replyInput);

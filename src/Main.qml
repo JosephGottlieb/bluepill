@@ -2358,6 +2358,8 @@ ApplicationWindow {
 
             // Right Pane: Home Page Dashboard OR Active Conversation Header + Message Timeline + Composer
             ColumnLayout {
+                id: conversationPane
+                objectName: "conversationPane"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 0
@@ -8556,16 +8558,27 @@ ApplicationWindow {
         id: threadViewModal
         objectName: "threadViewModal"
         visible: root.showThreadView
-        anchors.fill: parent
+        // Covers only the open conversation (not the sidebar), so the thread
+        // card is centered over the chat it belongs to.
+        readonly property point paneOrigin: {
+            void (conversationPane.x + conversationPane.y + conversationPane.width + conversationPane.height + root.width + root.height)
+            return conversationPane.mapToItem(threadViewModal.parent, 0, 0)
+        }
+        x: paneOrigin.x
+        y: paneOrigin.y
+        width: conversationPane.width
+        height: conversationPane.height
         color: "#aa0e0e14"
         z: 998
 
         MouseArea {
             anchors.fill: parent
+            hoverEnabled: true  // takes hover from the timeline underneath (no stray tooltips)
             onClicked: root.showThreadView = false
         }
 
         Rectangle {
+            objectName: "threadViewCard"
             width: Math.min(560, parent.width - 80)
             height: Math.min(parent.height - 80, threadCol.implicitHeight + 44)
             anchors.centerIn: parent
