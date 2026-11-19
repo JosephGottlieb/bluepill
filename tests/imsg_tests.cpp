@@ -10658,6 +10658,93 @@ private slots:
         QCOMPARE(bPersist2.hoverMessageActions(), false);
     }
 
+    void testKeyboardShortcutsModalScrollableSearchableAndBounded() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_shortcuts_modal.json")));
+        b.loadDemoData();
+
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->resize(1180, 820);
+        win->show();
+        QTest::qWait(80);
+
+        QQuickItem *modalCard = win->findChild<QQuickItem *>(QStringLiteral("shortcutsModalCard"));
+        QQuickItem *searchField = win->findChild<QQuickItem *>(QStringLiteral("shortcutsSearchField"));
+        QQuickItem *flickable = win->findChild<QQuickItem *>(QStringLiteral("shortcutsFlickable"));
+        QQuickItem *emptyText = win->findChild<QQuickItem *>(QStringLiteral("shortcutsEmptyStateText"));
+        QVERIFY(modalCard != nullptr);
+        QVERIFY(searchField != nullptr);
+        QVERIFY(flickable != nullptr);
+        QVERIFY(emptyText != nullptr);
+
+        // Open Keyboard Shortcuts modal (Ctrl+K / F1)
+        win->setProperty("showShortcutsModal", true);
+        QCoreApplication::processEvents();
+        QTest::qWait(40);
+
+        // 1. Verify modal card is strictly inside window boundaries and clipped
+        QCOMPARE(modalCard->property("clip").toBool(), true);
+        QVERIFY(modalCard->width() <= win->width() - 32);
+        QVERIFY(modalCard->height() <= win->height() - 32);
+
+        // 2. Verify shortcutsFlickable is clipped and scrollable (contentHeight > height)
+        QCOMPARE(flickable->property("clip").toBool(), true);
+        QVERIFY(flickable->property("contentHeight").toReal() > flickable->height());
+
+        // 3. Verify live search filtering by shortcut keys and action descriptions
+        const int totalCount = win->property("shortcutsCatalog").toList().size();
+        QVERIFY(totalCount >= 22);
+        QCOMPARE(win->property("filteredShortcutsCatalog").toList().size(), totalCount);
+        QCOMPARE(emptyText->property("visible").toBool(), false);
+
+        searchField->setProperty("text", QStringLiteral("mute"));
+        QCoreApplication::processEvents();
+        const int muteCount = win->property("filteredShortcutsCatalog").toList().size();
+        QVERIFY(muteCount > 0 && muteCount < totalCount);
+        QCOMPARE(emptyText->property("visible").toBool(), false);
+
+        searchField->setProperty("text", QStringLiteral("ctrl+k"));
+        QCoreApplication::processEvents();
+        const int ctrlKCount = win->property("filteredShortcutsCatalog").toList().size();
+        QCOMPARE(ctrlKCount, 1);
+
+        searchField->setProperty("text", QStringLiteral("tapback"));
+        QCoreApplication::processEvents();
+        const int tapbackCount = win->property("filteredShortcutsCatalog").toList().size();
+        QVERIFY(tapbackCount >= 1 && tapbackCount < totalCount);
+
+        searchField->setProperty("text", QStringLiteral("zzznomatch999"));
+        QCoreApplication::processEvents();
+        QCOMPARE(win->property("filteredShortcutsCatalog").toList().size(), 0);
+        QCOMPARE(emptyText->property("visible").toBool(), true);
+
+        // Clearing search restores all rows
+        searchField->setProperty("text", QString());
+        QCoreApplication::processEvents();
+        QCOMPARE(win->property("filteredShortcutsCatalog").toList().size(), totalCount);
+        QCOMPARE(emptyText->property("visible").toBool(), false);
+
+        // 4. Resize window to a compact split size and verify modal stays inside window boundaries
+        win->resize(520, 420);
+        QCoreApplication::processEvents();
+        QTest::qWait(40);
+        QVERIFY(modalCard->width() <= win->width() - 32);
+        QVERIFY(modalCard->height() <= win->height() - 32);
+        QVERIFY(flickable->property("contentHeight").toReal() > flickable->height());
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

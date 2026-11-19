@@ -474,6 +474,59 @@ ApplicationWindow {
     }
 
     property bool showShortcutsModal: false
+    property string shortcutsSearchQuery: ""
+    readonly property var shortcutsCatalog: [
+        { keys: "Ctrl+K / F1 / ?", desc: "Toggle keyboard shortcuts dialog" },
+        { keys: "Ctrl+,", desc: "Open Settings (Server, UI & Notifications tabs)" },
+        { keys: "Ctrl+F / /", desc: "Focus conversation search filter" },
+        { keys: "Ctrl+H / Esc", desc: "Close the open conversation or active modal" },
+        { keys: "Alt+Down / Ctrl+J", desc: "Next conversation in sidebar" },
+        { keys: "Alt+Up / Ctrl+Shift+Tab", desc: "Previous conversation in sidebar" },
+        { keys: "Alt+1 .. Alt+9", desc: "Jump directly to conversation 1–9" },
+        { keys: "Ctrl+N", desc: "Start new conversation" },
+        { keys: "Ctrl+Shift+C / Alt+C", desc: "Add / edit active contact" },
+        { keys: "Click contact header", desc: "Open Contact Info card (details, call, mute)" },
+        { keys: "Right-click / Hover 📌 chat", desc: "Pin / unpin, mute, mark unread, or delete chat" },
+        { keys: "Right-click / Hover bubble", desc: "Message actions: Tapback (+ custom emoji), Reply, Edit, Unsend, Copy" },
+        { keys: "Double-click bubble", desc: "Quick tapback reaction (❤️ Love)" },
+        { keys: "Click quoted reply", desc: "Open inline Thread View & jump to message" },
+        { keys: "Ctrl+E", desc: "Toggle emoji picker palette" },
+        { keys: ":shortcode + Tab", desc: "Complete emoji shortcode or emoticon" },
+        { keys: "Ctrl+U", desc: "Toggle unread filter" },
+        { keys: "Ctrl+Shift+U / Alt+U", desc: "Toggle read/unread on active chat" },
+        { keys: "Ctrl+Shift+A", desc: "Mark all conversations as read" },
+        { keys: "Ctrl+Shift+R", desc: "Mark active chat as read" },
+        { keys: "Ctrl+M", desc: "Mute / unmute active chat" },
+        { keys: "Ctrl+R / F5", desc: "Sync contacts and poll recent" },
+        { keys: "PageUp / PageDown", desc: "Scroll message timeline up / down" },
+        { keys: "Home / End", desc: "Jump to top / bottom of messages" },
+        { keys: "Esc", desc: "Dismiss popup, pin, or search" },
+        { keys: "Ctrl+Q", desc: "Quit application" }
+    ]
+    readonly property var filteredShortcutsCatalog: {
+        var q = (root.shortcutsSearchQuery || "").trim().toLowerCase()
+        if (q.length === 0) return root.shortcutsCatalog
+        var out = []
+        for (var i = 0; i < root.shortcutsCatalog.length; i++) {
+            var item = root.shortcutsCatalog[i]
+            if (item.keys.toLowerCase().indexOf(q) >= 0 || item.desc.toLowerCase().indexOf(q) >= 0) {
+                out.push(item)
+            }
+        }
+        return out
+    }
+    onShowShortcutsModalChanged: {
+        if (root.showShortcutsModal) {
+            root.shortcutsSearchQuery = ""
+            if (typeof shortcutsSearchField !== "undefined" && shortcutsSearchField) {
+                shortcutsSearchField.text = ""
+                shortcutsSearchField.forceActiveFocus()
+            }
+            if (typeof shortcutsFlickable !== "undefined" && shortcutsFlickable) {
+                shortcutsFlickable.contentY = 0
+            }
+        }
+    }
     property bool showNewChatModal: false
     property bool showContactModal: false
     // Thread view (opened from a quoted reply or "N Replies"), and the message to flash after a jump
@@ -1323,7 +1376,14 @@ ApplicationWindow {
     }
     Shortcut {
         sequences: ["Ctrl+F", "/"]
-        onActivated: searchInput.forceActiveFocus()
+        enabled: !root.showShortcutsModal || !shortcutsSearchField.activeFocus
+        onActivated: {
+            if (root.showShortcutsModal) {
+                shortcutsSearchField.forceActiveFocus()
+            } else {
+                searchInput.forceActiveFocus()
+            }
+        }
     }
     Shortcut {
         sequences: ["Alt+Down", "Ctrl+J", "Ctrl+Tab"]
@@ -1440,7 +1500,7 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "?"
-        enabled: !root.showServerConfigModal && !root.showContactModal && !root.showNewChatModal
+        enabled: !root.showServerConfigModal && !root.showContactModal && !root.showNewChatModal && (!root.showShortcutsModal || !shortcutsSearchField.activeFocus)
         onActivated: root.showShortcutsModal = !root.showShortcutsModal
     }
     Shortcut {
@@ -10612,7 +10672,7 @@ ApplicationWindow {
                                 }
 
                                 ToolTip.visible: presetMouse.containsMouse
-                                ToolTip.text: modelData.desc + " — " + i18n.tr("Click to select & preview")
+                                ToolTip.text: i18n.tr(modelData.desc) + " — " + i18n.tr("Click to select & preview")
                                 ToolTip.delay: 300
 
                                 MouseArea {
@@ -10778,6 +10838,8 @@ ApplicationWindow {
 
     // Keyboard Shortcuts Modal Overlay (Ctrl+K / F1 / ?)
     Rectangle {
+        id: shortcutsModalOverlay
+        objectName: "shortcutsModalOverlay"
         visible: root.showShortcutsModal
         anchors.fill: parent
         color: "#aa0e0e14"
@@ -10789,27 +10851,40 @@ ApplicationWindow {
         }
 
         Rectangle {
-            width: 500
-            height: 520
+            id: shortcutsModalCard
+            objectName: "shortcutsModalCard"
+            width: Math.max(120, Math.min(560, root.width - 40))
+            height: Math.max(120, Math.min(560, root.height - 64))
             anchors.centerIn: parent
             radius: theme.radius + 2
             color: theme.darkBackground
             border.width: 1
             border.color: theme.accent
+            clip: true
+
+            MouseArea { anchors.fill: parent }
 
             ColumnLayout {
                 anchors.fill: parent
-                anchors.margins: 22
-                spacing: 8
+                anchors.margins: 20
+                spacing: 10
 
                 RowLayout {
                     Layout.fillWidth: true
+                    spacing: 8
                     Text {
                         text: i18n.tr("Keyboard Shortcuts")
                         font.pixelSize: theme.fontSize + 3
                         font.bold: true
                         color: theme.brightForeground
                         Layout.fillWidth: true
+                        elide: Text.ElideRight
+                    }
+                    Text {
+                        text: root.filteredShortcutsCatalog.length + " / " + root.shortcutsCatalog.length
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.darkForeground
+                        visible: root.shortcutsSearchQuery.trim().length > 0
                     }
                     Text {
                         text: "Esc to close"
@@ -10818,48 +10893,173 @@ ApplicationWindow {
                     }
                 }
 
-                Item { height: 4 }
+                // Live Search Input for Keyboard Shortcuts
+                Rectangle {
+                    id: shortcutsSearchBox
+                    objectName: "shortcutsSearchBox"
+                    Layout.fillWidth: true
+                    height: 34
+                    radius: 6
+                    color: theme.background
+                    border.width: 1
+                    border.color: shortcutsSearchField.activeFocus ? theme.accent : theme.muted
 
-                Repeater {
-                    model: [
-                        { keys: "Ctrl+H / Esc", desc: "Close the open conversation" },
-                        { keys: "Ctrl+K / F1", desc: "Toggle this keyboard shortcuts dialog" },
-                        { keys: "Ctrl+F / /", desc: "Focus conversation search filter" },
-                        { keys: "Alt+Down / Ctrl+J", desc: "Next conversation in sidebar" },
-                        { keys: "Alt+Up", desc: "Previous conversation in sidebar" },
-                        { keys: "Alt+1 .. Alt+9", desc: "Jump directly to conversation 1–9" },
-                        { keys: "Ctrl+N", desc: "Start new conversation" },
-                        { keys: "Ctrl+Shift+C", desc: "Add / edit active contact" },
-                        { keys: "Ctrl+E", desc: "Toggle emoji picker palette" },
-                        { keys: "Ctrl+U", desc: "Toggle unread filter" },
-                        { keys: "Ctrl+Shift+U / Alt+U", desc: "Toggle read/unread on active chat" },
-                        { keys: "Ctrl+Shift+A", desc: "Mark all conversations as read" },
-                        { keys: "Ctrl+Shift+R", desc: "Mark active chat as read" },
-                        { keys: "Right-click chat", desc: "Toggle read/unread directly" },
-                        { keys: "Ctrl+M", desc: "Mute / unmute active chat" },
-                        { keys: "Ctrl+R / F5", desc: "Sync contacts and poll recent" },
-                        { keys: "PageUp / PageDown", desc: "Scroll message timeline up / down" },
-                        { keys: "Home / End", desc: "Jump to top / bottom of messages" },
-                        { keys: ":shortcode + Tab", desc: "Complete emoji shortcode or emoticon" },
-                        { keys: "Double-click bubble", desc: "Quick reaction (❤️ Love)" },
-                        { keys: "Esc", desc: "Dismiss popup, pin, or search" },
-                        { keys: "Ctrl+Q", desc: "Quit application" }
-                    ]
-                    delegate: RowLayout {
-                        required property var modelData
-                        Layout.fillWidth: true
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 10
+                        anchors.rightMargin: 8
+                        spacing: 6
+
                         Text {
-                            text: modelData.keys
+                            text: "🔍"
                             font.pixelSize: theme.fontSize - 2
-                            font.bold: true
-                            color: theme.accent
-                            Layout.preferredWidth: 175
+                            color: theme.darkForeground
                         }
-                        Text {
-                            text: modelData.desc
-                            font.pixelSize: theme.fontSize - 2
-                            color: theme.foreground
+
+                        TextField {
+                            id: shortcutsSearchField
+                            objectName: "shortcutsSearchField"
                             Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            topPadding: 4
+                            bottomPadding: 6
+                            verticalAlignment: TextInput.AlignVCenter
+                            placeholderText: i18n.tr("Search shortcuts or actions...")
+                            placeholderTextColor: theme.darkForeground
+                            color: theme.brightForeground
+                            font.pixelSize: theme.fontSize - 2
+                            background: Item {}
+                            text: root.shortcutsSearchQuery
+                            onTextChanged: {
+                                if (root.shortcutsSearchQuery !== text) {
+                                    root.shortcutsSearchQuery = text
+                                }
+                                shortcutsFlickable.contentY = 0
+                            }
+                            Keys.onEscapePressed: function(event) {
+                                event.accepted = true
+                                shortcutsSearchField.text = ""
+                                root.shortcutsSearchQuery = ""
+                                root.showShortcutsModal = false
+                            }
+                            Keys.onDownPressed: function(event) {
+                                event.accepted = true
+                                var maxY = Math.max(0, shortcutsFlickable.contentHeight - shortcutsFlickable.height)
+                                shortcutsFlickable.contentY = Math.min(maxY, shortcutsFlickable.contentY + 36)
+                            }
+                            Keys.onUpPressed: function(event) {
+                                event.accepted = true
+                                shortcutsFlickable.contentY = Math.max(0, shortcutsFlickable.contentY - 36)
+                            }
+                            Keys.onPressed: function(event) {
+                                if (event.key === Qt.Key_PageDown) {
+                                    event.accepted = true
+                                    var maxY = Math.max(0, shortcutsFlickable.contentHeight - shortcutsFlickable.height)
+                                    shortcutsFlickable.contentY = Math.min(maxY, shortcutsFlickable.contentY + Math.max(80, shortcutsFlickable.height - 40))
+                                } else if (event.key === Qt.Key_PageUp) {
+                                    event.accepted = true
+                                    shortcutsFlickable.contentY = Math.max(0, shortcutsFlickable.contentY - Math.max(80, shortcutsFlickable.height - 40))
+                                }
+                            }
+                        }
+
+                        Text {
+                            id: shortcutsSearchClearBtn
+                            objectName: "shortcutsSearchClearBtn"
+                            visible: shortcutsSearchField.text.length > 0
+                            text: "✕"
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.darkForeground
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -4
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    shortcutsSearchField.text = ""
+                                    root.shortcutsSearchQuery = ""
+                                    shortcutsSearchField.forceActiveFocus()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Scrollable Shortcuts Container
+                Flickable {
+                    id: shortcutsFlickable
+                    objectName: "shortcutsFlickable"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    contentWidth: width
+                    contentHeight: shortcutsListCol.implicitHeight
+                    clip: true
+                    boundsBehavior: Flickable.StopAtBounds
+                    flickDeceleration: 2500
+                    maximumFlickVelocity: 2500
+                    ScrollBar.vertical: ScrollBar {
+                        id: shortcutsScrollBar
+                        objectName: "shortcutsScrollBar"
+                        policy: ScrollBar.AsNeeded
+                    }
+
+                    ColumnLayout {
+                        id: shortcutsListCol
+                        objectName: "shortcutsListCol"
+                        width: Math.max(0, shortcutsFlickable.width - 10)
+                        spacing: 6
+
+                        Repeater {
+                            id: shortcutsRepeater
+                            objectName: "shortcutsRepeater"
+                            model: root.filteredShortcutsCatalog
+                            delegate: Rectangle {
+                                required property var modelData
+                                required property int index
+                                objectName: "shortcutRow_" + index
+                                Layout.fillWidth: true
+                                implicitHeight: Math.max(shortcutKeyLabel.implicitHeight, shortcutDescLabel.implicitHeight) + 10
+                                radius: 5
+                                color: index % 2 === 0 ? Qt.rgba(1, 1, 1, 0.03) : "transparent"
+
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    spacing: 10
+
+                                    Text {
+                                        id: shortcutKeyLabel
+                                        text: modelData.keys
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.accent
+                                        Layout.preferredWidth: 185
+                                        Layout.alignment: Qt.AlignVCenter
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        id: shortcutDescLabel
+                                        text: i18n.tr(modelData.desc)
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: theme.foreground
+                                        Layout.fillWidth: true
+                                        Layout.alignment: Qt.AlignVCenter
+                                        wrapMode: Text.WordWrap
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            id: shortcutsEmptyStateText
+                            objectName: "shortcutsEmptyStateText"
+                            visible: root.filteredShortcutsCatalog.length === 0
+                            Layout.fillWidth: true
+                            Layout.topMargin: 24
+                            horizontalAlignment: Text.AlignHCenter
+                            text: i18n.tr("No matching keyboard shortcuts")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
                         }
                     }
                 }
