@@ -144,6 +144,52 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <iostream>
 #include <limits>
 
+static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObject &obj,
+                                      bool simulatePrePermFail = false, bool simulatePostPermFail = false) {
+    if (targetPath.isEmpty()) return false;
+    const QFileInfo targetFi(targetPath);
+    if (targetFi.exists() && targetFi.isDir()) return false;
+    QDir().mkpath(targetFi.absolutePath());
+    const QByteArray payload = QJsonDocument(obj).toJson(QJsonDocument::Indented);
+    QSaveFile outFile(targetPath);
+    if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        return false;
+    }
+    const QFileDevice::Permissions ownerRw = QFileDevice::ReadOwner | QFileDevice::WriteOwner;
+    const QFileDevice::Permissions groupOtherMask =
+        QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup |
+        QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther;
+    if (simulatePrePermFail || !outFile.setPermissions(ownerRw)) {
+        outFile.cancelWriting();
+        return false;
+    }
+    if (outFile.write(payload) != payload.size() || !outFile.flush()) {
+        outFile.cancelWriting();
+        return false;
+    }
+    const QFileDevice::Permissions stagedPerms = outFile.permissions();
+    if (simulatePostPermFail ||
+        (stagedPerms & groupOtherMask) != 0 ||
+        (stagedPerms & ownerRw) != ownerRw) {
+        qWarning() << "writeConfigAtomically: failed to enforce 0600 permissions on staged" << targetPath;
+        outFile.cancelWriting();
+        return false;
+    }
+    if (!outFile.commit()) {
+        return false;
+    }
+    return true;
+}
+
+static bool writeConfigAtomically(const QString &targetPath, const QJsonObject &obj) {
+    return writeConfigAtomicallyImpl(targetPath, obj);
+}
+
+bool Backend::writeConfigAtomicallyForTest(const QString &targetPath, const QJsonObject &obj,
+                                           bool simulatePrePermFail, bool simulatePostPermFail) {
+    return writeConfigAtomicallyImpl(targetPath, obj, simulatePrePermFail, simulatePostPermFail);
+}
+
 Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart(autoStart) {
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
     if (QClipboard *cb = QGuiApplication::clipboard()) {
@@ -171,6 +217,7 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     applyEnvBool("BLUEPILL_ENABLE_CALENDAR", m_icloudCalendarEnabled);
     applyEnvBool("BLUEPILL_ENABLE_PHOTOS", m_icloudPhotosEnabled);
     loadCredentials();
+    refreshAudioDevices();
     loadContactsFromFile(QDir::homePath() + QStringLiteral("/.config/imsg/contacts.json"));
     loadContactsFromFile(QDir::homePath() + QStringLiteral("/.cache/bluebubbles/contacts.json"));
     loadContactsFromFile(QDir::homePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contacts.json"));
@@ -229,15 +276,20 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     connect(&m_audioPlaybackTimer, &QTimer::timeout, this, [this]() {
         if (!m_audioPlaying) return;
         m_audioPlaybackElapsedMs += 100;
-        if (m_audioPlaybackElapsedMs >= m_audioPlaybackDurationMs) {
-            m_audioPlaying = false;
+        const int currentPosMs = m_audioSeekOffsetMs + m_audioPlaybackElapsedMs;
+        if (currentPosMs >= m_audioPlaybackDurationMs) {
             m_audioProgress = 1.0;
-            m_audioPlaybackTimer.stop();
-        } else {
-            m_audioProgress = double(m_audioPlaybackElapsedMs) / double(m_audioPlaybackDurationMs);
+            // Do NOT call stopAudioPlaybackProcess() on estimated duration fallback;
+            // let m_audioProcess finished stop real playback, or stop timer when no external process is active.
+            if (!m_audioProcess || m_audioProcess->state() == QProcess::NotRunning) {
+                m_audioPlaying = false;
+                m_audioPlaybackTimer.stop();
+            }
+        } else if (m_audioPlaybackDurationMs > 0) {
+            m_audioProgress = qBound(0.0, double(currentPosMs) / double(m_audioPlaybackDurationMs), 1.0);
         }
-        int remSec = qMax(0, (m_audioPlaybackDurationMs - m_audioPlaybackElapsedMs) / 1000);
-        m_audioDurationText = QStringLiteral("%1:%2").arg(remSec / 60).arg(remSec % 60, 2, 10, QLatin1Char('0'));
+        int remSec = qMax(0, (m_audioPlaybackDurationMs - currentPosMs) / 1000);
+        m_audioDurationText = formatAudioDuration(remSec);
         emit audioPlaybackChanged();
     });
 
@@ -245,7 +297,8 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     connect(&m_voiceRecordingTimer, &QTimer::timeout, this, [this]() {
         if (!m_recordingVoice) return;
         m_voiceRecordingSeconds += 1;
-        m_voiceRecordingWaveform = computeWaveformBars(QUuid::createUuid().toString(), 28);
+        m_voiceRecordingWaveform = computeAudioFileWaveformBars(
+            m_currentVoiceRecordingPath, QUuid::createUuid().toString(), 28);
         emit voiceRecordingChanged();
     });
 
@@ -288,9 +341,15 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
 }
 
 Backend::~Backend() {
-    if (m_audioProcess) {
-        m_audioProcess->terminate();
-        m_audioProcess = nullptr;
+    stopAudioPlaybackProcess();
+    stopVoiceRecordProcess(false);
+    if (!m_currentVoiceRecordingPath.isEmpty()) {
+        QFile::remove(m_currentVoiceRecordingPath);
+        m_currentVoiceRecordingPath.clear();
+    }
+    if (!m_recordedVoicePath.isEmpty()) {
+        QFile::remove(m_recordedVoicePath);
+        m_recordedVoicePath.clear();
     }
     stopSocketIoClient();
     if (m_saveCacheTimer.isActive()) {
@@ -320,6 +379,17 @@ void Backend::setStateFilePath(const QString &path) {
     m_chatMessagesCache.clear();
     m_seenMessageGuids.clear();
     m_notifiedMessageGuids.clear();
+    m_pendingDeliveryMessages.clear();
+    m_pendingDeliveryAddedAtMs.clear();
+    m_expiredPendingDeliveryGuids.clear();
+    m_inFlightDeliveryCheckGuids.clear();
+    m_pendingDeliveryCheckCompletedCountForTest = 0;
+    m_messageObservationSeq.clear();
+    m_reconcileRemovedSeqByGuid.clear();
+    m_lastPendingDeliveryBatchForTest.clear();
+    m_pendingDeliveryRotationCursor = 0;
+    m_deliveryObservationCounter = 0;
+    m_historyReconcileSeq = 0;
     m_lastNotifiedTimestamp = 0;
     m_startupHighestRowId = 0;
     m_deletedMessageGuids.clear();
@@ -1290,11 +1360,9 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     cfgObj.insert(QStringLiteral("tlsVerified"), true);
     cfgObj.insert(QStringLiteral("authMethod"), QStringLiteral("tls-apikey"));
 
-    QFile outFile(cfgPath);
-    if (outFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        outFile.write(QJsonDocument(cfgObj).toJson(QJsonDocument::Indented));
-        outFile.close();
-        QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+    if (!writeConfigAtomically(cfgPath, cfgObj)) {
+        emit toastMessage(QStringLiteral("⚠ Failed to save server configuration"));
+        return;
     }
 
     const bool endpointReplaced = !m_lastConfiguredBaseUrl.isEmpty() && !normPrimary.isEmpty() &&
@@ -1331,6 +1399,9 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     }
     m_lastConfiguredBaseUrl = normPrimary;
 
+    if (m_serverUrl != normPrimary) {
+        bumpServerEndpointGeneration();
+    }
     m_serverUrl = normPrimary;
     m_secondaryServerUrl = normSecondary;
     m_password = resolvedPassword;
@@ -1350,13 +1421,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     if (m_configFilePath.trimmed().isEmpty()) {
         const QString bpCfg = QDir::homePath() + QStringLiteral("/.config/bluepill/config.json");
         if (cfgPath != bpCfg) {
-            QDir().mkpath(QFileInfo(bpCfg).absolutePath());
-            QFile bpFile(bpCfg);
-            if (bpFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                bpFile.write(QJsonDocument(cfgObj).toJson(QJsonDocument::Indented));
-                bpFile.close();
-                QFile::setPermissions(bpCfg, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-            }
+            writeConfigAtomically(bpCfg, cfgObj);
         }
     }
     emit toastMessage(QStringLiteral("✓ Saved BluePill / BlueBubbles server configuration"));
@@ -1368,6 +1433,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
 }
 
 void Backend::loadCredentials() {
+    const QString prevServerUrl = m_serverUrl;
     m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"));
     if (m_serverUrl.isEmpty()) {
         m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"));
@@ -1409,6 +1475,12 @@ void Backend::loadCredentials() {
             }
             if (m_password.isEmpty()) {
                 m_password = obj.value(QStringLiteral("password")).toString().trimmed();
+            }
+            if (obj.contains(QStringLiteral("audioInputDevice"))) {
+                m_selectedAudioInputDevice = obj.value(QStringLiteral("audioInputDevice")).toString().trimmed();
+            }
+            if (obj.contains(QStringLiteral("audioOutputDevice"))) {
+                m_selectedAudioOutputDevice = obj.value(QStringLiteral("audioOutputDevice")).toString().trimmed();
             }
             QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
         }
@@ -1470,6 +1542,9 @@ void Backend::loadCredentials() {
     }
     m_candidateUrlIndex = 0;
     m_lastConfiguredBaseUrl = m_serverUrl;
+    if (m_serverUrl != prevServerUrl) {
+        bumpServerEndpointGeneration();
+    }
     emit configChanged();
 }
 
@@ -2003,10 +2078,39 @@ QString Backend::computeAvatarColor(const QString &seed) {
     return palette.at(h % palette.size());
 }
 
+bool Backend::isTrustedPasswordTransportUrl(const QUrl &url) {
+    if (!url.isValid() || url.isEmpty()) return false;
+    const QString scheme = url.scheme().toLower();
+    if (scheme == QStringLiteral("https") || scheme == QStringLiteral("wss")) {
+        return true;
+    }
+    if (scheme == QStringLiteral("http") || scheme == QStringLiteral("ws")) {
+        QString host = url.host().trimmed().toLower();
+        if (host.startsWith(QLatin1Char('[')) && host.endsWith(QLatin1Char(']'))) {
+            host = host.mid(1, host.size() - 2);
+        }
+        if (host == QStringLiteral("localhost") ||
+            host == QStringLiteral("127.0.0.1") ||
+            host == QStringLiteral("::1")) {
+            return true;
+        }
+        QHostAddress addr;
+        if (addr.setAddress(host) && addr.isLoopback()) {
+            return true;
+        }
+    }
+    return false;
+}
+
 QUrl Backend::buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems) const {
     QUrl url(m_serverUrl + apiPath);
-    QUrlQuery q;
-    q.addQueryItem(QStringLiteral("password"), m_password);
+    if (!isTrustedPasswordTransportUrl(url)) {
+        return QUrl();
+    }
+    QUrlQuery q(url);
+    if (!m_password.isEmpty() && !q.hasQueryItem(QStringLiteral("password"))) {
+        q.addQueryItem(QStringLiteral("password"), m_password);
+    }
     for (const auto &pair : queryItems) {
         q.addQueryItem(pair.first, pair.second);
     }
@@ -2016,6 +2120,11 @@ QUrl Backend::buildApiUrl(const QString &apiPath, const QList<QPair<QString, QSt
 
 QNetworkRequest Backend::makeRequest(const QString &pathAndQuery) const {
     QUrl url(m_serverUrl + pathAndQuery);
+    if (!isTrustedPasswordTransportUrl(url)) {
+        qWarning() << "makeRequest: refusing untrusted/cleartext password transport URL:"
+                   << url.toString(QUrl::RemoveUserInfo | QUrl::RemoveQuery);
+        return QNetworkRequest(QUrl());
+    }
     QUrlQuery q(url);
     if (!q.hasQueryItem(QStringLiteral("password"))) {
         q.addQueryItem(QStringLiteral("password"), m_password);
@@ -2059,7 +2168,11 @@ void Backend::handleNetworkFailure(const QString &context) {
         m_socketNam.clearConnectionCache();
         if (m_candidateUrls.size() > 1) {
             m_candidateUrlIndex = (m_candidateUrlIndex + 1) % m_candidateUrls.size();
-            m_serverUrl = m_candidateUrls[m_candidateUrlIndex];
+            const QString nextUrl = m_candidateUrls[m_candidateUrlIndex];
+            if (nextUrl != m_serverUrl) {
+                m_serverUrl = nextUrl;
+                bumpServerEndpointGeneration();
+            }
         }
     }
 
@@ -3132,6 +3245,26 @@ void Backend::pollDelta() {
     }
     if (!m_pendingDeliveryMessages.isEmpty()) {
         checkPendingDeliveryStatuses();
+    } else if (!m_selectedChatGuid.isEmpty()) {
+        const qint64 nowCheckMs = QDateTime::currentMSecsSinceEpoch();
+        bool hasStaleSending = false;
+        for (const QVariant &v : m_messages) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("receiptText")).toString() == QStringLiteral("Sending...")) {
+                const QString g = m.value(QStringLiteral("guid")).toString();
+                const qint64 dc = m.value(QStringLiteral("dateCreated")).toLongLong();
+                const qint64 effectiveStartMs = (dc > 0) ? dc : m_pendingDeliveryAddedAtMs.value(g, 0);
+                if (!g.startsWith(QStringLiteral("temp-")) && !g.startsWith(QStringLiteral("bp-")) &&
+                    (m_expiredPendingDeliveryGuids.contains(g) ||
+                     (effectiveStartMs > 0 && (nowCheckMs - effectiveStartMs) > 120000LL))) {
+                    hasStaleSending = true;
+                    break;
+                }
+            }
+        }
+        if (hasStaleSending) {
+            rebuildSelectedChatMessages();
+        }
     }
 
     // Use a 1-hour (3,600,000 ms) lookback window relative to min(nowMs, m_lastMessageTimestamp)
@@ -3661,44 +3794,388 @@ void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
     }
 }
 
-void Backend::checkPendingDeliveryStatuses() {
-    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || m_pendingDeliveryMessages.isEmpty()) {
-        return;
+void Backend::addPendingDeliveryForTest(const QString &msgGuid, const QString &chatGuid, qint64 addedAtMs) {
+    if (msgGuid.isEmpty()) return;
+    const qint64 ts = (addedAtMs > 0) ? addedAtMs : QDateTime::currentMSecsSinceEpoch();
+    m_pendingDeliveryMessages.insert(msgGuid, chatGuid);
+    m_pendingDeliveryAddedAtMs.insert(msgGuid, ts);
+    m_expiredPendingDeliveryGuids.remove(msgGuid);
+}
+
+void Backend::agePendingDeliveryForTest(const QString &msgGuid, qint64 ageMs) {
+    if (msgGuid.isEmpty()) return;
+    const qint64 agedTs = QDateTime::currentMSecsSinceEpoch() - ageMs;
+    if (m_pendingDeliveryAddedAtMs.contains(msgGuid)) {
+        m_pendingDeliveryAddedAtMs.insert(msgGuid, agedTs);
     }
-    const QStringList guids = m_pendingDeliveryMessages.keys();
-    int dispatched = 0;
-    for (const QString &msgGuid : guids) {
-        if (msgGuid.isEmpty()) {
-            m_pendingDeliveryMessages.remove(msgGuid);
+    const QString chatGuid = resolveCanonicalChatGuid(m_pendingDeliveryMessages.value(msgGuid));
+    if (!chatGuid.isEmpty() && m_chatMessagesCache.contains(chatGuid) &&
+        m_chatMessagesCache[chatGuid].contains(msgGuid)) {
+        m_chatMessagesCache[chatGuid][msgGuid].insert(QStringLiteral("dateCreated"), agedTs);
+    }
+}
+
+void Backend::clearPendingDeliveryTrackingForGuid(const QString &msgGuid, bool clearExpired) {
+    if (msgGuid.isEmpty()) return;
+    m_pendingDeliveryMessages.remove(msgGuid);
+    m_pendingDeliveryAddedAtMs.remove(msgGuid);
+    m_inFlightDeliveryCheckGuids.remove(msgGuid);
+    m_messageObservationSeq.remove(msgGuid);
+    if (clearExpired) {
+        m_expiredPendingDeliveryGuids.remove(msgGuid);
+    }
+}
+
+void Backend::bumpServerEndpointGeneration() {
+    ++m_serverEndpointGeneration;
+    m_supportsBatchMessageGuidInQuery = true;
+    m_inFlightDeliveryCheckGuids.clear();
+}
+
+static bool isTapbackOrAssociatedMessage(const QJsonObject &m) {
+    const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
+    const int assocTypeInt = m.value(QStringLiteral("associatedMessageType")).toInt(0);
+    const QString assocGuid = m.value(QStringLiteral("associatedMessageGuid")).toString().trimmed();
+    if (assocTypeInt >= 2000 || !assocGuid.isEmpty()) {
+        return true;
+    }
+    return !Backend::mapReactionEmoji(assocType, Backend::extractMessageText(m)).isEmpty();
+}
+
+static bool isHiddenTimelinePlaceholder(const QJsonObject &m) {
+    if (!m.value(QStringLiteral("attachments")).toArray().isEmpty()) {
+        return false;
+    }
+    const QString trimmedText = Backend::extractMessageText(m).trimmed();
+    return trimmedText.isEmpty() || trimmedText == QStringLiteral("Replied to a message:");
+}
+
+static bool hasEligibleLaterIncomingReply(const QHash<QString, QJsonObject> &chatMap, qint64 outgoingDateCreated) {
+    if (outgoingDateCreated <= 0) return false;
+    for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
+        const QJsonObject &other = it.value();
+        if (other.value(QStringLiteral("isFromMe")).toBool()) continue;
+        if (Backend::isMessageDeletedOrRetracted(other)) continue;
+        if (isTapbackOrAssociatedMessage(other)) continue;
+        if (isHiddenTimelinePlaceholder(other)) continue;
+        if (other.value(QStringLiteral("dateCreated")).toVariant().toLongLong() > outgoingDateCreated) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool Backend::filterPendingDeliveryResponseItems(
+    const QJsonArray &arr,
+    const QSet<QString> &batchSet,
+    const QHash<QString, quint64> &observedSeqAtDispatch,
+    quint64 reconcileSeqAtDispatch,
+    QJsonArray *outNonStale,
+    int *outMatchedCount) const {
+    if (outMatchedCount) *outMatchedCount = 0;
+    if (!outNonStale) return false;
+
+    for (const QJsonValue &v : arr) {
+        QJsonObject obj = v.toObject();
+        const QString g = obj.value(QStringLiteral("guid")).toString();
+        if (g.isEmpty() || !batchSet.contains(g)) {
             continue;
         }
-        if (dispatched >= 5) break;
-        ++dispatched;
+        if (outMatchedCount) {
+            ++(*outMatchedCount);
+        }
+        if (m_reconcileRemovedSeqByGuid.value(g, 0) > reconcileSeqAtDispatch) {
+            continue;
+        }
+        const qint64 batchDelivTs = obj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+        const qint64 batchReadTs = obj.value(QStringLiteral("dateRead")).toVariant().toLongLong();
+        const bool batchHasError = (obj.value(QStringLiteral("error")).toInt(0) != 0);
+        const bool batchDeliveredOrRead =
+            obj.value(QStringLiteral("isDelivered")).toBool(false) ||
+            (batchDelivTs > 0) ||
+            (batchReadTs > 0);
+        const bool batchHasTerminalState = batchDeliveredOrRead || batchHasError;
+        QString knownCg = m_pendingDeliveryMessages.value(g);
+        QJsonObject cachedEntry;
+        const QString resolvedKnownChat = resolveCanonicalChatGuid(knownCg);
+        if (!resolvedKnownChat.isEmpty() && m_chatMessagesCache.contains(resolvedKnownChat) &&
+            m_chatMessagesCache.value(resolvedKnownChat).contains(g)) {
+            knownCg = resolvedKnownChat;
+            cachedEntry = m_chatMessagesCache.value(resolvedKnownChat).value(g);
+        } else {
+            for (auto chatIt = m_chatMessagesCache.constBegin(); chatIt != m_chatMessagesCache.constEnd(); ++chatIt) {
+                if (chatIt.value().contains(g)) {
+                    if (knownCg.isEmpty()) {
+                        knownCg = chatIt.key();
+                    }
+                    cachedEntry = chatIt.value().value(g);
+                    break;
+                }
+            }
+        }
+        if (observedSeqAtDispatch.contains(g) &&
+            m_messageObservationSeq.value(g, 0) > observedSeqAtDispatch.value(g, 0)) {
+            const qint64 cachedDelivTs = cachedEntry.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+            const qint64 cachedReadTs = cachedEntry.value(QStringLiteral("dateRead")).toVariant().toLongLong();
+            const bool cachedDeliveredOrRead =
+                cachedEntry.value(QStringLiteral("isDelivered")).toBool(false) ||
+                (cachedDelivTs > 0) ||
+                (cachedReadTs > 0);
+            const bool cachedHasError = (cachedEntry.value(QStringLiteral("error")).toInt(0) != 0);
+            const bool batchHasNewerRead = (batchReadTs > cachedReadTs);
+            const bool batchHasNewerDelivery = (cachedDelivTs > 0) && (batchDelivTs > cachedDelivTs);
+            const bool batchAdvancesOverCachedError = batchHasNewerRead || batchHasNewerDelivery;
+            if (!batchHasTerminalState ||
+                (cachedDeliveredOrRead && !cachedHasError && (batchHasError || !batchDeliveredOrRead)) ||
+                (cachedHasError && !batchHasError && !batchAdvancesOverCachedError)) {
+                // Newer state was already observed while in flight; never let stale error or older positive GUID-query receipt overwrite newer state
+                continue;
+            }
+        }
+        if (obj.value(QStringLiteral("chats")).toArray().isEmpty() && !knownCg.isEmpty()) {
+            obj.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), knownCg}}});
+        }
+        outNonStale->append(obj);
+    }
+    return true;
+}
 
+void Backend::dispatchPendingDeliverySingleQueries(
+    const QStringList &guids,
+    quint64 genAtDispatch,
+    const QString &endpointAtDispatch,
+    const QHash<QString, quint64> &observedSeqAtDispatch,
+    quint64 reconcileSeqAtDispatch) {
+    if (guids.isEmpty()) return;
+    auto remaining = std::make_shared<int>(guids.size());
+    for (const QString &singleGuid : guids) {
+        m_inFlightDeliveryCheckGuids.insert(singleGuid);
         QJsonObject whereClause;
-        whereClause.insert(QStringLiteral("statement"), QStringLiteral("message.guid = :guid"));
-        whereClause.insert(QStringLiteral("args"), QJsonObject{{QStringLiteral("guid"), msgGuid}});
+        whereClause.insert(QStringLiteral("statement"), QStringLiteral("message.guid = :g0"));
+        whereClause.insert(QStringLiteral("args"), QJsonObject{{QStringLiteral("g0"), singleGuid}});
 
         QJsonObject body;
-        body.insert(QStringLiteral("limit"), 5);
+        body.insert(QStringLiteral("limit"), 1);
         body.insert(QStringLiteral("offset"), 0);
         body.insert(QStringLiteral("where"), QJsonArray{whereClause});
         body.insert(QStringLiteral("with"), QJsonArray{QStringLiteral("chat"), QStringLiteral("handle")});
 
         QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
                                           QJsonDocument(body).toJson(QJsonDocument::Compact));
-        connect(reply, &QNetworkReply::finished, this, [this, reply, msgGuid]() {
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, singleGuid, genAtDispatch, endpointAtDispatch, observedSeqAtDispatch, reconcileSeqAtDispatch, remaining]() {
             reply->deleteLater();
-            if (reply->error() != QNetworkReply::NoError) return;
-            const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
-            if (!arr.isEmpty()) {
-                processIncomingMessages(arr, false);
-                saveMessagesCache();
-            } else {
-                m_pendingDeliveryMessages.remove(msgGuid);
+            if (genAtDispatch != m_serverEndpointGeneration || endpointAtDispatch != m_serverUrl) {
+                return;
+            }
+            m_inFlightDeliveryCheckGuids.remove(singleGuid);
+            if (reply->error() == QNetworkReply::NoError) {
+                const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+                if (doc.isObject() && doc.object().value(QStringLiteral("data")).isArray()) {
+                    const QJsonArray arr = doc.object().value(QStringLiteral("data")).toArray();
+                    QJsonArray nonStaleArr;
+                    int matchedCount = 0;
+                    filterPendingDeliveryResponseItems(arr, QSet<QString>{singleGuid}, observedSeqAtDispatch,
+                                                       reconcileSeqAtDispatch, &nonStaleArr, &matchedCount);
+                    if (!nonStaleArr.isEmpty()) {
+                        processIncomingMessages(nonStaleArr, false);
+                        saveMessagesCache();
+                    }
+                }
+            }
+            if (--(*remaining) == 0) {
+                ++m_pendingDeliveryCheckCompletedCountForTest;
+                emit pendingDeliveryCheckFinishedForTest();
             }
         });
     }
+}
+
+void Backend::checkPendingDeliveryStatuses() {
+    if (m_pendingDeliveryMessages.isEmpty()) {
+        return;
+    }
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    bool selectedNeedsRebuild = false;
+    const QStringList initialGuids = m_pendingDeliveryMessages.keys();
+    for (const QString &msgGuid : initialGuids) {
+        if (msgGuid.isEmpty()) {
+            m_pendingDeliveryMessages.remove(msgGuid);
+            m_pendingDeliveryAddedAtMs.remove(msgGuid);
+            m_inFlightDeliveryCheckGuids.remove(msgGuid);
+            continue;
+        }
+        const qint64 addedAtMs = m_pendingDeliveryAddedAtMs.value(msgGuid, nowMs);
+        if (!m_pendingDeliveryAddedAtMs.contains(msgGuid)) {
+            m_pendingDeliveryAddedAtMs.insert(msgGuid, addedAtMs);
+        }
+        const QString chatGuid = resolveCanonicalChatGuid(m_pendingDeliveryMessages.value(msgGuid));
+        if (chatGuid.isEmpty() || !m_chatMessagesCache.contains(chatGuid) || !m_chatMessagesCache.value(chatGuid).contains(msgGuid)) {
+            if ((nowMs - addedAtMs) > 120000LL) {
+                clearPendingDeliveryTrackingForGuid(msgGuid, true);
+            }
+            continue;
+        }
+        const auto &chatMap = m_chatMessagesCache.value(chatGuid);
+        const QJsonObject cachedMsg = chatMap.value(msgGuid);
+        const qint64 dc = cachedMsg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        const int errCode = cachedMsg.value(QStringLiteral("error")).toInt(0);
+        const bool isFromMe = cachedMsg.value(QStringLiteral("isFromMe")).toBool();
+        const bool isDeliv = cachedMsg.value(QStringLiteral("isDelivered")).toBool(false) ||
+                             (cachedMsg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0);
+        const bool isRead = cachedMsg.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0;
+        const bool hasLaterIncoming = hasEligibleLaterIncomingReply(chatMap, dc);
+        const qint64 effectiveStartMs = (dc > 0) ? dc : addedAtMs;
+        const bool expired = (effectiveStartMs > 0 && (nowMs - effectiveStartMs) > 120000LL);
+        const bool isSentConfirmed = cachedMsg.contains(QStringLiteral("isSent")) &&
+                                     cachedMsg.value(QStringLiteral("isSent")).toBool();
+        if (errCode != 0 || isDeliv || isRead || hasLaterIncoming || isSentConfirmed) {
+            m_expiredPendingDeliveryGuids.remove(msgGuid);
+        }
+        if (errCode != 0 || isDeliv || isRead || hasLaterIncoming || expired) {
+            m_pendingDeliveryMessages.remove(msgGuid);
+            m_pendingDeliveryAddedAtMs.remove(msgGuid);
+            m_inFlightDeliveryCheckGuids.remove(msgGuid);
+            if (expired) {
+                m_messageObservationSeq.remove(msgGuid);
+                if (isFromMe && errCode == 0 && !isDeliv && !isRead && !hasLaterIncoming && !isSentConfirmed) {
+                    m_expiredPendingDeliveryGuids.insert(msgGuid);
+                }
+            }
+            if (!m_selectedChatGuid.isEmpty() && isSameConversation(chatGuid, m_selectedChatGuid)) {
+                selectedNeedsRebuild = true;
+            }
+        }
+    }
+    if (selectedNeedsRebuild) {
+        rebuildSelectedChatMessages();
+    }
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty() || m_pendingDeliveryMessages.isEmpty()) {
+        return;
+    }
+
+    QStringList sortedCandidates = m_pendingDeliveryMessages.keys();
+    sortedCandidates.removeAll(QString());
+    std::sort(sortedCandidates.begin(), sortedCandidates.end());
+    if (sortedCandidates.isEmpty()) return;
+
+    const int totalCandidates = sortedCandidates.size();
+    const int startIdx = (m_pendingDeliveryRotationCursor >= 0)
+                             ? (m_pendingDeliveryRotationCursor % totalCandidates)
+                             : 0;
+    const int maxBatch = m_supportsBatchMessageGuidInQuery ? 20 : 10;
+    QStringList batchGuids;
+    batchGuids.reserve(qMin(maxBatch, totalCandidates));
+    int steps = 0;
+    for (; steps < totalCandidates && batchGuids.size() < maxBatch; ++steps) {
+        const QString &candidateGuid = sortedCandidates.at((startIdx + steps) % totalCandidates);
+        if (candidateGuid.startsWith(QStringLiteral("temp-")) ||
+            candidateGuid.startsWith(QStringLiteral("bp-")) ||
+            m_inFlightDeliveryCheckGuids.contains(candidateGuid)) {
+            continue;
+        }
+        batchGuids.append(candidateGuid);
+    }
+    if (totalCandidates > 0) {
+        m_pendingDeliveryRotationCursor = (startIdx + steps) % totalCandidates;
+    }
+    if (batchGuids.isEmpty()) return;
+
+    m_lastPendingDeliveryBatchForTest = batchGuids;
+    const quint64 genAtDispatch = m_serverEndpointGeneration;
+    const QString endpointAtDispatch = m_serverUrl;
+    const quint64 reconcileSeqAtDispatch = m_historyReconcileSeq;
+    QHash<QString, quint64> observedSeqAtDispatch;
+    observedSeqAtDispatch.reserve(batchGuids.size());
+    for (const QString &bg : batchGuids) {
+        observedSeqAtDispatch.insert(bg, m_messageObservationSeq.value(bg, 0));
+    }
+
+    if (!m_supportsBatchMessageGuidInQuery || batchGuids.size() == 1) {
+        dispatchPendingDeliverySingleQueries(batchGuids, genAtDispatch, endpointAtDispatch, observedSeqAtDispatch, reconcileSeqAtDispatch);
+        return;
+    }
+
+    for (const QString &bg : batchGuids) {
+        m_inFlightDeliveryCheckGuids.insert(bg);
+    }
+    const QSet<QString> batchSet(batchGuids.begin(), batchGuids.end());
+
+    QStringList placeholders;
+    QJsonObject argsObj;
+    placeholders.reserve(batchGuids.size());
+    for (int i = 0; i < batchGuids.size(); ++i) {
+        const QString key = QStringLiteral("g%1").arg(i);
+        placeholders.append(QLatin1Char(':') + key);
+        argsObj.insert(key, batchGuids.at(i));
+    }
+
+    QJsonObject whereClause;
+    whereClause.insert(QStringLiteral("statement"),
+                       QStringLiteral("message.guid IN (%1)").arg(placeholders.join(QLatin1Char(','))));
+    whereClause.insert(QStringLiteral("args"), argsObj);
+
+    QJsonObject body;
+    body.insert(QStringLiteral("limit"), batchGuids.size());
+    body.insert(QStringLiteral("offset"), 0);
+    body.insert(QStringLiteral("where"), QJsonArray{whereClause});
+    body.insert(QStringLiteral("with"), QJsonArray{QStringLiteral("chat"), QStringLiteral("handle")});
+
+    QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
+                                      QJsonDocument(body).toJson(QJsonDocument::Compact));
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, batchGuids, batchSet, genAtDispatch, endpointAtDispatch, observedSeqAtDispatch, reconcileSeqAtDispatch]() {
+        reply->deleteLater();
+        if (genAtDispatch != m_serverEndpointGeneration || endpointAtDispatch != m_serverUrl) {
+            return;
+        }
+        for (const QString &bg : batchGuids) {
+            m_inFlightDeliveryCheckGuids.remove(bg);
+        }
+        bool needFallback = false;
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        if (reply->error() == QNetworkReply::NoError) {
+            const QByteArray respBytes = reply->readAll();
+            QJsonParseError parseErr{};
+            const QJsonDocument doc = QJsonDocument::fromJson(respBytes, &parseErr);
+            if (parseErr.error == QJsonParseError::NoError && doc.isObject() &&
+                doc.object().value(QStringLiteral("data")).isArray()) {
+                const QJsonArray arr = doc.object().value(QStringLiteral("data")).toArray();
+                QJsonArray nonStaleArr;
+                int matchedCount = 0;
+                filterPendingDeliveryResponseItems(arr, batchSet, observedSeqAtDispatch, reconcileSeqAtDispatch,
+                                                   &nonStaleArr, &matchedCount);
+                if (!arr.isEmpty() && matchedCount == 0) {
+                    needFallback = true;
+                } else {
+                    if (!nonStaleArr.isEmpty()) {
+                        processIncomingMessages(nonStaleArr, false);
+                        saveMessagesCache();
+                    }
+                    ++m_pendingDeliveryCheckCompletedCountForTest;
+                    emit pendingDeliveryCheckFinishedForTest();
+                    return;
+                }
+            }
+        } else if (httpStatus == 400 || httpStatus == 404 || httpStatus == 422) {
+            QJsonParseError errParse{};
+            const QJsonDocument errDoc = QJsonDocument::fromJson(reply->readAll(), &errParse);
+            if (errParse.error == QJsonParseError::NoError && errDoc.isObject()) {
+                needFallback = true;
+            }
+        }
+        if (needFallback && m_supportsBatchMessageGuidInQuery && batchGuids.size() > 1) {
+            m_supportsBatchMessageGuidInQuery = false;
+            const QStringList fallbackGuids = batchGuids.mid(0, qMin(10, batchGuids.size()));
+            if (!m_demoMode && !m_serverUrl.isEmpty() && !m_password.isEmpty() && !fallbackGuids.isEmpty()) {
+                dispatchPendingDeliverySingleQueries(fallbackGuids, genAtDispatch, endpointAtDispatch,
+                                                     observedSeqAtDispatch, reconcileSeqAtDispatch);
+                return;
+            }
+        }
+        ++m_pendingDeliveryCheckCompletedCountForTest;
+        emit pendingDeliveryCheckFinishedForTest();
+    });
 }
 
 void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad) {
@@ -3732,7 +4209,7 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
                     }
                 }
             }
-            m_pendingDeliveryMessages.remove(msgGuid);
+            clearPendingDeliveryTrackingForGuid(msgGuid, true);
             continue;
         }
 
@@ -3802,25 +4279,10 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
             const QString rawCg = cv.toObject().value(QStringLiteral("guid")).toString().trimmed();
             const QString cg = resolveCanonicalChatGuid(rawCg);
             if (!cg.isEmpty()) {
-                bool msgChanged = !alreadySeen;
-                int oldErr = 0;
-                if (m_chatMessagesCache.contains(cg) && m_chatMessagesCache.value(cg).contains(msgGuid)) {
-                    const QJsonObject oldMsg = m_chatMessagesCache.value(cg).value(msgGuid);
-                    oldErr = oldMsg.value(QStringLiteral("error")).toInt(0);
-                    if (oldMsg.value(QStringLiteral("text")).toString() != m.value(QStringLiteral("text")).toString() ||
-                        oldMsg.value(QStringLiteral("attachments")).toArray() != m.value(QStringLiteral("attachments")).toArray() ||
-                        oldMsg.value(QStringLiteral("reactions")).toArray() != m.value(QStringLiteral("reactions")).toArray() ||
-                        oldMsg.value(QStringLiteral("isRead")).toBool() != m.value(QStringLiteral("isRead")).toBool() ||
-                        oldMsg.value(QStringLiteral("dateRead")).toVariant().toLongLong() != m.value(QStringLiteral("dateRead")).toVariant().toLongLong() ||
-                        oldErr != incomingErr ||
-                        oldMsg.value(QStringLiteral("isSent")).toBool() != m.value(QStringLiteral("isSent")).toBool() ||
-                        oldMsg.value(QStringLiteral("isDelivered")).toBool() != m.value(QStringLiteral("isDelivered")).toBool() ||
-                        oldMsg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() != m.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() ||
-                        oldMsg.value(QStringLiteral("dateEdited")).toVariant().toLongLong() != m.value(QStringLiteral("dateEdited")).toVariant().toLongLong() ||
-                        oldMsg.value(QStringLiteral("dateRetracted")).toVariant().toLongLong() != m.value(QStringLiteral("dateRetracted")).toVariant().toLongLong()) {
-                        msgChanged = true;
-                    }
-                }
+                const auto beforeChatIt = m_chatMessagesCache.constFind(cg);
+                const bool existedBefore = (beforeChatIt != m_chatMessagesCache.constEnd() && beforeChatIt->contains(msgGuid));
+                const QJsonObject beforeCached = existedBefore ? beforeChatIt->value(msgGuid) : QJsonObject();
+                const int oldErr = existedBefore ? beforeCached.value(QStringLiteral("error")).toInt(0) : 0;
                 if (!isInitialLoad && incomingFromMe && incomingErr != 0 && (oldErr == 0 || !alreadySeen) && !notifiedSendError) {
                     notifiedSendError = true;
                     emit toastMessage(QStringLiteral("⚠ Message failed to deliver (error %1)").arg(incomingErr));
@@ -3830,6 +4292,9 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
                     enrichedMsg.insert(QStringLiteral("originalChatGuid"), rawCg);
                 }
                 cacheMessageForChat(cg, enrichedMsg);
+                const auto afterChatIt = m_chatMessagesCache.constFind(cg);
+                const bool existsAfter = (afterChatIt != m_chatMessagesCache.constEnd() && afterChatIt->contains(msgGuid));
+                const bool msgChanged = !existedBefore || !existsAfter || (beforeCached != afterChatIt->value(msgGuid));
                 affectedChatGuids.insert(cg);
                 if ((cg == m_selectedChatGuid || rawCg == m_selectedChatGuid) && msgChanged) {
                     selectedChatUpdated = true;
@@ -3839,9 +4304,36 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
 
         if (!msgGuid.isEmpty()) {
             const qint64 nowPollMs = QDateTime::currentMSecsSinceEpoch();
-            const bool timedOut = (dateCreated > 0 && (nowPollMs - dateCreated) > 300000LL);
+            const qint64 addedAtMs = m_pendingDeliveryAddedAtMs.value(msgGuid, 0);
+            const qint64 effectiveStartMs = (dateCreated > 0) ? dateCreated : addedAtMs;
+            const bool wasPending = m_pendingDeliveryMessages.contains(msgGuid);
+            const bool timedOut = m_expiredPendingDeliveryGuids.contains(msgGuid) ||
+                                  (effectiveStartMs > 0 && (nowPollMs - effectiveStartMs) > 120000LL);
+            const bool incomingSent = m.contains(QStringLiteral("isSent")) && m.value(QStringLiteral("isSent")).toBool();
+            const bool positiveConfirmed = (incomingErr != 0 || incomingDelivered ||
+                                            m.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0 ||
+                                            incomingSent);
+            if (positiveConfirmed) {
+                m_expiredPendingDeliveryGuids.remove(msgGuid);
+            }
             if (incomingErr != 0 || incomingDelivered || m.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0 || timedOut) {
-                m_pendingDeliveryMessages.remove(msgGuid);
+                const QString removedCg = m_pendingDeliveryMessages.take(msgGuid);
+                m_pendingDeliveryAddedAtMs.remove(msgGuid);
+                m_inFlightDeliveryCheckGuids.remove(msgGuid);
+                if (timedOut && !positiveConfirmed && incomingFromMe && wasPending) {
+                    m_expiredPendingDeliveryGuids.insert(msgGuid);
+                }
+                if (timedOut && !removedCg.isEmpty() && !m_selectedChatGuid.isEmpty() && isSameConversation(removedCg, m_selectedChatGuid)) {
+                    selectedChatUpdated = true;
+                }
+            } else if (incomingFromMe && m.contains(QStringLiteral("isSent")) && !m.value(QStringLiteral("isSent")).toBool() && !chatsArr.isEmpty()) {
+                const QString pendingCg = resolveCanonicalChatGuid(chatsArr.first().toObject().value(QStringLiteral("guid")).toString().trimmed());
+                if (!pendingCg.isEmpty()) {
+                    m_pendingDeliveryMessages.insert(msgGuid, pendingCg);
+                    if (!m_pendingDeliveryAddedAtMs.contains(msgGuid)) {
+                        m_pendingDeliveryAddedAtMs.insert(msgGuid, nowPollMs);
+                    }
+                }
             }
         }
 
@@ -4698,6 +5190,49 @@ void Backend::syncContactsNow() {
     fetchContactsRemote();
 }
 
+QString Backend::computeOutgoingReceiptText(
+    const QJsonObject &msgObj,
+    bool hasLaterIncomingReply,
+    qint64 nowMs,
+    qint64 addedAtMs,
+    bool forceExpired) {
+    const int err = msgObj.value(QStringLiteral("error")).toInt(0);
+    if (err != 0) {
+        return QStringLiteral("⚠ Not Delivered");
+    }
+    const qint64 dateRead = msgObj.value(QStringLiteral("dateRead")).toVariant().toLongLong();
+    if (dateRead > 0) {
+        return QStringLiteral("Read ") + QDateTime::fromMSecsSinceEpoch(dateRead).toString(QStringLiteral("h:mm AP"));
+    }
+    const qint64 dateDelivered = msgObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+    const bool isDeliveredFlag = msgObj.value(QStringLiteral("isDelivered")).toBool(false);
+    const bool hasIsSent = msgObj.contains(QStringLiteral("isSent"));
+    const bool hasIsDelivered = msgObj.contains(QStringLiteral("isDelivered"));
+    const bool isSentFlag = msgObj.value(QStringLiteral("isSent")).toBool(true);
+    if (dateDelivered > 0 || isDeliveredFlag) {
+        return QStringLiteral("Delivered");
+    }
+    const bool isPending = msgObj.value(QStringLiteral("pending")).toBool(false);
+    if (!isPending && !hasIsSent && !hasIsDelivered) {
+        return QStringLiteral("Delivered");
+    }
+    if ((hasIsSent && !isSentFlag) || (isPending && !hasIsSent)) {
+        if (hasLaterIncomingReply) {
+            return QStringLiteral("Sent");
+        }
+        const qint64 dateCreated = msgObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        const qint64 effectiveStartMs = (dateCreated > 0) ? dateCreated : addedAtMs;
+        const qint64 effectiveNow = (nowMs > 0) ? nowMs : QDateTime::currentMSecsSinceEpoch();
+        const bool expired = forceExpired ||
+                             (effectiveStartMs > 0 && (effectiveNow - effectiveStartMs) > 120000LL);
+        if (expired) {
+            return QStringLiteral("Unconfirmed");
+        }
+        return QStringLiteral("Sending...");
+    }
+    return QStringLiteral("Sent");
+}
+
 QVariantList Backend::buildMessageListFromApi(
     const QJsonArray &rawMessagesDesc,
     const QHash<QString, QString> &contactNames,
@@ -4706,7 +5241,9 @@ QVariantList Backend::buildMessageListFromApi(
     const QHash<QString, QVariantMap> &previewCache,
     QStringList *missingPreviewsOut,
     const QSet<QString> &deletedMessageGuids,
-    const QHash<QString, QString> &recentOutboundEffects) {
+    const QHash<QString, QString> &recentOutboundEffects,
+    const QHash<QString, qint64> &pendingDeliveryAddedAtMs,
+    const QSet<QString> &expiredPendingDeliveryGuids) {
 
     // Collect chronological (oldest -> newest), skipping deleted/retracted messages
     QList<QJsonObject> chronological;
@@ -4879,14 +5416,26 @@ QVariantList Backend::buildMessageListFromApi(
     }
 
     // Find latest outgoing message index for delivery/read receipt
+    int latestOutgoingIdx = -1;
     QString latestOutgoingGuid;
     for (int i = chronological.size() - 1; i >= 0; --i) {
         const QJsonObject &m = chronological[i];
-        const QString assocType = m.value(QStringLiteral("associatedMessageType")).toVariant().toString();
-        if (!mapReactionEmoji(assocType, m.value(QStringLiteral("text")).toString()).isEmpty()) continue;
+        if (isTapbackOrAssociatedMessage(m) || isHiddenTimelinePlaceholder(m)) continue;
         if (m.value(QStringLiteral("isFromMe")).toBool()) {
+            latestOutgoingIdx = i;
             latestOutgoingGuid = m.value(QStringLiteral("guid")).toString();
             break;
+        }
+    }
+    bool hasLaterIncomingReply = false;
+    if (latestOutgoingIdx >= 0) {
+        for (int i = latestOutgoingIdx + 1; i < chronological.size(); ++i) {
+            const QJsonObject &m = chronological[i];
+            if (isTapbackOrAssociatedMessage(m) || isHiddenTimelinePlaceholder(m)) continue;
+            if (!m.value(QStringLiteral("isFromMe")).toBool()) {
+                hasLaterIncomingReply = true;
+                break;
+            }
         }
     }
 
@@ -4906,9 +5455,8 @@ QVariantList Backend::buildMessageListFromApi(
             continue;
         }
 
+        if (isHiddenTimelinePlaceholder(m)) continue;
         const QJsonArray atts = m.value(QStringLiteral("attachments")).toArray();
-        if (text.isEmpty() && atts.isEmpty()) continue;
-        if (atts.isEmpty() && text.trimmed() == QStringLiteral("Replied to a message:")) continue;
 
         const qint64 dateCreated = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
         const bool isFromMe = m.value(QStringLiteral("isFromMe")).toBool();
@@ -4990,9 +5538,11 @@ QVariantList Backend::buildMessageListFromApi(
                 }
                 const bool isImg = isImageMimeOrExt(mime, tName);
                 const bool isAudio = isAudioAttachment(mime, tName);
-                int durationSeconds = aObj.value(QStringLiteral("durationSeconds")).toInt(0);
+                const double rawDurationSec = aObj.value(QStringLiteral("durationSeconds")).toDouble(0.0);
+                int durationSeconds = (rawDurationSec > 0.0) ? qMax(1, qRound(rawDurationSec)) : 0;
                 if (durationSeconds <= 0) {
-                    durationSeconds = aObj.value(QStringLiteral("duration")).toInt(0);
+                    const double fallbackDurSec = aObj.value(QStringLiteral("duration")).toDouble(0.0);
+                    durationSeconds = (fallbackDurSec > 0.0) ? qMax(1, qRound(fallbackDurSec)) : 0;
                 }
                 QVariantList waveformBars;
                 if (aObj.contains(QStringLiteral("waveform")) && aObj.value(QStringLiteral("waveform")).isArray()) {
@@ -5051,20 +5601,12 @@ QVariantList Backend::buildMessageListFromApi(
         // Receipt text
         QString receiptText;
         if (isFromMe && guid == latestOutgoingGuid) {
-            const qint64 dateRead = m.value(QStringLiteral("dateRead")).toVariant().toLongLong();
-            const qint64 dateDelivered = m.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
-            const bool isDeliveredFlag = m.value(QStringLiteral("isDelivered")).toBool(false);
-            const bool hasIsSent = m.contains(QStringLiteral("isSent"));
-            const bool isSentFlag = m.value(QStringLiteral("isSent")).toBool(true);
-            if (dateRead > 0) {
-                receiptText = QStringLiteral("Read ") + QDateTime::fromMSecsSinceEpoch(dateRead).toString(QStringLiteral("h:mm AP"));
-            } else if (dateDelivered > 0 || isDeliveredFlag) {
-                receiptText = QStringLiteral("Delivered");
-            } else if (hasIsSent && !isSentFlag) {
-                receiptText = QStringLiteral("Sending...");
-            } else {
-                receiptText = QStringLiteral("Sent");
-            }
+            receiptText = computeOutgoingReceiptText(
+                m,
+                hasLaterIncomingReply,
+                0,
+                pendingDeliveryAddedAtMs.value(guid, 0),
+                expiredPendingDeliveryGuids.contains(guid));
         }
 
         // Thread reply originator
@@ -5192,11 +5734,184 @@ QVariantList Backend::buildMessageListFromApi(
     return out;
 }
 
+static void normalizeOutgoingReceipts(QVariantList &msgs) {
+    int latestOutgoingIdx = -1;
+    for (int i = msgs.size() - 1; i >= 0; --i) {
+        if (msgs[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
+            latestOutgoingIdx = i;
+            break;
+        }
+    }
+    for (int i = 0; i < msgs.size(); ++i) {
+        QVariantMap vm = msgs[i].toMap();
+        if (!vm.value(QStringLiteral("isFromMe")).toBool()) continue;
+        if (i != latestOutgoingIdx) {
+            const bool isFailed = vm.value(QStringLiteral("isFailed")).toBool() ||
+                                  (vm.value(QStringLiteral("errorCode")).toInt(0) != 0);
+            const QString curReceipt = vm.value(QStringLiteral("receiptText")).toString();
+            if (!isFailed && curReceipt != QStringLiteral("⚠ Not Delivered") && !curReceipt.isEmpty()) {
+                vm.insert(QStringLiteral("receiptText"), QString());
+                msgs[i] = vm;
+            }
+        }
+    }
+}
+
+void Backend::enforceLatestOutgoingReceiptsInTimeline() {
+    normalizeOutgoingReceipts(m_messages);
+}
+
+static bool hasRealNonSyntheticAttachment(const QJsonArray &atts) {
+    for (const QJsonValue &av : atts) {
+        const QString ag = av.toObject().value(QStringLiteral("guid")).toString().trimmed();
+        if (!ag.isEmpty() && !ag.startsWith(QStringLiteral("att-")) && !ag.startsWith(QStringLiteral("temp-"))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static QJsonObject mergeCachedMessageObject(const QJsonObject &existing, const QJsonObject &incoming,
+                                            bool isFromMe, bool recentLocalReadMut) {
+    QJsonObject merged = existing;
+    const qint64 existingRowId = existing.value(QStringLiteral("originalROWID")).toVariant().toLongLong();
+    const bool existingIsPending = existing.value(QStringLiteral("pending")).toBool(false);
+    const bool existingIsDbBacked = (existingRowId > 0) ||
+                                    (!existingIsPending &&
+                                     !existing.value(QStringLiteral("guid")).toString().startsWith(QStringLiteral("temp-")) &&
+                                     !existing.value(QStringLiteral("guid")).toString().startsWith(QStringLiteral("bp-")) &&
+                                     (existing.value(QStringLiteral("isDelivered")).toBool() ||
+                                      existing.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0 ||
+                                      hasRealNonSyntheticAttachment(existing.value(QStringLiteral("attachments")).toArray())));
+    const qint64 incomingRowId = incoming.value(QStringLiteral("originalROWID")).toVariant().toLongLong();
+    const bool incomingIsPending = incoming.value(QStringLiteral("pending")).toBool(false);
+    const bool incomingIsSyntheticOrPending = incomingIsPending || (existingIsDbBacked && incomingRowId <= 0);
+    const int existingErr = existing.value(QStringLiteral("error")).toInt(0);
+    const bool existingHasDelivFlag = existing.value(QStringLiteral("isDelivered")).toBool();
+    const qint64 existingDelivTs = existing.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+    const qint64 existingReadTs = existing.value(QStringLiteral("dateRead")).toVariant().toLongLong();
+    const bool existingHadPositiveReceipt = existingHasDelivFlag || (existingDelivTs > 0) || (existingReadTs > 0);
+    const qint64 incomingDelivTs = incoming.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
+    const qint64 incomingReadTs = incoming.value(QStringLiteral("dateRead")).toVariant().toLongLong();
+    const bool incomingHasPositiveReceipt =
+        incoming.value(QStringLiteral("isDelivered")).toBool() ||
+        (incomingDelivTs > 0) ||
+        (incomingReadTs > 0);
+    const int incomingErr = incoming.value(QStringLiteral("error")).toInt(0);
+    const bool incomingExplicitNewError = (incomingErr != 0 && !incomingIsPending && !incomingHasPositiveReceipt);
+    const bool incomingAdvancesReceipt =
+        (incomingReadTs > existingReadTs) ||
+        (incomingDelivTs > existingDelivTs) ||
+        (!existingHadPositiveReceipt && incomingHasPositiveReceipt);
+    const bool shouldClearExistingError =
+        !incomingExplicitNewError &&
+        ((existingErr == 0) ? incomingHasPositiveReceipt : incomingAdvancesReceipt);
+
+    for (auto it = incoming.begin(); it != incoming.end(); ++it) {
+        const QString &key = it.key();
+        if (key == QStringLiteral("text")) {
+            if (!it.value().toString().trimmed().isEmpty()) {
+                merged.insert(key, it.value());
+            }
+        } else if (key == QStringLiteral("handle")) {
+            if (it.value().isObject() && !it.value().toObject().value(QStringLiteral("address")).toString().trimmed().isEmpty()) {
+                merged.insert(key, it.value());
+            }
+        } else if (key == QStringLiteral("attributedBody")) {
+            if (!it.value().toArray().isEmpty() && !(existingIsDbBacked && incomingIsPending)) {
+                merged.insert(key, it.value());
+            }
+        } else if (key == QStringLiteral("attachments")) {
+            const QJsonArray incAtts = it.value().toArray();
+            if (!incAtts.isEmpty()) {
+                const QJsonArray curAtts = existing.value(QStringLiteral("attachments")).toArray();
+                const bool curHasReal = hasRealNonSyntheticAttachment(curAtts);
+                const bool incHasReal = hasRealNonSyntheticAttachment(incAtts);
+                if (curHasReal && (!incHasReal || incomingIsPending)) {
+                    continue;
+                }
+                if (existingIsDbBacked && incomingIsSyntheticOrPending && !curAtts.isEmpty()) {
+                    continue;
+                }
+                merged.insert(key, it.value());
+            }
+        } else if (key == QStringLiteral("originalROWID")) {
+            const qint64 newRowId = it.value().toVariant().toLongLong();
+            if (newRowId > 0 || existingRowId <= 0) {
+                merged.insert(key, it.value());
+            }
+        } else if (key == QStringLiteral("dateCreated")) {
+            const qint64 newDc = it.value().toVariant().toLongLong();
+            const qint64 oldDc = existing.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+            if (oldDc > 0 && (newDc <= 0 || (existingIsDbBacked && incomingIsSyntheticOrPending))) {
+                continue;
+            }
+            merged.insert(key, it.value());
+        } else if (key == QStringLiteral("pending")) {
+            if (!it.value().toBool() || !existingIsDbBacked) {
+                if (!existing.contains(QStringLiteral("pending")) || !it.value().toBool() || existingIsPending) {
+                    merged.insert(key, it.value());
+                }
+            }
+        } else if (recentLocalReadMut && !isFromMe && (key == QStringLiteral("isRead") || key == QStringLiteral("dateRead"))) {
+            // Preserve local read/unread state on incoming messages during recent local mutation window
+            continue;
+        } else if (isFromMe && key == QStringLiteral("isDelivered")) {
+            if (it.value().toBool() || !merged.value(QStringLiteral("isDelivered")).toBool()) {
+                merged.insert(key, it.value());
+            }
+        } else if (isFromMe && key == QStringLiteral("isSent")) {
+            if (it.value().toBool() || !merged.value(QStringLiteral("isSent")).toBool()) {
+                merged.insert(key, it.value());
+            }
+        } else if (isFromMe && (key == QStringLiteral("dateDelivered") || key == QStringLiteral("dateRead"))) {
+            const qint64 newTs = it.value().toVariant().toLongLong();
+            const qint64 oldTs = merged.value(key).toVariant().toLongLong();
+            if (newTs >= oldTs) {
+                merged.insert(key, it.value());
+            }
+        } else if (isFromMe && key == QStringLiteral("error")) {
+            const int newErr = it.value().toInt(0);
+            const int oldErr = merged.value(QStringLiteral("error")).toInt(0);
+            if (shouldClearExistingError) {
+                merged.insert(key, 0);
+            } else if (newErr != 0) {
+                if (!incomingIsPending) {
+                    merged.insert(key, it.value());
+                }
+            } else if (oldErr == 0) {
+                merged.insert(key, it.value());
+            }
+        } else {
+            merged.insert(key, it.value());
+        }
+    }
+    if (isFromMe && shouldClearExistingError) {
+        merged.insert(QStringLiteral("error"), 0);
+    }
+    return merged;
+}
+
 void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &rawMsg) {
     if (chatGuid.isEmpty()) return;
     const QString targetGuid = resolveCanonicalChatGuid(chatGuid);
     const QString msgGuid = rawMsg.value(QStringLiteral("guid")).toString();
     if (msgGuid.isEmpty()) return;
+    {
+        const auto existingChatIt = m_chatMessagesCache.constFind(targetGuid);
+        if (existingChatIt == m_chatMessagesCache.constEnd() || !existingChatIt->contains(msgGuid)) {
+            m_messageObservationSeq.insert(msgGuid, ++m_deliveryObservationCounter);
+        } else {
+            const QJsonObject prev = existingChatIt->value(msgGuid);
+            if (prev.value(QStringLiteral("isSent")).toBool() != rawMsg.value(QStringLiteral("isSent")).toBool() ||
+                prev.value(QStringLiteral("isDelivered")).toBool() != rawMsg.value(QStringLiteral("isDelivered")).toBool() ||
+                prev.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() != rawMsg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() ||
+                prev.value(QStringLiteral("dateRead")).toVariant().toLongLong() != rawMsg.value(QStringLiteral("dateRead")).toVariant().toLongLong() ||
+                prev.value(QStringLiteral("error")).toInt(0) != rawMsg.value(QStringLiteral("error")).toInt(0)) {
+                m_messageObservationSeq.insert(msgGuid, ++m_deliveryObservationCounter);
+            }
+        }
+    }
     const QJsonArray msgChats = rawMsg.value(QStringLiteral("chats")).toArray();
     QString rawOrigChatGuid = rawMsg.value(QStringLiteral("originalChatGuid")).toString().trimmed();
     if (!msgChats.isEmpty()) {
@@ -5229,6 +5944,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
         if (m_chatMessagesCache.contains(targetGuid)) {
             m_chatMessagesCache[targetGuid].remove(msgGuid);
         }
+        clearPendingDeliveryTrackingForGuid(msgGuid, true);
         return;
     }
 
@@ -5248,6 +5964,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
     auto &chatMap = m_chatMessagesCache[targetGuid];
     const bool isTempGuid = msgGuid.startsWith(QStringLiteral("temp-")) || msgGuid.startsWith(QStringLiteral("bp-"));
     const QString explicitTempGuid = msg.value(QStringLiteral("tempGuid")).toString().trimmed();
+    const QString explicitUploadUuid = msg.value(QStringLiteral("uploadUuid")).toString().trimmed();
     const bool isFromMe = msg.value(QStringLiteral("isFromMe")).toBool();
     const QString incomingText = extractMessageText(msg).trimmed();
     const qint64 incomingDc = msg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
@@ -5255,18 +5972,28 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
 
     if (isFromMe) {
         if (!isTempGuid) {
-            // Real server message arrived: evict any matching optimistic temp-*/bp-* entry from chatMap
+            // Real server message arrived: evict matching optimistic temp-*/bp-* entry from chatMap
             QStringList tempKeysToRemove;
-            if (!explicitTempGuid.isEmpty() && explicitTempGuid != msgGuid && chatMap.contains(explicitTempGuid)) {
+            if (!explicitTempGuid.isEmpty() && explicitTempGuid != msgGuid) {
                 tempKeysToRemove.append(explicitTempGuid);
+            }
+            if (!explicitUploadUuid.isEmpty() && explicitUploadUuid != msgGuid && !tempKeysToRemove.contains(explicitUploadUuid)) {
+                tempKeysToRemove.append(explicitUploadUuid);
             }
             for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
                 const QString k = it.key();
                 if (k == msgGuid || tempKeysToRemove.contains(k)) continue;
                 const bool kIsTemp = k.startsWith(QStringLiteral("temp-")) || k.startsWith(QStringLiteral("bp-"));
                 const QString kTempGuid = it.value().value(QStringLiteral("tempGuid")).toString().trimmed();
-                if (!explicitTempGuid.isEmpty() && (k == explicitTempGuid || kTempGuid == explicitTempGuid)) {
-                    tempKeysToRemove.append(k);
+                const QString kUploadUuid = it.value().value(QStringLiteral("uploadUuid")).toString().trimmed();
+                if (!explicitTempGuid.isEmpty() || !explicitUploadUuid.isEmpty()) {
+                    const bool tempMatches = !explicitTempGuid.isEmpty() &&
+                                             (k == explicitTempGuid || kTempGuid == explicitTempGuid || kUploadUuid == explicitTempGuid);
+                    const bool uploadMatches = !explicitUploadUuid.isEmpty() &&
+                                               (k == explicitUploadUuid || kTempGuid == explicitUploadUuid || kUploadUuid == explicitUploadUuid);
+                    if (tempMatches || uploadMatches) {
+                        tempKeysToRemove.append(k);
+                    }
                     continue;
                 }
                 if (!kIsTemp) continue;
@@ -5275,55 +6002,126 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                 const qint64 kDc = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
                 const bool kHasAtt = !it.value().value(QStringLiteral("attachments")).toArray().isEmpty();
                 const bool closeInTime = (incomingDc == 0 || kDc == 0 || qAbs(incomingDc - kDc) <= 120000LL);
-                if (closeInTime && ((!incomingText.isEmpty() && kText == incomingText) || (incomingHasAtt && kHasAtt && kText == incomingText))) {
+                if (!closeInTime) continue;
+                if (!incomingHasAtt && !kHasAtt && !incomingText.isEmpty() && kText == incomingText) {
                     tempKeysToRemove.append(k);
                 }
             }
             for (const QString &tk : tempKeysToRemove) {
                 chatMap.remove(tk);
                 m_seenMessageGuids.remove(tk);
+                clearPendingDeliveryTrackingForGuid(tk, true);
             }
+
+            // Monotonically merge into chatMap first so timeline updates compare against merged state
+            QJsonObject mergedMsg;
+            if (!chatMap.contains(msgGuid)) {
+                chatMap.insert(msgGuid, msg);
+                mergedMsg = msg;
+            } else {
+                const bool recentLocalReadMut = (m_localReadMutationTimeMs.value(targetGuid, 0) > QDateTime::currentMSecsSinceEpoch() - 15000);
+                mergedMsg = mergeCachedMessageObject(chatMap.value(msgGuid), msg, isFromMe, recentLocalReadMut);
+                chatMap.insert(msgGuid, mergedMsg);
+            }
+
             if (targetGuid == m_selectedChatGuid) {
-                const int msgErr = msg.value(QStringLiteral("error")).toInt(0);
-                const qint64 msgDateRead = msg.value(QStringLiteral("dateRead")).toVariant().toLongLong();
-                const qint64 msgDateDelivered = msg.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
-                const bool msgHasSent = msg.contains(QStringLiteral("isSent"));
-                const bool msgIsSent = msg.value(QStringLiteral("isSent")).toBool(false);
-                const bool msgHasDeliv = msg.contains(QStringLiteral("isDelivered"));
-                const bool msgIsDeliv = msg.value(QStringLiteral("isDelivered")).toBool(false) || (msgDateDelivered > 0);
-                QString computedReceipt = QStringLiteral("Delivered");
-                if (msgErr != 0) {
-                    computedReceipt = QStringLiteral("⚠ Not Delivered");
-                } else if (msgDateRead > 0) {
-                    computedReceipt = QStringLiteral("Read ") + QDateTime::fromMSecsSinceEpoch(msgDateRead).toString(QStringLiteral("h:mm AP"));
-                } else if (msgIsDeliv || (!msgHasSent && !msgHasDeliv)) {
-                    computedReceipt = QStringLiteral("Delivered");
-                } else if (msgIsSent) {
-                    computedReceipt = QStringLiteral("Sent");
-                } else {
-                    computedReceipt = QStringLiteral("Sending...");
-                }
-                for (int i = 0; i < m_messages.size(); ++i) {
-                    QVariantMap vm = m_messages[i].toMap();
+                const int msgErr = mergedMsg.value(QStringLiteral("error")).toInt(0);
+                const qint64 msgDateCreated = mergedMsg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                const bool hasLaterIncoming = hasEligibleLaterIncomingReply(chatMap, msgDateCreated);
+                const QString computedReceipt = computeOutgoingReceiptText(
+                    mergedMsg,
+                    hasLaterIncoming,
+                    0,
+                    m_pendingDeliveryAddedAtMs.value(msgGuid, 0),
+                    m_expiredPendingDeliveryGuids.contains(msgGuid));
+                QVariantList nextTimeline = m_messages;
+                int existingRealIdx = -1;
+                int firstUnguidedTextMatchIdx = -1;
+                QList<int> matchingTempIndices;
+                for (int i = 0; i < nextTimeline.size(); ++i) {
+                    const QVariantMap vm = nextTimeline[i].toMap();
                     const QString vg = vm.value(QStringLiteral("guid")).toString();
-                    if (vg == explicitTempGuid || tempKeysToRemove.contains(vg) ||
-                        ((vg.startsWith(QStringLiteral("temp-")) || vg.startsWith(QStringLiteral("bp-"))) &&
-                         vm.value(QStringLiteral("isFromMe")).toBool() &&
-                         ((!incomingText.isEmpty() && vm.value(QStringLiteral("text")).toString().trimmed() == incomingText) ||
-                          (incomingHasAtt && (vm.value(QStringLiteral("hasImageAttachment")).toBool() || vm.value(QStringLiteral("hasFileAttachment")).toBool()))))) {
-                        vm.insert(QStringLiteral("guid"), msgGuid);
-                        vm.insert(QStringLiteral("receiptText"), computedReceipt);
-                        vm.insert(QStringLiteral("isFailed"), msgErr != 0);
-                        vm.insert(QStringLiteral("errorCode"), msgErr);
-                        if (vm.value(QStringLiteral("expressiveSendStyleId")).toString().isEmpty() && m_recentOutboundEffects.contains(incomingText)) {
-                            const QString effId = m_recentOutboundEffects.value(incomingText);
-                            vm.insert(QStringLiteral("expressiveSendStyleId"), effId);
-                            vm.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(effId));
+                    if (vg == msgGuid) {
+                        if (existingRealIdx < 0) existingRealIdx = i;
+                        else matchingTempIndices.append(i);
+                    } else if (!explicitTempGuid.isEmpty()) {
+                        if (vg == explicitTempGuid || tempKeysToRemove.contains(vg)) {
+                            matchingTempIndices.append(i);
                         }
-                        m_messages[i] = vm;
+                    } else if (tempKeysToRemove.contains(vg)) {
+                        matchingTempIndices.append(i);
+                    } else if (firstUnguidedTextMatchIdx < 0 &&
+                               (vg.startsWith(QStringLiteral("temp-")) || vg.startsWith(QStringLiteral("bp-"))) &&
+                               vm.value(QStringLiteral("isFromMe")).toBool()) {
+                        const bool vmHasAtt = vm.value(QStringLiteral("hasImageAttachment")).toBool() ||
+                                              vm.value(QStringLiteral("hasFileAttachment")).toBool();
+                        if (!incomingHasAtt && !vmHasAtt && !incomingText.isEmpty() &&
+                            vm.value(QStringLiteral("text")).toString().trimmed() == incomingText) {
+                            firstUnguidedTextMatchIdx = i;
+                        }
                     }
                 }
+                if (existingRealIdx < 0 && explicitTempGuid.isEmpty() && tempKeysToRemove.isEmpty() &&
+                    firstUnguidedTextMatchIdx >= 0) {
+                    matchingTempIndices.append(firstUnguidedTextMatchIdx);
+                }
+                auto applyMeta = [&](QVariantMap &vm, bool promoteGuid, bool isLatestOutgoingRow) {
+                    if (promoteGuid) vm.insert(QStringLiteral("guid"), msgGuid);
+                    if (msgErr != 0 || computedReceipt == QStringLiteral("⚠ Not Delivered")) {
+                        vm.insert(QStringLiteral("receiptText"), QStringLiteral("⚠ Not Delivered"));
+                    } else if (isLatestOutgoingRow) {
+                        vm.insert(QStringLiteral("receiptText"), computedReceipt);
+                    } else {
+                        vm.insert(QStringLiteral("receiptText"), QString());
+                    }
+                    vm.insert(QStringLiteral("isFailed"), msgErr != 0);
+                    vm.insert(QStringLiteral("errorCode"), msgErr);
+                    if (vm.value(QStringLiteral("expressiveSendStyleId")).toString().isEmpty() && m_recentOutboundEffects.contains(incomingText)) {
+                        const QString effId = m_recentOutboundEffects.value(incomingText);
+                        vm.insert(QStringLiteral("expressiveSendStyleId"), effId);
+                        vm.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(effId));
+                    }
+                };
+                if (existingRealIdx >= 0) {
+                    for (int k = matchingTempIndices.size() - 1; k >= 0; --k) {
+                        if (matchingTempIndices[k] < existingRealIdx) --existingRealIdx;
+                        nextTimeline.removeAt(matchingTempIndices[k]);
+                    }
+                    int latestOutgoingIdx = -1;
+                    for (int i = nextTimeline.size() - 1; i >= 0; --i) {
+                        if (nextTimeline[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
+                            latestOutgoingIdx = i;
+                            break;
+                        }
+                    }
+                    QVariantMap vm = nextTimeline[existingRealIdx].toMap();
+                    applyMeta(vm, false, existingRealIdx == latestOutgoingIdx);
+                    nextTimeline[existingRealIdx] = vm;
+                    normalizeOutgoingReceipts(nextTimeline);
+                } else if (!matchingTempIndices.isEmpty()) {
+                    const int keepIdx = matchingTempIndices.first();
+                    for (int k = matchingTempIndices.size() - 1; k >= 1; --k) {
+                        nextTimeline.removeAt(matchingTempIndices[k]);
+                    }
+                    int latestOutgoingIdx = -1;
+                    for (int i = nextTimeline.size() - 1; i >= 0; --i) {
+                        if (nextTimeline[i].toMap().value(QStringLiteral("isFromMe")).toBool()) {
+                            latestOutgoingIdx = i;
+                            break;
+                        }
+                    }
+                    QVariantMap vm = nextTimeline[keepIdx].toMap();
+                    applyMeta(vm, true, keepIdx == latestOutgoingIdx);
+                    nextTimeline[keepIdx] = vm;
+                    normalizeOutgoingReceipts(nextTimeline);
+                }
+                if (nextTimeline != m_messages) {
+                    emit aboutToChangeMessages();
+                    m_messages = nextTimeline;
+                    emit messagesChanged();
+                }
             }
+            return;
         } else {
             // Incoming message has a synthetic temp-*/bp-* GUID: skip caching if the real server message is already cached
             for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
@@ -5331,14 +6129,16 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
                 if (k.startsWith(QStringLiteral("temp-")) || k.startsWith(QStringLiteral("bp-"))) continue;
                 if (!it.value().value(QStringLiteral("isFromMe")).toBool()) continue;
                 const QString kTempGuid = it.value().value(QStringLiteral("tempGuid")).toString().trimmed();
-                if (kTempGuid == msgGuid) {
+                const QString kUploadUuid = it.value().value(QStringLiteral("uploadUuid")).toString().trimmed();
+                if ((!kTempGuid.isEmpty() && (kTempGuid == msgGuid || (!explicitTempGuid.isEmpty() && kTempGuid == explicitTempGuid))) ||
+                    (!kUploadUuid.isEmpty() && (kUploadUuid == msgGuid || (!explicitUploadUuid.isEmpty() && kUploadUuid == explicitUploadUuid)))) {
                     return;
                 }
                 const QString kText = extractMessageText(it.value()).trimmed();
                 const qint64 kDc = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
                 const bool kHasAtt = !it.value().value(QStringLiteral("attachments")).toArray().isEmpty();
                 const bool closeInTime = (incomingDc == 0 || kDc == 0 || qAbs(incomingDc - kDc) <= 120000LL);
-                if (closeInTime && ((!incomingText.isEmpty() && kText == incomingText) || (incomingHasAtt && kHasAtt && kText == incomingText))) {
+                if (closeInTime && !incomingHasAtt && !kHasAtt && !incomingText.isEmpty() && kText == incomingText) {
                     return;
                 }
             }
@@ -5351,27 +6151,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
     }
 
     const bool recentLocalReadMut = (m_localReadMutationTimeMs.value(targetGuid, 0) > QDateTime::currentMSecsSinceEpoch() - 15000);
-    QJsonObject merged = chatMap.value(msgGuid);
-    for (auto it = msg.begin(); it != msg.end(); ++it) {
-        if (it.key() == QStringLiteral("text")) {
-            if (!it.value().toString().trimmed().isEmpty()) {
-                merged.insert(it.key(), it.value());
-            }
-        } else if (it.key() == QStringLiteral("handle")) {
-            if (it.value().isObject() && !it.value().toObject().value(QStringLiteral("address")).toString().trimmed().isEmpty()) {
-                merged.insert(it.key(), it.value());
-            }
-        } else if (it.key() == QStringLiteral("attributedBody") || it.key() == QStringLiteral("attachments")) {
-            if (!it.value().toArray().isEmpty()) {
-                merged.insert(it.key(), it.value());
-            }
-        } else if (recentLocalReadMut && (it.key() == QStringLiteral("isRead") || it.key() == QStringLiteral("dateRead"))) {
-            // Preserve local read/unread state during recent local mutation window
-            continue;
-        } else {
-            merged.insert(it.key(), it.value());
-        }
-    }
+    const QJsonObject merged = mergeCachedMessageObject(chatMap.value(msgGuid), msg, isFromMe, recentLocalReadMut);
     chatMap.insert(msgGuid, merged);
 }
 
@@ -5386,37 +6166,58 @@ void Backend::rebuildSelectedChatMessages() {
     }
 
     const QHash<QString, QJsonObject> chatMap = m_chatMessagesCache.value(m_selectedChatGuid);
-    if (chatMap.isEmpty()) {
-        if (!m_messages.isEmpty()) {
-            emit aboutToChangeMessages();
-            m_messages.clear();
-            emit messagesChanged();
-        }
-        return;
-    }
-
-    QList<QJsonObject> objs = chatMap.values();
-    std::sort(objs.begin(), objs.end(), [](const QJsonObject &a, const QJsonObject &b) {
-        const qint64 da = a.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
-        const qint64 db = b.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
-        if (da != db) return da > db;
-        return a.value(QStringLiteral("guid")).toString() > b.value(QStringLiteral("guid")).toString();
-    });
-
-    QJsonArray rawDesc;
-    for (const QJsonObject &o : objs) {
-        rawDesc.append(o);
-    }
-
+    QVariantList nextMessages;
     QStringList missingAtts;
     QStringList missingPreviews;
-    QVariantList nextMessages = buildMessageListFromApi(rawDesc, m_contactNames, m_attachmentPaths, &missingAtts, m_linkPreviewCache, &missingPreviews, m_deletedMessageGuids, m_recentOutboundEffects);
+    if (!chatMap.isEmpty()) {
+        QList<QJsonObject> objs = chatMap.values();
+        std::sort(objs.begin(), objs.end(), [](const QJsonObject &a, const QJsonObject &b) {
+            const qint64 da = a.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+            const qint64 db = b.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+            if (da != db) return da > db;
+            return a.value(QStringLiteral("guid")).toString() > b.value(QStringLiteral("guid")).toString();
+        });
+
+        QJsonArray rawDesc;
+        for (const QJsonObject &o : objs) {
+            rawDesc.append(o);
+        }
+
+        nextMessages = buildMessageListFromApi(
+            rawDesc,
+            m_contactNames,
+            m_attachmentPaths,
+            &missingAtts,
+            m_linkPreviewCache,
+            &missingPreviews,
+            m_deletedMessageGuids,
+            m_recentOutboundEffects,
+            m_pendingDeliveryAddedAtMs,
+            m_expiredPendingDeliveryGuids);
+    }
 
     // Retain any pending optimistic messages (temp-*) from m_messages if their text/attachment is not yet in nextMessages
     const qint64 nowRebuildMs = QDateTime::currentMSecsSinceEpoch();
+    QSet<QString> alreadyPresentRealGuids;
+    QHash<QString, int> prevTimelineOrder;
+    prevTimelineOrder.reserve(m_messages.size());
+    for (int i = 0; i < m_messages.size(); ++i) {
+        const QString cg = m_messages.at(i).toMap().value(QStringLiteral("guid")).toString();
+        if (!cg.isEmpty()) {
+            prevTimelineOrder.insert(cg, i);
+            if (!cg.startsWith(QStringLiteral("temp-")) && !cg.startsWith(QStringLiteral("bp-"))) {
+                alreadyPresentRealGuids.insert(cg);
+            }
+        }
+    }
+    QVariantList retainedOptimistic;
+    QSet<QString> consumedNextGuids;
     for (const QVariant &curr : m_messages) {
         const QVariantMap cm = curr.toMap();
         const QString g = cm.value(QStringLiteral("guid")).toString();
+        if (m_deletedMessageGuids.contains(g)) {
+            continue;
+        }
         if (g.startsWith(QStringLiteral("temp-")) || g.startsWith(QStringLiteral("bp-"))) {
             const QString optChatGuid = cm.value(QStringLiteral("chatGuid")).toString();
             if (optChatGuid.isEmpty() || optChatGuid != m_selectedChatGuid) {
@@ -5430,31 +6231,91 @@ void Backend::rebuildSelectedChatMessages() {
             const bool cmHasAtt = cm.value(QStringLiteral("hasImageAttachment")).toBool() ||
                                   cm.value(QStringLiteral("hasFileAttachment")).toBool();
             bool echoed = false;
-            for (const QVariant &nxt : nextMessages) {
+            for (const QVariant &nxt : std::as_const(nextMessages)) {
                 const QVariantMap nm = nxt.toMap();
-                if (nm.value(QStringLiteral("guid")).toString() == g) {
+                const QString nGuid = nm.value(QStringLiteral("guid")).toString();
+                if (consumedNextGuids.contains(nGuid)) {
+                    continue;
+                }
+                if (nGuid == g) {
                     echoed = true;
+                    consumedNextGuids.insert(nGuid);
                     break;
+                }
+                const QString nExplicitTemp = chatMap.value(nGuid).value(QStringLiteral("tempGuid")).toString().trimmed();
+                const QString nExplicitUpload = chatMap.value(nGuid).value(QStringLiteral("uploadUuid")).toString().trimmed();
+                if (!nExplicitTemp.isEmpty() || !nExplicitUpload.isEmpty()) {
+                    if ((!nExplicitTemp.isEmpty() && nExplicitTemp == g) ||
+                        (!nExplicitUpload.isEmpty() && nExplicitUpload == g)) {
+                        echoed = true;
+                        consumedNextGuids.insert(nGuid);
+                        break;
+                    }
+                    continue;
+                }
+                if (alreadyPresentRealGuids.contains(nGuid)) {
+                    continue;
                 }
                 if (nm.value(QStringLiteral("isFromMe")).toBool()) {
                     const QString nTxt = nm.value(QStringLiteral("text")).toString().trimmed();
                     const bool nHasAtt = nm.value(QStringLiteral("hasImageAttachment")).toBool() ||
                                          nm.value(QStringLiteral("hasFileAttachment")).toBool();
-                    if (!txt.isEmpty() && nTxt == txt) {
+                    if (!cmHasAtt && !nHasAtt && !txt.isEmpty() && nTxt == txt) {
                         echoed = true;
-                        break;
-                    }
-                    if (cmHasAtt && nHasAtt && nTxt == txt) {
-                        echoed = true;
+                        consumedNextGuids.insert(nGuid);
                         break;
                     }
                 }
             }
             if (!echoed) {
-                nextMessages.append(curr);
+                retainedOptimistic.append(curr);
             }
         }
     }
+    auto effectiveMsgTs = [](const QVariantMap &vm) -> qint64 {
+        const qint64 dc = vm.value(QStringLiteral("dateCreated")).toLongLong();
+        return (dc > 0) ? dc : vm.value(QStringLiteral("optimisticCreatedAtMs")).toLongLong();
+    };
+    for (const QVariant &curr : std::as_const(retainedOptimistic)) {
+        const QVariantMap cm = curr.toMap();
+        const QString g = cm.value(QStringLiteral("guid")).toString();
+        const qint64 optTs = effectiveMsgTs(cm);
+        const int optPrevIdx = prevTimelineOrder.value(g, std::numeric_limits<int>::max());
+
+        int groupEnd = nextMessages.size();
+        int lastPredIdx = -1;
+        for (int insIdx = 0; insIdx < nextMessages.size(); ++insIdx) {
+            const QVariantMap nm = nextMessages.at(insIdx).toMap();
+            const qint64 nDate = effectiveMsgTs(nm);
+            if (nDate > optTs) {
+                groupEnd = insIdx;
+                break;
+            }
+            if (nDate == optTs) {
+                const QString nGuid = nm.value(QStringLiteral("guid")).toString();
+                const int nPrevIdx = prevTimelineOrder.value(nGuid, std::numeric_limits<int>::max());
+                if (nPrevIdx != std::numeric_limits<int>::max() && nPrevIdx < optPrevIdx) {
+                    lastPredIdx = insIdx;
+                }
+            }
+        }
+
+        int insertAt = groupEnd;
+        for (int insIdx = lastPredIdx + 1; insIdx < groupEnd; ++insIdx) {
+            const QVariantMap nm = nextMessages.at(insIdx).toMap();
+            const qint64 nDate = effectiveMsgTs(nm);
+            if (nDate == optTs) {
+                const QString nGuid = nm.value(QStringLiteral("guid")).toString();
+                const int nPrevIdx = prevTimelineOrder.value(nGuid, std::numeric_limits<int>::max());
+                if (optPrevIdx < nPrevIdx) {
+                    insertAt = insIdx;
+                    break;
+                }
+            }
+        }
+        nextMessages.insert(insertAt, curr);
+    }
+    normalizeOutgoingReceipts(nextMessages);
 
     if (nextMessages != m_messages) {
         emit aboutToChangeMessages();
@@ -5599,6 +6460,8 @@ void Backend::reconcileChatMessages(const QString &chatGuid, const QJsonArray &s
                 m_chatMessagesCache[chatGuid].remove(g);
                 deletionsDetected = true;
             }
+            clearPendingDeliveryTrackingForGuid(g, true);
+            m_reconcileRemovedSeqByGuid.insert(g, ++m_historyReconcileSeq);
             continue;
         }
 
@@ -5623,7 +6486,9 @@ void Backend::reconcileChatMessages(const QString &chatGuid, const QJsonArray &s
                 for (const QJsonValue &sv : serverMessages) {
                     const QJsonObject sObj = sv.toObject();
                     if (!sObj.value(QStringLiteral("isFromMe")).toBool()) continue;
-                    if (sObj.value(QStringLiteral("tempGuid")).toString() == cachedGuid ||
+                    const QString sTemp = sObj.value(QStringLiteral("tempGuid")).toString().trimmed();
+                    const QString sUpload = sObj.value(QStringLiteral("uploadUuid")).toString().trimmed();
+                    if (sTemp == cachedGuid || (!sUpload.isEmpty() && sUpload == cachedGuid) ||
                         (!cachedTxt.isEmpty() && extractMessageText(sObj).trimmed() == cachedTxt)) {
                         matchedReal = true;
                         break;
@@ -5639,15 +6504,23 @@ void Backend::reconcileChatMessages(const QString &chatGuid, const QJsonArray &s
                 continue;
             }
             if (!validServerGuids.contains(cachedGuid)) {
+                const bool isFromMe = it.value().value(QStringLiteral("isFromMe")).toBool();
                 const qint64 cachedTs = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                if (isFromMe && (m_pendingDeliveryMessages.contains(cachedGuid) ||
+                                 (cachedTs > 0 && (nowRecMs - cachedTs) < 60000LL))) {
+                    continue;
+                }
                 if (serverReturnedCompleteHistory || (oldestServerTs > 0 && cachedTs >= oldestServerTs)) {
                     toRemove.append(cachedGuid);
                 }
             }
         }
         if (!toRemove.isEmpty()) {
+            ++m_historyReconcileSeq;
             for (const QString &remGuid : toRemove) {
                 chatMap.remove(remGuid);
+                clearPendingDeliveryTrackingForGuid(remGuid, true);
+                m_reconcileRemovedSeqByGuid.insert(remGuid, m_historyReconcileSeq);
             }
             deletionsDetected = true;
         }
@@ -6043,7 +6916,9 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
             const bool isLiveIncoming = m_liveIncomingAttachments.contains(attachmentGuid);
             const bool permanentlyMissingOnDisk = bytes.contains("does not exist") && !isLiveIncoming;
             const int retries = m_attachmentRetryCount.value(attachmentGuid, 0);
-            if (!permanentlyMissingOnDisk && retries < 6) {
+            const bool isPermanentMissing = (httpStatus == 410 || permanentlyMissingOnDisk ||
+                                             (httpStatus == 404 && (!isLiveIncoming || retries >= 6)));
+            if (!isPermanentMissing && retries < 6) {
                 m_attachmentRetryCount.insert(attachmentGuid, retries + 1);
                 m_attemptedAttachments.insert(attachmentGuid);
                 const int delayMs = (retries == 0) ? 500 : ((retries == 1) ? 1000 : ((retries == 2) ? 2000 : ((retries == 3) ? 3500 : 6000)));
@@ -6052,7 +6927,9 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
                     downloadAttachment(attachmentGuid, transferName, highPriority);
                 });
             } else {
-                m_missingAttachmentCooldownUntilMs.insert(attachmentGuid, finishedMs + 60000LL);
+                m_missingAttachmentCooldownUntilMs.insert(
+                    attachmentGuid,
+                    finishedMs + (isPermanentMissing ? 1800000LL : 300000LL));
             }
             pumpAttachmentDownloadQueue();
             return;
@@ -6279,12 +7156,16 @@ void Backend::markChatRead(const QString &chatGuid) {
     if (!m_chats.isEmpty()) {
         saveAppState();
     }
-    // Also mark all cached messages in m_chatMessagesCache[resolvedGuid] as isRead = true
+    // Only mark incoming (!isFromMe) cached messages in m_chatMessagesCache[resolvedGuid] as isRead = true;
+    // outgoing dateRead belongs strictly to recipient read receipts from the relay.
     if (m_chatMessagesCache.contains(resolvedGuid)) {
         auto &chatMap = m_chatMessagesCache[resolvedGuid];
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         for (auto it = chatMap.begin(); it != chatMap.end(); ++it) {
             QJsonObject m = it.value();
+            if (m.value(QStringLiteral("isFromMe")).toBool()) {
+                continue;
+            }
             m.insert(QStringLiteral("isRead"), true);
             m.insert(QStringLiteral("dateRead"), nowMs);
             it.value() = m;
@@ -6384,6 +7265,52 @@ void Backend::toggleChatReadUnread(const QString &chatGuid) {
     }
 }
 
+QString Backend::resolveMergedOutgoingReceiptAndPending(
+    const QString &canonicalGuid,
+    const QString &realGuid,
+    const QJsonObject &fallbackObj,
+    int *outErrCode) {
+    const QJsonObject mergedObj = (!realGuid.isEmpty() &&
+                                   m_chatMessagesCache.contains(canonicalGuid) &&
+                                   m_chatMessagesCache.value(canonicalGuid).contains(realGuid))
+                                      ? m_chatMessagesCache.value(canonicalGuid).value(realGuid)
+                                      : fallbackObj;
+    const qint64 mergedDc = mergedObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    const bool hasLaterIncoming = (mergedDc > 0 && m_chatMessagesCache.contains(canonicalGuid))
+                                      ? hasEligibleLaterIncomingReply(m_chatMessagesCache.value(canonicalGuid), mergedDc)
+                                      : false;
+    const int mergedErrCode = mergedObj.value(QStringLiteral("error")).toInt(0);
+    if (outErrCode) {
+        *outErrCode = mergedErrCode;
+    }
+    const bool mergedHasIsSent = mergedObj.contains(QStringLiteral("isSent"));
+    const bool mergedHasIsDelivered = mergedObj.contains(QStringLiteral("isDelivered"));
+    const bool mergedIsDelivered = mergedObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                                   (mergedObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                                   (mergedObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+    const QString finalReceipt = computeOutgoingReceiptText(
+        mergedObj,
+        hasLaterIncoming,
+        0,
+        realGuid.isEmpty() ? 0 : m_pendingDeliveryAddedAtMs.value(realGuid, 0),
+        !realGuid.isEmpty() && m_expiredPendingDeliveryGuids.contains(realGuid));
+    if (!realGuid.isEmpty()) {
+        if (mergedIsDelivered || mergedErrCode != 0 ||
+            (mergedHasIsSent && mergedObj.value(QStringLiteral("isSent")).toBool())) {
+            m_expiredPendingDeliveryGuids.remove(realGuid);
+        }
+        if (mergedErrCode == 0 && !mergedIsDelivered && (mergedHasIsSent || mergedHasIsDelivered) &&
+            finalReceipt != QStringLiteral("⚠ Not Delivered") &&
+            !m_expiredPendingDeliveryGuids.contains(realGuid)) {
+            m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
+            if (!m_pendingDeliveryAddedAtMs.contains(realGuid)) {
+                m_pendingDeliveryAddedAtMs.insert(realGuid, QDateTime::currentMSecsSinceEpoch());
+            }
+        }
+    }
+    return finalReceipt;
+}
+
 void Backend::sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid) {
     const QString trimmed = replaceEmojiShortcodes(text.trimmed());
     if (chatGuid.isEmpty() || trimmed.isEmpty()) return;
@@ -6409,13 +7336,16 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     optimistic.insert(QStringLiteral("hasImageAttachment"), false);
     optimistic.insert(QStringLiteral("hasFileAttachment"), false);
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
+    const qint64 optNowMs = QDateTime::currentMSecsSinceEpoch();
     optimistic.insert(QStringLiteral("replyToGuid"), replyToGuid);
-    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
+    optimistic.insert(QStringLiteral("dateCreated"), optNowMs);
+    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), optNowMs);
     if (m_demoMode && m_demoChatMessages.contains(canonicalGuid)) {
         m_demoChatMessages[canonicalGuid].append(optimistic);
     }
     if (canonicalGuid == m_selectedChatGuid || chatGuid == m_selectedChatGuid) {
         m_messages.append(optimistic);
+        enforceLatestOutgoingReceiptsInTimeline();
         emit messagesChanged();
     }
 
@@ -6449,26 +7379,47 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         payload.insert(QStringLiteral("partIndex"), partIndex);
     }
 
-    auto finalizeSentMessage = [this, canonicalGuid, tempGuid](const QByteArray &bytes) -> bool {
-        const QJsonDocument doc = QJsonDocument::fromJson(bytes);
-        QJsonObject dataObj = doc.object().value(QStringLiteral("data")).toObject();
+    auto finalizeSentMessage = [this, canonicalGuid, tempGuid, trimmed, optNowMs](const QByteArray &bytes, const QString &sentTempGuid) -> bool {
+        QJsonParseError parseErr{};
+        const QJsonDocument doc = QJsonDocument::fromJson(bytes, &parseErr);
+        if (parseErr.error != QJsonParseError::NoError || !doc.isObject()) {
+            return false;
+        }
+        const QJsonValue dataVal = doc.object().value(QStringLiteral("data"));
+        if (!dataVal.isObject()) {
+            return false;
+        }
+        QJsonObject dataObj = dataVal.toObject();
         if (dataObj.value(QStringLiteral("messages")).isArray()) {
             const QJsonArray msgs = dataObj.value(QStringLiteral("messages")).toArray();
             if (!msgs.isEmpty()) {
                 dataObj = msgs.first().toObject();
             }
         }
-        const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
+        if (dataObj.isEmpty()) {
+            return false;
+        }
+        const QString realGuid = dataObj.value(QStringLiteral("guid")).toString().trimmed();
+        const QString ackTempGuid = dataObj.value(QStringLiteral("tempGuid")).toString().trimmed();
         const qint64 dateCreated = dataObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
         const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
-        const bool hasIsSent = dataObj.contains(QStringLiteral("isSent"));
-        const bool isSentFlag = dataObj.value(QStringLiteral("isSent")).toBool(false);
-        const bool hasIsDelivered = dataObj.contains(QStringLiteral("isDelivered"));
-        const qint64 dateDelivered = dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong();
-        const bool isDeliveredFlag = dataObj.value(QStringLiteral("isDelivered")).toBool(false) || (dateDelivered > 0);
         const bool looksLikeSyntheticChatGuid = realGuid.startsWith(QStringLiteral("iMessage;")) ||
                                                 realGuid.startsWith(QStringLiteral("SMS;")) ||
                                                 realGuid.startsWith(QStringLiteral("RCS;"));
+        const bool tempGuidMatchesIfPresent = ackTempGuid.isEmpty() || sentTempGuid.isEmpty() || (ackTempGuid == sentTempGuid);
+        const bool isPendingAck = dataObj.value(QStringLiteral("pending")).isBool() &&
+                                  dataObj.value(QStringLiteral("pending")).toBool(false);
+        const bool hasSendResult =
+            (sendErrCode != 0) ||
+            dataObj.value(QStringLiteral("isSent")).isBool() ||
+            dataObj.value(QStringLiteral("isDelivered")).isBool() ||
+            (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+            (dataObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0) ||
+            (dataObj.value(QStringLiteral("originalROWID")).toVariant().toLongLong() > 0) ||
+            (dateCreated > 0 && dataObj.contains(QStringLiteral("isFromMe")));
+        if (!tempGuidMatchesIfPresent || (!isPendingAck && !hasSendResult)) {
+            return false;
+        }
 
         if (sendErrCode != 0) {
             if (!realGuid.isEmpty() && !looksLikeSyntheticChatGuid) {
@@ -6482,33 +7433,119 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             return false;
         }
 
+        if (realGuid.isEmpty() && isPendingAck && !tempGuid.isEmpty()) {
+            QJsonObject pendingObj = dataObj;
+            pendingObj.insert(QStringLiteral("guid"), tempGuid);
+            pendingObj.insert(QStringLiteral("tempGuid"),
+                              !ackTempGuid.isEmpty() ? ackTempGuid : (!sentTempGuid.isEmpty() ? sentTempGuid : tempGuid));
+            if (!pendingObj.contains(QStringLiteral("isFromMe"))) {
+                pendingObj.insert(QStringLiteral("isFromMe"), true);
+            }
+            if (extractMessageText(pendingObj).trimmed().isEmpty() && !trimmed.isEmpty()) {
+                pendingObj.insert(QStringLiteral("text"), trimmed);
+            }
+            if (pendingObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong() <= 0) {
+                pendingObj.insert(QStringLiteral("dateCreated"), optNowMs);
+            }
+            const bool hasPositiveDelivery =
+                pendingObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                (pendingObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                (pendingObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            if (!hasPositiveDelivery) {
+                if (!pendingObj.value(QStringLiteral("isSent")).isBool()) {
+                    pendingObj.insert(QStringLiteral("isSent"), false);
+                }
+                if (!pendingObj.value(QStringLiteral("isDelivered")).isBool()) {
+                    pendingObj.insert(QStringLiteral("isDelivered"), false);
+                }
+                pendingObj.insert(QStringLiteral("pending"), true);
+            }
+            cacheMessageForChat(canonicalGuid, pendingObj);
+            saveMessagesCache();
+            return true;
+        }
+
         if (!realGuid.isEmpty() && !looksLikeSyntheticChatGuid) {
+            QJsonObject normalizedObj = dataObj;
+            if (!normalizedObj.contains(QStringLiteral("isFromMe"))) {
+                normalizedObj.insert(QStringLiteral("isFromMe"), true);
+            }
+            if (extractMessageText(normalizedObj).trimmed().isEmpty() && !trimmed.isEmpty()) {
+                normalizedObj.insert(QStringLiteral("text"), trimmed);
+            }
+            if (normalizedObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong() <= 0) {
+                normalizedObj.insert(QStringLiteral("dateCreated"), optNowMs);
+            }
+            const bool hasPositiveDelivery =
+                normalizedObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                (normalizedObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                (normalizedObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            if (isPendingAck && !hasPositiveDelivery) {
+                if (!normalizedObj.value(QStringLiteral("isSent")).isBool()) {
+                    normalizedObj.insert(QStringLiteral("isSent"), false);
+                }
+                if (!normalizedObj.value(QStringLiteral("isDelivered")).isBool()) {
+                    normalizedObj.insert(QStringLiteral("isDelivered"), false);
+                }
+            }
             m_seenMessageGuids.insert(realGuid);
+            if (!tempGuid.isEmpty() && tempGuid != realGuid) {
+                m_seenMessageGuids.remove(tempGuid);
+                m_pendingDeliveryMessages.remove(tempGuid);
+                m_pendingDeliveryAddedAtMs.remove(tempGuid);
+                m_expiredPendingDeliveryGuids.remove(tempGuid);
+                m_inFlightDeliveryCheckGuids.remove(tempGuid);
+                m_messageObservationSeq.remove(tempGuid);
+                if (m_chatMessagesCache.contains(canonicalGuid)) {
+                    m_chatMessagesCache[canonicalGuid].remove(tempGuid);
+                }
+            }
             if (dateCreated > m_lastMessageTimestamp) {
                 m_lastMessageTimestamp = dateCreated;
             }
-            cacheMessageForChat(canonicalGuid, dataObj);
+            cacheMessageForChat(canonicalGuid, normalizedObj);
 
-            QString finalReceipt = QStringLiteral("Delivered");
-            if (!isDeliveredFlag && (hasIsSent || hasIsDelivered)) {
-                finalReceipt = isSentFlag ? QStringLiteral("Sent") : QStringLiteral("Sending...");
-                m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
-            }
+            int mergedErrCode = 0;
+            const QString finalReceipt = resolveMergedOutgoingReceiptAndPending(
+                canonicalGuid, realGuid, normalizedObj, &mergedErrCode);
 
             if (canonicalGuid == m_selectedChatGuid) {
-                bool replaced = false;
+                int realIdx = -1;
+                QList<int> dupOrTempIndices;
                 for (int i = 0; i < m_messages.size(); ++i) {
-                    QVariantMap m = m_messages[i].toMap();
-                    const QString curG = m.value(QStringLiteral("guid")).toString();
-                    if (curG == tempGuid || curG == realGuid) {
-                        m.insert(QStringLiteral("guid"), realGuid);
-                        m.insert(QStringLiteral("receiptText"), finalReceipt);
-                        m.insert(QStringLiteral("isFailed"), false);
-                        m.insert(QStringLiteral("errorCode"), 0);
-                        m_messages[i] = m;
-                        replaced = true;
-                        break;
+                    const QString curG = m_messages[i].toMap().value(QStringLiteral("guid")).toString();
+                    if (curG == realGuid) {
+                        if (realIdx < 0) realIdx = i;
+                        else dupOrTempIndices.append(i);
+                    } else if (!tempGuid.isEmpty() && curG == tempGuid) {
+                        dupOrTempIndices.append(i);
                     }
+                }
+                bool replaced = false;
+                if (realIdx >= 0) {
+                    QVariantMap m = m_messages[realIdx].toMap();
+                    m.insert(QStringLiteral("receiptText"), finalReceipt);
+                    m.insert(QStringLiteral("isFailed"), mergedErrCode != 0);
+                    m.insert(QStringLiteral("errorCode"), mergedErrCode);
+                    m_messages[realIdx] = m;
+                    for (int k = dupOrTempIndices.size() - 1; k >= 0; --k) {
+                        m_messages.removeAt(dupOrTempIndices[k]);
+                    }
+                    enforceLatestOutgoingReceiptsInTimeline();
+                    replaced = true;
+                } else if (!dupOrTempIndices.isEmpty()) {
+                    const int keepIdx = dupOrTempIndices.first();
+                    QVariantMap m = m_messages[keepIdx].toMap();
+                    m.insert(QStringLiteral("guid"), realGuid);
+                    m.insert(QStringLiteral("receiptText"), finalReceipt);
+                    m.insert(QStringLiteral("isFailed"), mergedErrCode != 0);
+                    m.insert(QStringLiteral("errorCode"), mergedErrCode);
+                    m_messages[keepIdx] = m;
+                    for (int k = dupOrTempIndices.size() - 1; k >= 1; --k) {
+                        m_messages.removeAt(dupOrTempIndices[k]);
+                    }
+                    enforceLatestOutgoingReceiptsInTimeline();
+                    replaced = true;
                 }
                 if (replaced) {
                     emit messagesChanged();
@@ -6567,11 +7604,11 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         newChatPayload.insert(QStringLiteral("method"), QStringLiteral("private-api"));
         QNetworkRequest req3 = makeRequest(QStringLiteral("/api/v1/chat/new"));
         req3.setPriority(QNetworkRequest::HighPriority);
-        req3.setTransferTimeout(15000);
+        req3.setTransferTimeout(45000);
         QNetworkReply *r3 = m_sendNam.post(req3, QJsonDocument(newChatPayload).toJson(QJsonDocument::Compact));
         connect(r3, &QNetworkReply::finished, this, [this, r3, canonicalGuid, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
             r3->deleteLater();
-            const bool resolved = (r3->error() == QNetworkReply::NoError) && finalizeSentMessage(r3->readAll());
+            const bool resolved = (r3->error() == QNetworkReply::NoError) && finalizeSentMessage(r3->readAll(), QString());
             fetchChatsMetadata();
             if (!resolved) {
                 markOptimisticFailed();
@@ -6585,7 +7622,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     emit sendingMessageChanged();
     QNetworkRequest sendReq = makeRequest(QStringLiteral("/api/v1/message/text"));
     sendReq.setPriority(QNetworkRequest::HighPriority);
-    sendReq.setTransferTimeout(15000);
+    sendReq.setTransferTimeout(45000);
     QNetworkReply *reply = m_sendNam.post(sendReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
     connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, sendChatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
         reply->deleteLater();
@@ -6605,16 +7642,17 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             }
 
             // Fallback to apple-script method, and if that fails on a brand-new 1:1 chat, create via /api/v1/chat/new
+            const QString fallbackTempGuid = tempGuid + QStringLiteral("-as");
             QJsonObject fallback;
             fallback.insert(QStringLiteral("chatGuid"), sendChatGuid);
-            fallback.insert(QStringLiteral("tempGuid"), tempGuid + QStringLiteral("-as"));
+            fallback.insert(QStringLiteral("tempGuid"), fallbackTempGuid);
             fallback.insert(QStringLiteral("message"), trimmed);
             fallback.insert(QStringLiteral("method"), QStringLiteral("apple-script"));
             QNetworkRequest req2 = makeRequest(QStringLiteral("/api/v1/message/text"));
             req2.setPriority(QNetworkRequest::HighPriority);
-            req2.setTransferTimeout(15000);
+            req2.setTransferTimeout(45000);
             QNetworkReply *r2 = m_sendNam.post(req2, QJsonDocument(fallback).toJson(QJsonDocument::Compact));
-            connect(r2, &QNetworkReply::finished, this, [this, r2, canonicalGuid, sendChatGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+            connect(r2, &QNetworkReply::finished, this, [this, r2, canonicalGuid, sendChatGuid, fallbackTempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
                 r2->deleteLater();
                 if (r2->error() != QNetworkReply::NoError) {
                     const QByteArray r2Err = r2->isOpen() ? r2->readAll() : QByteArray();
@@ -6627,7 +7665,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                     finishSendTrack();
                     return;
                 }
-                if (!finalizeSentMessage(r2->readAll())) {
+                if (!finalizeSentMessage(r2->readAll(), fallbackTempGuid)) {
                     markOptimisticFailed();
                     loadChatMessages(canonicalGuid);
                 }
@@ -6636,7 +7674,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
             return;
         }
 
-        if (!finalizeSentMessage(reply->readAll())) {
+        if (!finalizeSentMessage(reply->readAll(), tempGuid)) {
             markOptimisticFailed();
             loadChatMessages(canonicalGuid);
         }
@@ -6788,6 +7826,11 @@ void Backend::deleteMessage(const QString &messageGuid, const QString &chatGuid)
 
     // 1. Record in persistent deleted set
     m_deletedMessageGuids.insert(resolvedMsgGuid);
+    m_pendingDeliveryMessages.remove(resolvedMsgGuid);
+    m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
+    m_expiredPendingDeliveryGuids.remove(resolvedMsgGuid);
+    m_inFlightDeliveryCheckGuids.remove(resolvedMsgGuid);
+    m_messageObservationSeq.remove(resolvedMsgGuid);
 
     // 2. Remove from m_chatMessagesCache (including any tapback children associated with this message)
     for (auto chatIt = m_chatMessagesCache.begin(); chatIt != m_chatMessagesCache.end(); ++chatIt) {
@@ -6803,24 +7846,36 @@ void Backend::deleteMessage(const QString &messageGuid, const QString &chatGuid)
         for (const QString &cg : childReactionGuids) {
             chatMap.remove(cg);
             m_deletedMessageGuids.insert(cg);
+            m_pendingDeliveryMessages.remove(cg);
+            m_pendingDeliveryAddedAtMs.remove(cg);
+            m_expiredPendingDeliveryGuids.remove(cg);
+            m_inFlightDeliveryCheckGuids.remove(cg);
+            m_messageObservationSeq.remove(cg);
         }
     }
 
-    // 3. Optimistically remove from m_messages in UI immediately
-    bool removedFromUi = false;
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
-            if (!removedFromUi) {
-                emit aboutToChangeMessages();
-            }
-            m_messages.removeAt(i);
-            removedFromUi = true;
-        }
-    }
-    if (removedFromUi) {
-        emit messagesChanged();
-    } else if (resolvedChatGuid == m_selectedChatGuid) {
+    // 3. Remove from UI timeline immediately and restore preceding receipt when active chat is affected
+    const QString canonicalChat = resolveCanonicalChatGuid(resolvedChatGuid);
+    const bool isActiveSelectedChat = !m_selectedChatGuid.isEmpty() &&
+                                      !canonicalChat.isEmpty() &&
+                                      (canonicalChat == m_selectedChatGuid ||
+                                       isSameConversation(canonicalChat, m_selectedChatGuid));
+    if (isActiveSelectedChat && (!m_demoMode || m_chatMessagesCache.contains(m_selectedChatGuid))) {
         rebuildSelectedChatMessages();
+    } else {
+        bool removedFromUi = false;
+        for (int i = m_messages.size() - 1; i >= 0; --i) {
+            if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
+                if (!removedFromUi) {
+                    emit aboutToChangeMessages();
+                }
+                m_messages.removeAt(i);
+                removedFromUi = true;
+            }
+        }
+        if (removedFromUi) {
+            emit messagesChanged();
+        }
     }
 
     // 4. Update chat preview & persist state
@@ -6887,6 +7942,14 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
     if (resolvedChatGuid.isEmpty()) {
         resolvedChatGuid = m_selectedChatGuid;
     }
+    if (resolvedChatGuid.isEmpty()) {
+        for (auto it = m_chatMessagesCache.constBegin(); it != m_chatMessagesCache.constEnd(); ++it) {
+            if (it.value().contains(resolvedMsgGuid)) {
+                resolvedChatGuid = it.key();
+                break;
+            }
+        }
+    }
 
     int partIndex = 0;
     if (!resolvedChatGuid.isEmpty() && m_chatMessagesCache.contains(resolvedChatGuid)) {
@@ -6894,25 +7957,37 @@ void Backend::unsendMessage(const QString &messageGuid, const QString &chatGuid)
     }
 
     m_deletedMessageGuids.insert(resolvedMsgGuid);
+    m_pendingDeliveryMessages.remove(resolvedMsgGuid);
+    m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
+    m_expiredPendingDeliveryGuids.remove(resolvedMsgGuid);
+    m_inFlightDeliveryCheckGuids.remove(resolvedMsgGuid);
+    m_messageObservationSeq.remove(resolvedMsgGuid);
 
     for (auto chatIt = m_chatMessagesCache.begin(); chatIt != m_chatMessagesCache.end(); ++chatIt) {
         chatIt.value().remove(resolvedMsgGuid);
     }
 
-    bool removedFromUi = false;
-    for (int i = m_messages.size() - 1; i >= 0; --i) {
-        if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
-            if (!removedFromUi) {
-                emit aboutToChangeMessages();
-            }
-            m_messages.removeAt(i);
-            removedFromUi = true;
-        }
-    }
-    if (removedFromUi) {
-        emit messagesChanged();
-    } else if (resolvedChatGuid == m_selectedChatGuid) {
+    const QString canonicalChat = resolveCanonicalChatGuid(resolvedChatGuid);
+    const bool isActiveSelectedChat = !m_selectedChatGuid.isEmpty() &&
+                                      !canonicalChat.isEmpty() &&
+                                      (canonicalChat == m_selectedChatGuid ||
+                                       isSameConversation(canonicalChat, m_selectedChatGuid));
+    if (isActiveSelectedChat && (!m_demoMode || m_chatMessagesCache.contains(m_selectedChatGuid))) {
         rebuildSelectedChatMessages();
+    } else {
+        bool removedFromUi = false;
+        for (int i = m_messages.size() - 1; i >= 0; --i) {
+            if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == resolvedMsgGuid) {
+                if (!removedFromUi) {
+                    emit aboutToChangeMessages();
+                }
+                m_messages.removeAt(i);
+                removedFromUi = true;
+            }
+        }
+        if (removedFromUi) {
+            emit messagesChanged();
+        }
     }
 
     if (!resolvedChatGuid.isEmpty()) {
@@ -6975,9 +8050,17 @@ void Backend::deleteChat(const QString &chatGuid) {
             }
         }
         for (auto it = chatMap.constBegin(); it != chatMap.constEnd(); ++it) {
-            m_deletedMessageGuids.insert(it.key());
+            const QString delKey = it.key();
+            m_deletedMessageGuids.insert(delKey);
+            clearPendingDeliveryTrackingForGuid(delKey, true);
         }
         m_chatMessagesCache.remove(targetGuid);
+    }
+    for (const QString &pendKey : m_pendingDeliveryMessages.keys()) {
+        const QString pendCg = m_pendingDeliveryMessages.value(pendKey);
+        if (pendCg == targetGuid || isSameConversation(pendCg, targetGuid)) {
+            clearPendingDeliveryTrackingForGuid(pendKey, true);
+        }
     }
     m_chatMessageOffset.remove(targetGuid);
     m_chatHasMoreMessages.remove(targetGuid);
@@ -7410,6 +8493,10 @@ QString Backend::pasteClipboardImageToTempFile() {
 }
 
 void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption) {
+    sendAttachmentInternal(chatGuid, filePath, caption, false);
+}
+
+void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &filePath, const QString &caption, bool ownedVoiceRecording) {
     if (chatGuid.isEmpty() || filePath.trimmed().isEmpty()) return;
     const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
     const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
@@ -7419,13 +8506,43 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     const QString absLocalPath = fi.absoluteFilePath();
     const QString localUrl = QUrl::fromLocalFile(absLocalPath).toString();
     const bool isImg = isImageMimeOrExt(QString(), fi.fileName());
+    const bool isAud = !isImg && isAudioAttachment(QString(), fi.fileName());
+    const QString extLower = fi.suffix().toLower();
+    QString mimeType = QStringLiteral("application/octet-stream");
+    if (isImg) {
+        if (extLower == QStringLiteral("jpg") || extLower == QStringLiteral("jpeg")) mimeType = QStringLiteral("image/jpeg");
+        else if (extLower == QStringLiteral("gif")) mimeType = QStringLiteral("image/gif");
+        else if (extLower == QStringLiteral("webp")) mimeType = QStringLiteral("image/webp");
+        else if (extLower == QStringLiteral("heic") || extLower == QStringLiteral("heif")) mimeType = QStringLiteral("image/heic");
+        else mimeType = QStringLiteral("image/png");
+    } else if (isAud) {
+        if (extLower == QStringLiteral("caf")) mimeType = QStringLiteral("audio/x-caf");
+        else if (extLower == QStringLiteral("m4a")) mimeType = QStringLiteral("audio/mp4");
+        else if (extLower == QStringLiteral("mp3")) mimeType = QStringLiteral("audio/mpeg");
+        else if (extLower == QStringLiteral("ogg")) mimeType = QStringLiteral("audio/ogg");
+        else if (extLower == QStringLiteral("opus")) mimeType = QStringLiteral("audio/opus");
+        else if (extLower == QStringLiteral("aac")) mimeType = QStringLiteral("audio/aac");
+        else if (extLower == QStringLiteral("flac")) mimeType = QStringLiteral("audio/flac");
+        else if (extLower == QStringLiteral("amr")) mimeType = QStringLiteral("audio/amr");
+        else mimeType = QStringLiteral("audio/wav");
+    }
+    int durationSeconds = isAud ? wavDurationSeconds(absLocalPath) : 0;
+    if (isAud && durationSeconds <= 0 && m_voiceRecordingSeconds > 0) {
+        durationSeconds = m_voiceRecordingSeconds;
+    }
+    const QVariantList waveformBars = isAud ? computeAudioFileWaveformBars(absLocalPath, fi.fileName(), 28) : QVariantList();
+    insertCachedAttachmentPath(m_attachmentPaths, tempGuid, absLocalPath);
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     QVariantMap attMap{
         {QStringLiteral("guid"), tempGuid},
         {QStringLiteral("name"), fi.fileName()},
-        {QStringLiteral("mimeType"), isImg ? QStringLiteral("image/png") : QStringLiteral("application/octet-stream")},
+        {QStringLiteral("mimeType"), mimeType},
         {QStringLiteral("localUrl"), localUrl},
-        {QStringLiteral("isImage"), isImg}
+        {QStringLiteral("sourceUrl"), localUrl},
+        {QStringLiteral("isImage"), isImg},
+        {QStringLiteral("isAudio"), isAud},
+        {QStringLiteral("durationSeconds"), durationSeconds},
+        {QStringLiteral("waveformBars"), waveformBars}
     };
     QVariantMap optimistic;
     optimistic.insert(QStringLiteral("guid"), tempGuid);
@@ -7443,6 +8560,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     optimistic.insert(QStringLiteral("attachmentGuid"), tempGuid);
     optimistic.insert(QStringLiteral("attachmentName"), fi.fileName());
     optimistic.insert(QStringLiteral("attachmentLocalUrl"), localUrl);
+    optimistic.insert(QStringLiteral("attachments"), QVariantList{attMap});
     if (isImg) {
         optimistic.insert(QStringLiteral("imageAttachments"), QVariantList{attMap});
         optimistic.insert(QStringLiteral("imageAttachmentCount"), 1);
@@ -7451,10 +8569,12 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
         optimistic.insert(QStringLiteral("imageAttachmentCount"), 0);
     }
     optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
+    optimistic.insert(QStringLiteral("dateCreated"), nowMs);
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), nowMs);
     if (canonicalGuid == m_selectedChatGuid || chatGuid == m_selectedChatGuid) {
         emit aboutToChangeMessages();
         m_messages.append(optimistic);
+        enforceLatestOutgoingReceiptsInTimeline();
         emit messagesChanged();
     }
 
@@ -7462,7 +8582,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     for (ChatEntry &c : m_chats) {
         if (c.guid == canonicalGuid) {
             c.lastMessagePreview = caption.trimmed().isEmpty()
-                                       ? (isImg ? QStringLiteral("📷 Photo") : (QStringLiteral("📎 ") + fi.fileName()))
+                                       ? (isImg ? QStringLiteral("📷 Photo") : (isAud ? QStringLiteral("🎤 Voice Memo") : (QStringLiteral("📎 ") + fi.fileName())))
                                        : caption.trimmed();
             c.lastMessageDate = nowMs;
             c.relativeTime = QStringLiteral("now");
@@ -7473,8 +8593,13 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     }
     sortChats();
     emit chatsChanged();
-    emit toastMessage(QStringLiteral("📎 Sending %1...").arg(fi.fileName()));
-    if (m_demoMode || m_serverUrl.isEmpty()) return;
+    emit toastMessage(isAud ? QStringLiteral("🎤 Sending voice memo...") : QStringLiteral("📎 Sending %1...").arg(fi.fileName()));
+    if (m_demoMode || m_serverUrl.isEmpty()) {
+        if (m_demoMode && m_demoChatMessages.contains(canonicalGuid)) {
+            m_demoChatMessages[canonicalGuid].append(optimistic);
+        }
+        return;
+    }
 
     ++m_activeSendCount;
     emit sendingMessageChanged();
@@ -7508,71 +8633,332 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
     QNetworkRequest req(buildApiUrl(QStringLiteral("/api/v1/message/attachment")));
     req.setPriority(QNetworkRequest::HighPriority);
     req.setTransferTimeout(45000);
+    const QString trimmedCaption = caption.trimmed();
     QNetworkReply *reply = m_sendNam.post(req, multiPart);
     multiPart->setParent(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, absLocalPath]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, nowMs, absLocalPath, mimeType, durationSeconds, waveformBars, trimmedCaption, isAud, ownedVoiceRecording]() {
         reply->deleteLater();
         if (m_activeSendCount > 0) {
             --m_activeSendCount;
             emit sendingMessageChanged();
         }
-        if (reply->error() == QNetworkReply::NoError) {
-            const QByteArray respBytes = reply->readAll();
-            const QJsonObject dataObj = QJsonDocument::fromJson(respBytes).object().value(QStringLiteral("data")).toObject();
-            const QString realGuid = dataObj.value(QStringLiteral("guid")).toString();
-            const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
-            const bool hasIsSent = dataObj.contains(QStringLiteral("isSent"));
-            const bool isSentFlag = dataObj.value(QStringLiteral("isSent")).toBool(false);
-            const bool hasIsDelivered = dataObj.contains(QStringLiteral("isDelivered"));
-            const bool isDeliveredFlag = dataObj.value(QStringLiteral("isDelivered")).toBool(false) ||
-                                         (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0);
-            const QJsonArray atts = dataObj.value(QStringLiteral("attachments")).toArray();
-            QString firstAttGuid;
-            for (const QJsonValue &av : atts) {
-                const QString ag = av.toObject().value(QStringLiteral("guid")).toString();
-                if (!ag.isEmpty() && QFileInfo::exists(absLocalPath)) {
-                    insertCachedAttachmentPath(m_attachmentPaths, ag, absLocalPath);
-                    if (firstAttGuid.isEmpty()) firstAttGuid = ag;
-                }
-            }
-            if (!realGuid.isEmpty()) {
-                m_seenMessageGuids.insert(realGuid);
-                cacheMessageForChat(canonicalGuid, dataObj);
-            }
-            QString finalReceipt = QStringLiteral("Delivered");
-            if (sendErrCode != 0) {
-                finalReceipt = QStringLiteral("⚠ Not Delivered");
-                emit toastMessage(QStringLiteral("⚠ Failed to send attachment (error %1)").arg(sendErrCode));
-            } else if (!isDeliveredFlag && (hasIsSent || hasIsDelivered)) {
-                finalReceipt = isSentFlag ? QStringLiteral("Sent") : QStringLiteral("Sending...");
-                if (!realGuid.isEmpty()) m_pendingDeliveryMessages.insert(realGuid, canonicalGuid);
-            }
+        auto markAttachmentFailed = [this, canonicalGuid, tempGuid]() {
             if (canonicalGuid == m_selectedChatGuid) {
-                bool updatedOpt = false;
                 for (int i = 0; i < m_messages.size(); ++i) {
                     QVariantMap m = m_messages[i].toMap();
-                    if (m.value(QStringLiteral("guid")).toString() == tempGuid ||
-                        (!realGuid.isEmpty() && m.value(QStringLiteral("guid")).toString() == realGuid)) {
-                        if (!realGuid.isEmpty()) {
-                            m.insert(QStringLiteral("guid"), realGuid);
-                        }
-                        if (!firstAttGuid.isEmpty()) {
-                            m.insert(QStringLiteral("attachmentGuid"), firstAttGuid);
-                            QVariantList imgList = m.value(QStringLiteral("imageAttachments")).toList();
-                            if (!imgList.isEmpty()) {
-                                QVariantMap firstImg = imgList[0].toMap();
-                                firstImg.insert(QStringLiteral("guid"), firstAttGuid);
-                                imgList[0] = firstImg;
-                                m.insert(QStringLiteral("imageAttachments"), imgList);
-                            }
-                        }
-                        m.insert(QStringLiteral("receiptText"), finalReceipt);
-                        m.insert(QStringLiteral("isFailed"), sendErrCode != 0);
-                        m.insert(QStringLiteral("errorCode"), sendErrCode);
+                    if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
+                        m.insert(QStringLiteral("receiptText"), QStringLiteral("⚠ Not Delivered"));
+                        m.insert(QStringLiteral("isFailed"), true);
+                        m.insert(QStringLiteral("errorCode"), 4);
                         m_messages[i] = m;
-                        updatedOpt = true;
+                        emit messagesChanged();
                         break;
                     }
+                }
+            }
+            emit toastMessage(QStringLiteral("⚠ Failed to send attachment"));
+        };
+        if (reply->error() == QNetworkReply::NoError) {
+            const QByteArray respBytes = reply->readAll();
+            QJsonParseError parseErr{};
+            const QJsonDocument doc = QJsonDocument::fromJson(respBytes, &parseErr);
+            const QJsonObject rootObj = (parseErr.error == QJsonParseError::NoError && doc.isObject())
+                                            ? doc.object()
+                                            : QJsonObject();
+            const QJsonValue dataVal = rootObj.value(QStringLiteral("data"));
+            const QJsonObject dataObj = dataVal.isObject() ? dataVal.toObject() : QJsonObject();
+            const QString realGuidRaw = dataObj.value(QStringLiteral("guid")).toString().trimmed();
+            const QString ackTempGuid = dataObj.value(QStringLiteral("tempGuid")).toString().trimmed();
+            const QString ackUploadUuid = dataObj.value(QStringLiteral("uploadUuid")).toString().trimmed();
+            const bool looksLikeSyntheticChatGuid =
+                realGuidRaw.startsWith(QStringLiteral("iMessage;")) ||
+                realGuidRaw.startsWith(QStringLiteral("SMS;")) ||
+                realGuidRaw.startsWith(QStringLiteral("RCS;"));
+            const QString realGuid = looksLikeSyntheticChatGuid ? QString() : realGuidRaw;
+
+            const bool tempGuidMatchesIfPresent =
+                ackTempGuid.isEmpty() || tempGuid.isEmpty() || (ackTempGuid == tempGuid);
+            const bool hasCorrelatedIdentity =
+                tempGuidMatchesIfPresent &&
+                (!realGuid.isEmpty() || !ackTempGuid.isEmpty() || !ackUploadUuid.isEmpty());
+            const bool isExplicitPendingAck =
+                dataObj.value(QStringLiteral("pending")).isBool() &&
+                dataObj.value(QStringLiteral("pending")).toBool(false) &&
+                hasCorrelatedIdentity;
+
+            const int sendErrCode = dataObj.value(QStringLiteral("error")).toInt(0);
+            const bool hasExplicitError =
+                dataObj.value(QStringLiteral("error")).isDouble() && (sendErrCode != 0);
+            const bool hasSendBool =
+                dataObj.value(QStringLiteral("isSent")).isBool() ||
+                dataObj.value(QStringLiteral("isDelivered")).isBool();
+            const bool hasPositiveReceiptTimestamp =
+                (dataObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                (dataObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+            const bool hasConfirmedDbRow =
+                (!realGuid.isEmpty()) &&
+                ((dataObj.value(QStringLiteral("originalROWID")).toVariant().toLongLong() > 0) ||
+                 !dataObj.value(QStringLiteral("attachments")).toArray().isEmpty());
+            const bool hasSendResult =
+                tempGuidMatchesIfPresent &&
+                (hasExplicitError ||
+                 ((hasSendBool || hasPositiveReceiptTimestamp || hasConfirmedDbRow) && hasCorrelatedIdentity));
+
+            const bool validUploadAck =
+                (parseErr.error == QJsonParseError::NoError) &&
+                doc.isObject() &&
+                dataVal.isObject() &&
+                !dataObj.isEmpty() &&
+                tempGuidMatchesIfPresent &&
+                (isExplicitPendingAck || hasSendResult);
+            if (!validUploadAck) {
+                markAttachmentFailed();
+                return;
+            }
+            int mergedErrCode = sendErrCode;
+            QString finalReceipt;
+            QJsonObject effectiveObj = dataObj;
+            auto makeFallbackAttachment = [&](const QString &attGuid) {
+                QJsonObject optAtt{
+                    {QStringLiteral("guid"), attGuid},
+                    {QStringLiteral("transferName"), QFileInfo(absLocalPath).fileName()},
+                    {QStringLiteral("mimeType"), mimeType}
+                };
+                if (durationSeconds > 0) {
+                    optAtt.insert(QStringLiteral("durationSeconds"), durationSeconds);
+                }
+                if (!waveformBars.isEmpty()) {
+                    QJsonArray wfArr;
+                    for (const QVariant &v : waveformBars) {
+                        wfArr.append(v.toDouble());
+                    }
+                    optAtt.insert(QStringLiteral("waveform"), wfArr);
+                }
+                return optAtt;
+            };
+
+            if (!realGuid.isEmpty()) {
+                m_seenMessageGuids.insert(realGuid);
+                if (!tempGuid.isEmpty() && tempGuid != realGuid) {
+                    m_seenMessageGuids.remove(tempGuid);
+                    clearPendingDeliveryTrackingForGuid(tempGuid, true);
+                    if (m_chatMessagesCache.contains(canonicalGuid)) {
+                        m_chatMessagesCache[canonicalGuid].remove(tempGuid);
+                    }
+                }
+                QJsonObject uploadObj = dataObj;
+                if (uploadObj.value(QStringLiteral("tempGuid")).toString().trimmed().isEmpty() && !tempGuid.isEmpty()) {
+                    uploadObj.insert(QStringLiteral("tempGuid"), tempGuid);
+                }
+                if (!uploadObj.contains(QStringLiteral("isFromMe"))) {
+                    uploadObj.insert(QStringLiteral("isFromMe"), true);
+                }
+                const bool uploadHasPositiveDelivery =
+                    uploadObj.value(QStringLiteral("isDelivered")).toBool(false) ||
+                    (uploadObj.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                    (uploadObj.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+                if (!uploadHasPositiveDelivery && sendErrCode == 0) {
+                    if (uploadObj.value(QStringLiteral("pending")).toBool(false)) {
+                        if (!uploadObj.value(QStringLiteral("isSent")).isBool()) {
+                            uploadObj.insert(QStringLiteral("isSent"), false);
+                        }
+                        if (!uploadObj.value(QStringLiteral("isDelivered")).isBool()) {
+                            uploadObj.insert(QStringLiteral("isDelivered"), false);
+                        }
+                    } else if (!uploadObj.contains(QStringLiteral("isSent")) &&
+                               !uploadObj.contains(QStringLiteral("isDelivered"))) {
+                        uploadObj.insert(QStringLiteral("isSent"), true);
+                        uploadObj.insert(QStringLiteral("isDelivered"), false);
+                    }
+                }
+                if (uploadObj.value(QStringLiteral("pending")).toBool(false) || (sendErrCode != 0)) {
+                    if (extractMessageText(uploadObj).trimmed().isEmpty() && !trimmedCaption.isEmpty()) {
+                        uploadObj.insert(QStringLiteral("text"), trimmedCaption);
+                    }
+                    if (uploadObj.value(QStringLiteral("dateCreated")).toVariant().toLongLong() <= 0) {
+                        uploadObj.insert(QStringLiteral("dateCreated"), nowMs);
+                    }
+                    if (uploadObj.value(QStringLiteral("attachments")).toArray().isEmpty()) {
+                        uploadObj.insert(QStringLiteral("attachments"), QJsonArray{makeFallbackAttachment(tempGuid)});
+                    }
+                }
+                cacheMessageForChat(canonicalGuid, uploadObj);
+                if (m_chatMessagesCache.contains(canonicalGuid) &&
+                    m_chatMessagesCache.value(canonicalGuid).contains(realGuid)) {
+                    effectiveObj = m_chatMessagesCache.value(canonicalGuid).value(realGuid);
+                } else {
+                    effectiveObj = uploadObj;
+                }
+                finalReceipt = resolveMergedOutgoingReceiptAndPending(
+                    canonicalGuid, realGuid, uploadObj, &mergedErrCode);
+            } else {
+                const QString dataTempGuid = dataObj.value(QStringLiteral("tempGuid")).toString().trimmed();
+                const QString dataUploadUuid = dataObj.value(QStringLiteral("uploadUuid")).toString().trimmed();
+                const QString stableTempKey = !tempGuid.isEmpty() ? tempGuid : dataTempGuid;
+                const QString stableUploadUuid = !dataUploadUuid.isEmpty()
+                                                     ? dataUploadUuid
+                                                     : (!dataTempGuid.isEmpty() ? dataTempGuid : stableTempKey);
+                QJsonObject pendingAck = dataObj;
+                pendingAck.insert(QStringLiteral("guid"), stableTempKey);
+                pendingAck.insert(QStringLiteral("tempGuid"), stableTempKey);
+                if (!stableUploadUuid.isEmpty()) {
+                    pendingAck.insert(QStringLiteral("uploadUuid"), stableUploadUuid);
+                }
+                if (!pendingAck.contains(QStringLiteral("isFromMe"))) {
+                    pendingAck.insert(QStringLiteral("isFromMe"), true);
+                }
+                if (!pendingAck.contains(QStringLiteral("pending"))) {
+                    pendingAck.insert(QStringLiteral("pending"), true);
+                }
+                const bool hasPositiveDeliveryEvidence =
+                    pendingAck.value(QStringLiteral("isDelivered")).toBool(false) ||
+                    (pendingAck.value(QStringLiteral("dateDelivered")).toVariant().toLongLong() > 0) ||
+                    (pendingAck.value(QStringLiteral("dateRead")).toVariant().toLongLong() > 0);
+                if (!hasPositiveDeliveryEvidence && pendingAck.value(QStringLiteral("error")).toInt(0) == 0) {
+                    pendingAck.insert(QStringLiteral("isSent"), false);
+                    pendingAck.insert(QStringLiteral("isDelivered"), false);
+                    pendingAck.insert(QStringLiteral("pending"), true);
+                }
+                if (extractMessageText(pendingAck).trimmed().isEmpty() && !trimmedCaption.isEmpty()) {
+                    pendingAck.insert(QStringLiteral("text"), trimmedCaption);
+                }
+                if (pendingAck.value(QStringLiteral("dateCreated")).toVariant().toLongLong() <= 0) {
+                    pendingAck.insert(QStringLiteral("dateCreated"), nowMs);
+                }
+                if (pendingAck.value(QStringLiteral("attachments")).toArray().isEmpty()) {
+                    pendingAck.insert(QStringLiteral("attachments"), QJsonArray{makeFallbackAttachment(stableTempKey)});
+                }
+                cacheMessageForChat(canonicalGuid, pendingAck);
+                if (m_chatMessagesCache.contains(canonicalGuid) &&
+                    m_chatMessagesCache.value(canonicalGuid).contains(stableTempKey)) {
+                    effectiveObj = m_chatMessagesCache.value(canonicalGuid).value(stableTempKey);
+                } else {
+                    effectiveObj = pendingAck;
+                }
+                mergedErrCode = effectiveObj.value(QStringLiteral("error")).toInt(sendErrCode);
+                finalReceipt = computeOutgoingReceiptText(effectiveObj);
+            }
+
+            QJsonArray atts = effectiveObj.value(QStringLiteral("attachments")).toArray();
+            if (atts.isEmpty()) {
+                atts = dataObj.value(QStringLiteral("attachments")).toArray();
+            }
+            QString firstAttGuid;
+            QString persistedLocalPath = absLocalPath;
+            int serverDurationSec = 0;
+            QVariantList serverWaveformBars;
+            bool copiedVoiceMemoToPersistentCache = false;
+            for (const QJsonValue &av : atts) {
+                const QJsonObject aObj = av.toObject();
+                const QString ag = aObj.value(QStringLiteral("guid")).toString();
+                if (!ag.isEmpty() && QFileInfo::exists(absLocalPath)) {
+                    QString cachePathForGuid = absLocalPath;
+                    if (isAud && !absLocalPath.contains(QStringLiteral("/.cache/imsg/attachments/"))) {
+                        const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+                        QDir().mkpath(cacheDir);
+                        QString safeName = QFileInfo(absLocalPath).fileName();
+                        safeName.replace(QRegularExpression(QStringLiteral("[^a-zA-Z0-9._-]")), QStringLiteral("_"));
+                        const QString persistentTarget = cacheDir + QLatin1Char('/') + ag.left(16) + QLatin1Char('_') + safeName;
+                        if (QFile::exists(persistentTarget) || QFile::copy(absLocalPath, persistentTarget)) {
+                            cachePathForGuid = persistentTarget;
+                            if (persistentTarget != absLocalPath) {
+                                copiedVoiceMemoToPersistentCache = true;
+                            }
+                        }
+                    }
+                    insertCachedAttachmentPath(m_attachmentPaths, ag, cachePathForGuid);
+                    if (firstAttGuid.isEmpty()) {
+                        firstAttGuid = ag;
+                        persistedLocalPath = cachePathForGuid;
+                        const double rawServerDur = aObj.value(QStringLiteral("durationSeconds")).toDouble(0.0);
+                        serverDurationSec = (rawServerDur > 0.0) ? qMax(1, qRound(rawServerDur)) : 0;
+                        if (serverDurationSec <= 0) {
+                            const double fallbackDur = aObj.value(QStringLiteral("duration")).toDouble(0.0);
+                            serverDurationSec = (fallbackDur > 0.0) ? qMax(1, qRound(fallbackDur)) : 0;
+                        }
+                        if (aObj.value(QStringLiteral("waveform")).isArray()) {
+                            for (const QJsonValue &wv : aObj.value(QStringLiteral("waveform")).toArray()) {
+                                serverWaveformBars.append(qBound(0.15, wv.toDouble(0.15), 1.0));
+                            }
+                        }
+                    }
+                }
+            }
+            if (ownedVoiceRecording && copiedVoiceMemoToPersistentCache && persistedLocalPath != absLocalPath &&
+                QFileInfo::exists(persistedLocalPath)) {
+                insertCachedAttachmentPath(m_attachmentPaths, tempGuid, persistedLocalPath);
+                QFile::remove(absLocalPath);
+            }
+            if (mergedErrCode != 0) {
+                emit toastMessage(QStringLiteral("⚠ Failed to send attachment (error %1)").arg(mergedErrCode));
+            }
+            if (!firstAttGuid.isEmpty() && m_playingAudioGuid == tempGuid) {
+                m_playingAudioGuid = firstAttGuid;
+                if (!persistedLocalPath.isEmpty()) {
+                    m_currentAudioLocalFile = persistedLocalPath;
+                }
+                emit audioPlaybackChanged();
+            }
+            const QString persistedLocalUrl = QFileInfo::exists(persistedLocalPath)
+                                                  ? QUrl::fromLocalFile(persistedLocalPath).toString()
+                                                  : QString();
+            auto updateAttList = [&](QVariantMap &msgMap, const QString &listKey) {
+                QVariantList lst = msgMap.value(listKey).toList();
+                if (lst.isEmpty()) return;
+                QVariantMap first = lst[0].toMap();
+                if (!firstAttGuid.isEmpty()) first.insert(QStringLiteral("guid"), firstAttGuid);
+                if (!persistedLocalUrl.isEmpty()) {
+                    first.insert(QStringLiteral("localUrl"), persistedLocalUrl);
+                    first.insert(QStringLiteral("sourceUrl"), persistedLocalUrl);
+                }
+                if (serverDurationSec > 0) first.insert(QStringLiteral("durationSeconds"), serverDurationSec);
+                if (!serverWaveformBars.isEmpty()) first.insert(QStringLiteral("waveformBars"), serverWaveformBars);
+                lst[0] = first;
+                msgMap.insert(listKey, lst);
+            };
+            if (canonicalGuid == m_selectedChatGuid) {
+                int realIdx = -1;
+                QList<int> dupOrTempIndices;
+                for (int i = 0; i < m_messages.size(); ++i) {
+                    const QString curG = m_messages[i].toMap().value(QStringLiteral("guid")).toString();
+                    if (!realGuid.isEmpty() && curG == realGuid) {
+                        if (realIdx < 0) realIdx = i;
+                        else dupOrTempIndices.append(i);
+                    } else if (curG == tempGuid) {
+                        dupOrTempIndices.append(i);
+                    }
+                }
+                auto applyOpt = [&](QVariantMap &m, bool setRealGuid) {
+                    if (setRealGuid && !realGuid.isEmpty()) m.insert(QStringLiteral("guid"), realGuid);
+                    if (!firstAttGuid.isEmpty()) m.insert(QStringLiteral("attachmentGuid"), firstAttGuid);
+                    if (!persistedLocalUrl.isEmpty()) m.insert(QStringLiteral("attachmentLocalUrl"), persistedLocalUrl);
+                    updateAttList(m, QStringLiteral("attachments"));
+                    updateAttList(m, QStringLiteral("imageAttachments"));
+                    updateAttList(m, QStringLiteral("fileAttachments"));
+                    m.insert(QStringLiteral("receiptText"), finalReceipt);
+                    m.insert(QStringLiteral("isFailed"), mergedErrCode != 0);
+                    m.insert(QStringLiteral("errorCode"), mergedErrCode);
+                };
+                bool updatedOpt = false;
+                if (realIdx >= 0) {
+                    QVariantMap m = m_messages[realIdx].toMap();
+                    applyOpt(m, false);
+                    m_messages[realIdx] = m;
+                    for (int k = dupOrTempIndices.size() - 1; k >= 0; --k) {
+                        m_messages.removeAt(dupOrTempIndices[k]);
+                    }
+                    enforceLatestOutgoingReceiptsInTimeline();
+                    updatedOpt = true;
+                } else if (!dupOrTempIndices.isEmpty()) {
+                    const int keepIdx = dupOrTempIndices.first();
+                    QVariantMap m = m_messages[keepIdx].toMap();
+                    applyOpt(m, true);
+                    m_messages[keepIdx] = m;
+                    for (int k = dupOrTempIndices.size() - 1; k >= 1; --k) {
+                        m_messages.removeAt(dupOrTempIndices[k]);
+                    }
+                    enforceLatestOutgoingReceiptsInTimeline();
+                    updatedOpt = true;
                 }
                 if (updatedOpt) {
                     emit messagesChanged();
@@ -7585,19 +8971,7 @@ void Backend::sendAttachment(const QString &chatGuid, const QString &filePath, c
                 loadChatMessages(canonicalGuid);
             }
         } else {
-            if (canonicalGuid == m_selectedChatGuid) {
-                for (int i = 0; i < m_messages.size(); ++i) {
-                    QVariantMap m = m_messages[i].toMap();
-                    if (m.value(QStringLiteral("guid")).toString() == tempGuid) {
-                        m.insert(QStringLiteral("receiptText"), QStringLiteral("⚠ Not Delivered"));
-                        m.insert(QStringLiteral("isFailed"), true);
-                        m_messages[i] = m;
-                        emit messagesChanged();
-                        break;
-                    }
-                }
-            }
-            emit toastMessage(QStringLiteral("⚠ Failed to send attachment"));
+            markAttachmentFailed();
         }
     });
 }
@@ -8263,9 +9637,141 @@ void Backend::playNotificationSound(const QString &presetOverride, bool forcePre
     }
 
     if (!soundPath.isEmpty()) {
-        if (!QProcess::startDetached(QStringLiteral("pw-play"), {soundPath})) {
-            QProcess::startDetached(QStringLiteral("paplay"), {soundPath});
+        const QString effectiveOut = effectiveAudioOutputDevice();
+        QStringList pwArgs;
+        if (!effectiveOut.isEmpty()) {
+            pwArgs << QStringLiteral("--target") << effectiveOut;
         }
+        pwArgs << soundPath;
+        if (!QProcess::startDetached(QStringLiteral("pw-play"), pwArgs)) {
+            QStringList paArgs;
+            if (!effectiveOut.isEmpty()) {
+                paArgs << (QStringLiteral("--device=") + effectiveOut);
+            }
+            paArgs << soundPath;
+            QProcess::startDetached(QStringLiteral("paplay"), paArgs);
+        }
+    }
+}
+
+QVariantList Backend::parsePactlDeviceList(const QByteArray &rawOutput, bool filterMonitorSources) {
+    QVariantList result;
+    const QList<QByteArray> lines = rawOutput.split('\n');
+    for (const QByteArray &rawLine : lines) {
+        const QString line = QString::fromUtf8(rawLine).trimmed();
+        if (line.isEmpty()) continue;
+        const QStringList parts = line.split(QRegularExpression(QStringLiteral("\\s+")), Qt::SkipEmptyParts);
+        if (parts.size() < 2) continue;
+        const QString devName = parts.at(1).trimmed();
+        if (devName.isEmpty()) continue;
+        if (filterMonitorSources && devName.endsWith(QStringLiteral(".monitor"), Qt::CaseInsensitive)) {
+            continue;
+        }
+        QString label = devName;
+        if (label.startsWith(QStringLiteral("alsa_input."))) {
+            label = label.mid(11);
+        } else if (label.startsWith(QStringLiteral("alsa_output."))) {
+            label = label.mid(12);
+        }
+        label.replace(QLatin1Char('_'), QLatin1Char(' '));
+        label.replace(QLatin1Char('.'), QStringLiteral(" · "));
+        result.append(QVariantMap{
+            {QStringLiteral("id"), devName},
+            {QStringLiteral("label"), label}
+        });
+    }
+    return result;
+}
+
+void Backend::refreshAudioDevices() {
+    QVariantList inputs;
+    QVariantList outputs;
+    inputs.append(QVariantMap{{QStringLiteral("id"), QString()}, {QStringLiteral("label"), QStringLiteral("System Default")}});
+    outputs.append(QVariantMap{{QStringLiteral("id"), QString()}, {QStringLiteral("label"), QStringLiteral("System Default")}});
+    bool inputDiscoveryOk = false;
+    bool outputDiscoveryOk = false;
+
+#ifndef IMSG_UNIT_TEST
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
+        !QStandardPaths::findExecutable(QStringLiteral("pactl")).isEmpty()) {
+        QProcess inProc;
+        inProc.start(QStringLiteral("pactl"), {QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sources")});
+        if (inProc.waitForFinished(1000) && inProc.exitStatus() == QProcess::NormalExit && inProc.exitCode() == 0) {
+            inputDiscoveryOk = true;
+            const QVariantList parsedIn = parsePactlDeviceList(inProc.readAllStandardOutput(), true);
+            for (const QVariant &v : parsedIn) inputs.append(v);
+        }
+        QProcess outProc;
+        outProc.start(QStringLiteral("pactl"), {QStringLiteral("list"), QStringLiteral("short"), QStringLiteral("sinks")});
+        if (outProc.waitForFinished(1000) && outProc.exitStatus() == QProcess::NormalExit && outProc.exitCode() == 0) {
+            outputDiscoveryOk = true;
+            const QVariantList parsedOut = parsePactlDeviceList(outProc.readAllStandardOutput(), false);
+            for (const QVariant &v : parsedOut) outputs.append(v);
+        }
+    }
+#endif
+
+    m_audioInputDevices = inputs;
+    m_audioOutputDevices = outputs;
+    m_audioInputDiscoverySucceeded = inputDiscoveryOk;
+    m_audioOutputDiscoverySucceeded = outputDiscoveryOk;
+    emit audioDevicesChanged();
+}
+
+QString Backend::effectiveAudioInputDevice() const {
+    if (m_selectedAudioInputDevice.isEmpty() || !m_audioInputDiscoverySucceeded) {
+        return QString();
+    }
+    for (const QVariant &v : m_audioInputDevices) {
+        if (v.toMap().value(QStringLiteral("id")).toString() == m_selectedAudioInputDevice) {
+            return m_selectedAudioInputDevice;
+        }
+    }
+    return QString();
+}
+
+QString Backend::effectiveAudioOutputDevice() const {
+    if (m_selectedAudioOutputDevice.isEmpty() || !m_audioOutputDiscoverySucceeded) {
+        return QString();
+    }
+    for (const QVariant &v : m_audioOutputDevices) {
+        if (v.toMap().value(QStringLiteral("id")).toString() == m_selectedAudioOutputDevice) {
+            return m_selectedAudioOutputDevice;
+        }
+    }
+    return QString();
+}
+
+void Backend::setSelectedAudioInputDevice(const QString &deviceId) {
+    const QString norm = deviceId.trimmed();
+    if (m_selectedAudioInputDevice == norm) return;
+    m_selectedAudioInputDevice = norm;
+    saveAudioDeviceConfig();
+    emit audioDevicesChanged();
+}
+
+void Backend::setSelectedAudioOutputDevice(const QString &deviceId) {
+    const QString norm = deviceId.trimmed();
+    if (m_selectedAudioOutputDevice == norm) return;
+    m_selectedAudioOutputDevice = norm;
+    saveAudioDeviceConfig();
+    emit audioDevicesChanged();
+}
+
+void Backend::saveAudioDeviceConfig() {
+    const QString cfgPath = configFilePath();
+    if (cfgPath.isEmpty()) return;
+    QDir().mkpath(QFileInfo(cfgPath).absolutePath());
+    QJsonObject cfgObj;
+    QFile existingFile(cfgPath);
+    if (existingFile.exists() && existingFile.open(QIODevice::ReadOnly)) {
+        cfgObj = QJsonDocument::fromJson(existingFile.readAll()).object();
+        existingFile.close();
+    }
+    cfgObj.insert(QStringLiteral("audioInputDevice"), m_selectedAudioInputDevice);
+    cfgObj.insert(QStringLiteral("audioOutputDevice"), m_selectedAudioOutputDevice);
+    if (!writeConfigAtomically(cfgPath, cfgObj)) {
+        emit toastMessage(QStringLiteral("⚠ Failed to save audio device configuration"));
     }
 }
 
@@ -8275,7 +9781,10 @@ void Backend::loadDemoData() {
     stopSocketIoClient();
     m_connected = true;
     m_loading = false;
-    m_serverUrl = QStringLiteral("https://bluepill.example.com");
+    if (m_serverUrl != QStringLiteral("https://bluepill.example.com")) {
+        m_serverUrl = QStringLiteral("https://bluepill.example.com");
+        bumpServerEndpointGeneration();
+    }
     m_secondaryServerUrl = QStringLiteral("https://failover.example.com");
     m_serverStatus = QStringLiteral("BluePill Relay v1.1.0 · macOS 15.7.7 · Private API");
 
@@ -9209,124 +10718,853 @@ QVariantList Backend::computeWaveformBars(const QString &seed, int count) {
     return bars;
 }
 
+QString Backend::formatAudioDuration(int totalSeconds) {
+    const int sec = qMax(0, totalSeconds);
+    return QStringLiteral("%1:%2").arg(sec / 60).arg(sec % 60, 2, 10, QLatin1Char('0'));
+}
+
+bool Backend::hasNonEmptyWavDataChunk(const QString &filePath) {
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    const QByteArray head = f.read(12);
+    if (head.size() < 12 || !head.startsWith("RIFF") || head.mid(8, 4) != "WAVE") {
+        return false;
+    }
+    bool hasFmt = false;
+    while (!f.atEnd()) {
+        const QByteArray chunkHdr = f.read(8);
+        if (chunkHdr.size() < 8) break;
+        const QByteArray chunkId = chunkHdr.left(4);
+        const quint32 chunkSize = static_cast<quint8>(chunkHdr[4])
+                                | (static_cast<quint8>(chunkHdr[5]) << 8)
+                                | (static_cast<quint8>(chunkHdr[6]) << 16)
+                                | (static_cast<quint8>(chunkHdr[7]) << 24);
+        if (chunkId == "fmt ") {
+            if (chunkSize < 16) return false;
+            const QByteArray fmt = f.read(chunkSize);
+            if (fmt.size() < 16) return false;
+            hasFmt = true;
+            if (chunkSize & 1) f.seek(f.pos() + 1);
+        } else if (chunkId == "data") {
+            const qint64 remainingBytes = qMax<qint64>(0, f.size() - f.pos());
+            const qint64 effectiveBytes = (chunkSize == 0 || chunkSize == 0xFFFFFFFFU)
+                                              ? remainingBytes
+                                              : qMin<qint64>(chunkSize, remainingBytes);
+            return hasFmt && effectiveBytes >= 2;
+        } else {
+            const qint64 skip = qint64(chunkSize) + (chunkSize & 1);
+            if (skip < 0 || f.pos() + skip > f.size()) break;
+            f.seek(f.pos() + skip);
+        }
+    }
+    return false;
+}
+
+int Backend::wavDurationSeconds(const QString &filePath) {
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) return 0;
+    const QByteArray head = f.read(12);
+    if (head.size() < 12 || !head.startsWith("RIFF") || head.mid(8, 4) != "WAVE") {
+        return 0;
+    }
+    quint32 byteRate = 0;
+    qint64 dataSize = 0;
+    while (!f.atEnd()) {
+        const QByteArray chunkHdr = f.read(8);
+        if (chunkHdr.size() < 8) break;
+        const QByteArray chunkId = chunkHdr.left(4);
+        const quint32 chunkSize = static_cast<quint8>(chunkHdr[4])
+                                | (static_cast<quint8>(chunkHdr[5]) << 8)
+                                | (static_cast<quint8>(chunkHdr[6]) << 16)
+                                | (static_cast<quint8>(chunkHdr[7]) << 24);
+        if (chunkId == "fmt " && chunkSize >= 16) {
+            const QByteArray fmt = f.read(chunkSize);
+            if (fmt.size() >= 16) {
+                const quint16 numCh = static_cast<quint8>(fmt[2]) | (static_cast<quint8>(fmt[3]) << 8);
+                const quint32 sampleRate = static_cast<quint8>(fmt[4])
+                                         | (static_cast<quint8>(fmt[5]) << 8)
+                                         | (static_cast<quint8>(fmt[6]) << 16)
+                                         | (static_cast<quint8>(fmt[7]) << 24);
+                byteRate = static_cast<quint8>(fmt[8])
+                         | (static_cast<quint8>(fmt[9]) << 8)
+                         | (static_cast<quint8>(fmt[10]) << 16)
+                         | (static_cast<quint8>(fmt[11]) << 24);
+                const quint16 bitsPerSample = static_cast<quint8>(fmt[14]) | (static_cast<quint8>(fmt[15]) << 8);
+                if (byteRate == 0 && sampleRate > 0 && numCh > 0 && bitsPerSample > 0) {
+                    byteRate = sampleRate * numCh * (bitsPerSample / 8);
+                }
+            }
+            if (chunkSize & 1) f.seek(f.pos() + 1);
+        } else if (chunkId == "data") {
+            const qint64 remainingBytes = qMax<qint64>(0, f.size() - f.pos());
+            dataSize = (chunkSize == 0 || chunkSize == 0xFFFFFFFFU)
+                           ? remainingBytes
+                           : qMin<qint64>(chunkSize, remainingBytes);
+            break;
+        } else {
+            const qint64 skip = qint64(chunkSize) + (chunkSize & 1);
+            if (skip < 0 || f.pos() + skip > f.size()) break;
+            f.seek(f.pos() + skip);
+        }
+    }
+    if (byteRate == 0 || dataSize <= 0) return 0;
+    return qMax(1, int(qRound(double(dataSize) / double(byteRate))));
+}
+
+QVariantList Backend::computeAudioFileWaveformBars(const QString &filePath, const QString &seed, int count) {
+    if (count <= 0) count = 28;
+    QFile f(filePath);
+    if (!f.open(QIODevice::ReadOnly)) return computeWaveformBars(seed, count);
+    const QByteArray head = f.read(12);
+    if (head.size() < 12 || !head.startsWith("RIFF") || head.mid(8, 4) != "WAVE") {
+        return computeWaveformBars(seed, count);
+    }
+    quint16 audioFormat = 0;
+    quint16 bitsPerSample = 0;
+    qint64 dataOffset = -1;
+    qint64 dataBytes = 0;
+    while (!f.atEnd()) {
+        const QByteArray chunkHdr = f.read(8);
+        if (chunkHdr.size() < 8) break;
+        const QByteArray chunkId = chunkHdr.left(4);
+        const quint32 chunkSize = static_cast<quint8>(chunkHdr[4])
+                                | (static_cast<quint8>(chunkHdr[5]) << 8)
+                                | (static_cast<quint8>(chunkHdr[6]) << 16)
+                                | (static_cast<quint8>(chunkHdr[7]) << 24);
+        if (chunkId == "fmt " && chunkSize >= 16) {
+            const QByteArray fmt = f.read(chunkSize);
+            if (fmt.size() >= 16) {
+                audioFormat = static_cast<quint8>(fmt[0]) | (static_cast<quint8>(fmt[1]) << 8);
+                bitsPerSample = static_cast<quint8>(fmt[14]) | (static_cast<quint8>(fmt[15]) << 8);
+            }
+            if (chunkSize & 1) f.seek(f.pos() + 1);
+        } else if (chunkId == "data") {
+            dataOffset = f.pos();
+            const qint64 remainingBytes = qMax<qint64>(0, f.size() - dataOffset);
+            dataBytes = (chunkSize == 0 || chunkSize == 0xFFFFFFFFU)
+                            ? remainingBytes
+                            : qMin<qint64>(chunkSize, remainingBytes);
+            break;
+        } else {
+            const qint64 skip = qint64(chunkSize) + (chunkSize & 1);
+            if (skip < 0 || f.pos() + skip > f.size()) break;
+            f.seek(f.pos() + skip);
+        }
+    }
+    if (audioFormat != 1 || bitsPerSample != 16 || dataOffset < 0 || dataBytes < 4) {
+        return computeWaveformBars(seed, count);
+    }
+    const qint64 totalSamples = dataBytes / 2;
+    QList<double> rawPeaks;
+    rawPeaks.reserve(count);
+    double maxPeak = 0.0;
+    constexpr qint64 kMaxSamplesPerBarRead = 128;
+    for (int i = 0; i < count; ++i) {
+        const qint64 startIdx = (i * totalSamples) / count;
+        const qint64 endIdx = qMax(startIdx + 1, ((i + 1) * totalSamples) / count);
+        const qint64 windowSamples = qMin<qint64>(endIdx - startIdx, kMaxSamplesPerBarRead);
+        if (!f.seek(dataOffset + startIdx * 2)) break;
+        const QByteArray slice = f.read(windowSamples * 2);
+        const qint64 sliceSamples = slice.size() / 2;
+        const char *raw = slice.constData();
+        double sumSq = 0.0;
+        for (qint64 s = 0; s < sliceSamples; ++s) {
+            const qint16 sample = static_cast<qint16>(
+                static_cast<quint8>(raw[s * 2]) | (static_cast<quint8>(raw[s * 2 + 1]) << 8));
+            const double norm = double(sample) / 32768.0;
+            sumSq += norm * norm;
+        }
+        const double rms = (sliceSamples > 0) ? std::sqrt(sumSq / double(sliceSamples)) : 0.0;
+        rawPeaks.append(rms);
+        if (rms > maxPeak) maxPeak = rms;
+    }
+    if (rawPeaks.size() < count || maxPeak <= 0.0005) {
+        return computeWaveformBars(seed, count);
+    }
+    QVariantList bars;
+    bars.reserve(count);
+    for (double p : rawPeaks) {
+        bars.append(qBound(0.15, 0.15 + (p / maxPeak) * 0.85, 1.0));
+    }
+    return bars;
+}
+
+void Backend::stopAudioPlaybackProcess() {
+    if (!m_audioProcess) return;
+    QProcess *proc = m_audioProcess;
+    m_audioProcess = nullptr;
+    proc->disconnect(this);
+    if (proc->state() != QProcess::NotRunning) {
+        proc->terminate();
+        if (!proc->waitForFinished(250)) {
+            proc->kill();
+            proc->waitForFinished(200);
+        }
+    }
+    proc->deleteLater();
+}
+
+bool Backend::canSeekLocalAudioPlayback() const {
+#ifdef IMSG_UNIT_TEST
+    return true;
+#else
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        return true;
+    }
+    return !QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty();
+#endif
+}
+
+bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackGen) {
+    if (localFile.isEmpty() || !QFileInfo::exists(localFile)) {
+        m_audioPlaying = false;
+        m_audioPlaybackTimer.stop();
+        emit audioPlaybackChanged();
+        return false;
+    }
+#ifdef IMSG_UNIT_TEST
+    Q_UNUSED(playbackGen);
+    m_audioPlaybackElapsedMs = 0;
+    m_audioPlaying = true;
+    m_audioPlaybackTimer.start();
+    return true;
+#else
+    if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
+        Q_UNUSED(playbackGen);
+        m_audioPlaybackElapsedMs = 0;
+        m_audioPlaying = true;
+        m_audioPlaybackTimer.start();
+        return true;
+    }
+    stopAudioPlaybackProcess();
+
+    QString bin;
+    QStringList args;
+    const QString effectiveOut = effectiveAudioOutputDevice();
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    if (!effectiveOut.isEmpty()) {
+        env.insert(QStringLiteral("PULSE_SINK"), effectiveOut);
+    }
+
+    if (!QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty()) {
+        bin = QStringLiteral("ffplay");
+        args << QStringLiteral("-nodisp") << QStringLiteral("-autoexit") << QStringLiteral("-loglevel") << QStringLiteral("error");
+        if (m_audioSeekOffsetMs > 250) {
+            args << QStringLiteral("-ss") << QString::number(double(m_audioSeekOffsetMs) / 1000.0, 'f', 2);
+        }
+        args << localFile;
+    } else if (!QStandardPaths::findExecutable(QStringLiteral("pw-play")).isEmpty()) {
+        bin = QStringLiteral("pw-play");
+        m_audioSeekOffsetMs = 0;
+        m_audioProgress = 0.0;
+        if (!effectiveOut.isEmpty()) {
+            args << QStringLiteral("--target") << effectiveOut;
+        }
+        args << localFile;
+    } else if (!QStandardPaths::findExecutable(QStringLiteral("paplay")).isEmpty()) {
+        bin = QStringLiteral("paplay");
+        m_audioSeekOffsetMs = 0;
+        m_audioProgress = 0.0;
+        if (!effectiveOut.isEmpty()) {
+            args << (QStringLiteral("--device=") + effectiveOut);
+        }
+        args << localFile;
+    } else {
+        m_audioPlaying = false;
+        m_audioPlaybackTimer.stop();
+        m_audioProgress = 0.0;
+        m_audioPlaybackElapsedMs = 0;
+        m_audioSeekOffsetMs = 0;
+        emit audioPlaybackChanged();
+        emit toastMessage(QStringLiteral("⚠ No audio player found (ffplay/pw-play/paplay)"));
+        return false;
+    }
+
+    QProcess *proc = new QProcess(this);
+    proc->setProcessEnvironment(env);
+    m_audioProcess = proc;
+    connect(proc, &QProcess::errorOccurred, this,
+            [this, proc, playbackGen](QProcess::ProcessError) {
+                if (m_audioProcess == proc) {
+                    m_audioProcess = nullptr;
+                }
+                proc->deleteLater();
+                if (m_audioPlaybackGen != playbackGen) return;
+                m_audioPlaying = false;
+                m_audioPlaybackTimer.stop();
+                m_audioProgress = 0.0;
+                m_audioPlaybackElapsedMs = 0;
+                m_audioSeekOffsetMs = 0;
+                m_audioDurationText = formatAudioDuration(m_audioPlaybackDurationMs / 1000);
+                emit audioPlaybackChanged();
+                emit toastMessage(QStringLiteral("⚠ Audio playback failed"));
+            });
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, proc, playbackGen](int, QProcess::ExitStatus) {
+                if (m_audioProcess == proc) {
+                    m_audioProcess = nullptr;
+                }
+                proc->deleteLater();
+                if (m_audioPlaybackGen != playbackGen) return;
+                m_audioPlaying = false;
+                m_audioPlaybackTimer.stop();
+                m_audioProgress = 0.0;
+                m_audioPlaybackElapsedMs = 0;
+                m_audioSeekOffsetMs = 0;
+                m_audioDurationText = formatAudioDuration(m_audioPlaybackDurationMs / 1000);
+                emit audioPlaybackChanged();
+            });
+    m_audioPlaybackElapsedMs = 0;
+    m_audioPlaying = true;
+    m_audioPlaybackTimer.start();
+    proc->start(bin, args);
+    return true;
+#endif
+}
+
+void Backend::stopVoiceRecordProcess(bool waitForFlush) {
+    if (!m_voiceRecordProcess) return;
+    QProcess *proc = m_voiceRecordProcess;
+    m_voiceRecordProcess = nullptr;
+    proc->disconnect(this);
+    if (proc->state() != QProcess::NotRunning) {
+        proc->terminate();
+        if (!proc->waitForFinished(waitForFlush ? 1500 : 300)) {
+            proc->kill();
+            proc->waitForFinished(250);
+        }
+    }
+    proc->deleteLater();
+}
+
 void Backend::toggleAudioPlayback(const QString &attachmentGuid, const QString &sourceUrl) {
     if (attachmentGuid.isEmpty()) return;
 
     if (m_playingAudioGuid == attachmentGuid) {
         if (m_audioPlaying) {
+            ++m_audioPlaybackGen;
+            if (canSeekLocalAudioPlayback()) {
+                m_audioSeekOffsetMs = qBound(0, m_audioSeekOffsetMs + m_audioPlaybackElapsedMs, m_audioPlaybackDurationMs);
+            } else {
+                m_audioSeekOffsetMs = 0;
+                m_audioProgress = 0.0;
+            }
+            m_audioPlaybackElapsedMs = 0;
             m_audioPlaying = false;
             m_audioPlaybackTimer.stop();
-            if (m_audioProcess) {
-                m_audioProcess->terminate();
-                m_audioProcess = nullptr;
-            }
-        } else {
-            m_audioPlaying = true;
-            m_audioPlaybackTimer.start();
+            stopAudioPlaybackProcess();
+            emit audioPlaybackChanged();
+            return;
         }
+        if (m_audioDownloadReply && !m_audioDownloadReply->isFinished()) {
+            // User toggled while uncached audio download was still in flight: pause/abort download
+            ++m_audioPlaybackGen;
+            QNetworkReply *inFlight = m_audioDownloadReply;
+            m_audioDownloadReply = nullptr;
+            inFlight->abort();
+            m_audioPlaying = false;
+            m_audioPlaybackTimer.stop();
+            emit audioPlaybackChanged();
+            return;
+        }
+        if (!m_currentAudioLocalFile.isEmpty() && QFileInfo::exists(m_currentAudioLocalFile)) {
+            const quint64 gen = ++m_audioPlaybackGen;
+            if (m_audioProgress >= 1.0 || !canSeekLocalAudioPlayback()) {
+                m_audioProgress = 0.0;
+                m_audioSeekOffsetMs = 0;
+            }
+            m_audioPlaybackElapsedMs = 0;
+            startLocalAudioProcess(m_currentAudioLocalFile, gen);
+            emit audioPlaybackChanged();
+            return;
+        }
+        // Otherwise, previous uncached download was paused/aborted before finishing: fall through to restart download!
+    }
+
+    const QString effectiveSourceUrl = !sourceUrl.isEmpty()
+                                           ? sourceUrl
+                                           : ((m_playingAudioGuid == attachmentGuid) ? m_currentAudioSourceUrl : QString());
+    const quint64 gen = ++m_audioPlaybackGen;
+    if (m_audioDownloadReply) {
+        QNetworkReply *oldReply = m_audioDownloadReply;
+        m_audioDownloadReply = nullptr;
+        oldReply->abort();
+    }
+    stopAudioPlaybackProcess();
+    m_audioPlaybackTimer.stop();
+    m_audioPlaying = false;
+    m_currentAudioLocalFile.clear();
+    m_currentAudioSourceUrl = effectiveSourceUrl;
+
+    QString localFile = lookupCachedAttachmentPath(m_attachmentPaths, attachmentGuid);
+    if (localFile.isEmpty() && effectiveSourceUrl.startsWith(QStringLiteral("file://"))) {
+        localFile = QUrl(effectiveSourceUrl).toLocalFile();
+    } else if (localFile.isEmpty() && !effectiveSourceUrl.isEmpty() &&
+               !effectiveSourceUrl.startsWith(QStringLiteral("/api/")) &&
+               !effectiveSourceUrl.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) &&
+               !effectiveSourceUrl.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
+        localFile = effectiveSourceUrl;
+    }
+    if (!localFile.isEmpty() && !QFileInfo::exists(localFile)) {
+        localFile.clear();
+    }
+
+    int durSec = !localFile.isEmpty() ? wavDurationSeconds(localFile) : 0;
+    if (durSec <= 0) {
+        for (const QVariant &mv : m_messages) {
+            const QVariantMap msgMap = mv.toMap();
+            for (const QVariant &av : msgMap.value(QStringLiteral("attachments")).toList()) {
+                const QVariantMap aMap = av.toMap();
+                if (aMap.value(QStringLiteral("guid")).toString() == attachmentGuid) {
+                    const double rawDur = aMap.value(QStringLiteral("durationSeconds")).toDouble();
+                    durSec = (rawDur > 0.0) ? qMax(1, qRound(rawDur)) : 0;
+                    break;
+                }
+            }
+            if (durSec > 0) break;
+        }
+    }
+    if (durSec <= 0) durSec = 15;
+
+    m_playingAudioGuid = attachmentGuid;
+    m_audioProgress = 0.0;
+    m_audioPlaybackElapsedMs = 0;
+    m_audioSeekOffsetMs = 0;
+    m_audioPlaybackDurationMs = durSec * 1000;
+    m_audioDurationText = formatAudioDuration(durSec);
+
+    if (!localFile.isEmpty()) {
+        m_currentAudioLocalFile = localFile;
+        startLocalAudioProcess(localFile, gen);
         emit audioPlaybackChanged();
         return;
     }
 
-    if (m_audioProcess) {
-        m_audioProcess->terminate();
-        m_audioProcess = nullptr;
+    QUrl downloadUrl;
+    if (effectiveSourceUrl.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) ||
+        effectiveSourceUrl.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
+        const QUrl candidateUrl(effectiveSourceUrl);
+        if (!isTrustedPasswordTransportUrl(candidateUrl)) {
+            emit audioPlaybackChanged();
+            emit toastMessage(QStringLiteral("⚠ Refusing insecure HTTP audio download for remote host"));
+            return;
+        }
+        downloadUrl = candidateUrl;
+        if (!m_password.isEmpty()) {
+            QUrlQuery q(downloadUrl);
+            if (!q.hasQueryItem(QStringLiteral("password"))) {
+                q.addQueryItem(QStringLiteral("password"), m_password);
+                downloadUrl.setQuery(q);
+            }
+        }
+    } else if (!m_serverUrl.isEmpty()) {
+        const QString apiPath = effectiveSourceUrl.startsWith(QStringLiteral("/api/"))
+                                    ? effectiveSourceUrl
+                                    : (QStringLiteral("/api/v1/attachment/") + attachmentGuid + QStringLiteral("/download"));
+        downloadUrl = buildApiUrl(apiPath);
+        if (!downloadUrl.isValid() || downloadUrl.isEmpty()) {
+            emit audioPlaybackChanged();
+            emit toastMessage(QStringLiteral("⚠ Refusing insecure HTTP audio download for remote host"));
+            return;
+        }
     }
 
-    m_playingAudioGuid = attachmentGuid;
-    m_audioPlaying = true;
-    m_audioProgress = 0.0;
-    m_audioPlaybackElapsedMs = 0;
-    m_audioPlaybackDurationMs = 15000;
-    m_audioDurationText = QStringLiteral("0:15");
-    m_audioPlaybackTimer.start();
-
-#ifndef IMSG_UNIT_TEST
-    if (!sourceUrl.isEmpty()) {
-        QString localFile = sourceUrl;
-        if (localFile.startsWith(QStringLiteral("file://"))) {
-            localFile = QUrl(sourceUrl).toLocalFile();
-        }
-        if (QFile::exists(localFile)) {
-            m_audioProcess = new QProcess(this);
-            m_audioProcess->start(QStringLiteral("ffplay"), {QStringLiteral("-nodisp"), QStringLiteral("-autoexit"), localFile});
-        }
+    // Do NOT set m_audioPlaying = true or start m_audioPlaybackTimer while downloading!
+    // In offline / demo mode with no configured server or remote source URL, run simulated timer state.
+    if (effectiveSourceUrl.isEmpty() && (m_serverUrl.isEmpty() || (!m_autoStart && m_configFilePath.isEmpty()))) {
+        m_audioPlaying = true;
+        m_audioPlaybackTimer.start();
+        emit audioPlaybackChanged();
+        return;
     }
-#endif
-
     emit audioPlaybackChanged();
+    if (!downloadUrl.isValid() || downloadUrl.isEmpty()) {
+        return;
+    }
+
+    QNetworkRequest req(downloadUrl);
+    req.setTransferTimeout(20000);
+    QNetworkReply *reply = m_mediaNam.get(req);
+    m_audioDownloadReply = reply;
+    connect(reply, &QNetworkReply::finished, this, [this, reply, attachmentGuid, effectiveSourceUrl, gen]() {
+        if (m_audioDownloadReply == reply) {
+            m_audioDownloadReply = nullptr;
+        }
+        reply->deleteLater();
+        if (m_audioPlaybackGen != gen || m_playingAudioGuid != attachmentGuid) {
+            return;
+        }
+        if (reply->error() != QNetworkReply::NoError) {
+            m_audioPlaying = false;
+            m_audioPlaybackTimer.stop();
+            emit audioPlaybackChanged();
+            emit toastMessage(QStringLiteral("⚠ Failed to download voice memo"));
+            return;
+        }
+        const QByteArray bytes = reply->readAll();
+        if (bytes.isEmpty()) {
+            m_audioPlaying = false;
+            m_audioPlaybackTimer.stop();
+            emit audioPlaybackChanged();
+            emit toastMessage(QStringLiteral("⚠ Empty voice memo audio"));
+            return;
+        }
+        const QString ctype = reply->header(QNetworkRequest::ContentTypeHeader).toString().toLower();
+        QString ext = QStringLiteral(".wav");
+        if (ctype.contains(QStringLiteral("mp4")) || ctype.contains(QStringLiteral("m4a")) || effectiveSourceUrl.endsWith(QStringLiteral(".m4a"), Qt::CaseInsensitive)) ext = QStringLiteral(".m4a");
+        else if (ctype.contains(QStringLiteral("caf")) || effectiveSourceUrl.endsWith(QStringLiteral(".caf"), Qt::CaseInsensitive)) ext = QStringLiteral(".caf");
+        else if (ctype.contains(QStringLiteral("mpeg")) || effectiveSourceUrl.endsWith(QStringLiteral(".mp3"), Qt::CaseInsensitive)) ext = QStringLiteral(".mp3");
+        else if (ctype.contains(QStringLiteral("ogg")) || ctype.contains(QStringLiteral("opus"))) ext = QStringLiteral(".ogg");
+
+        const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+        QDir().mkpath(cacheDir);
+        const QString destPath = cacheDir + QLatin1Char('/') + attachmentGuid.left(16) + QStringLiteral("_voice") + ext;
+        QFile f(destPath);
+        if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            f.write(bytes);
+            f.close();
+            insertCachedAttachmentPath(m_attachmentPaths, attachmentGuid, destPath);
+            m_currentAudioLocalFile = destPath;
+            const int wavSec = wavDurationSeconds(destPath);
+            if (wavSec > 0) {
+                m_audioPlaybackDurationMs = wavSec * 1000;
+                const int currentPosMs = m_audioSeekOffsetMs + m_audioPlaybackElapsedMs;
+                const int remSec = qMax(0, (m_audioPlaybackDurationMs - currentPosMs) / 1000);
+                m_audioDurationText = formatAudioDuration(remSec);
+            }
+            startLocalAudioProcess(destPath, gen);
+            emit audioPlaybackChanged();
+        }
+    });
 }
 
 void Backend::seekAudioPlayback(const QString &attachmentGuid, double ratio) {
+    if (!m_currentAudioLocalFile.isEmpty() && !canSeekLocalAudioPlayback()) {
+        return;
+    }
     if (!attachmentGuid.isEmpty() && m_playingAudioGuid != attachmentGuid) {
-        m_playingAudioGuid = attachmentGuid;
-        m_audioPlaying = true;
-        m_audioPlaybackDurationMs = 15000;
-        m_audioPlaybackTimer.start();
+        toggleAudioPlayback(attachmentGuid, QString());
     }
     m_audioProgress = qBound(0.0, ratio, 1.0);
-    m_audioPlaybackElapsedMs = int(m_audioProgress * m_audioPlaybackDurationMs);
-    int remSec = qMax(0, (m_audioPlaybackDurationMs - m_audioPlaybackElapsedMs) / 1000);
-    m_audioDurationText = QStringLiteral("%1:%2").arg(remSec / 60).arg(remSec % 60, 2, 10, QLatin1Char('0'));
+    m_audioSeekOffsetMs = int(m_audioProgress * m_audioPlaybackDurationMs);
+    m_audioPlaybackElapsedMs = 0;
+    const int remSec = qMax(0, (m_audioPlaybackDurationMs - m_audioSeekOffsetMs) / 1000);
+    m_audioDurationText = formatAudioDuration(remSec);
+    if (m_audioPlaying && !m_currentAudioLocalFile.isEmpty() && QFileInfo::exists(m_currentAudioLocalFile)) {
+        startLocalAudioProcess(m_currentAudioLocalFile, ++m_audioPlaybackGen);
+    }
     emit audioPlaybackChanged();
 }
 
-void Backend::startVoiceRecording() {
-    m_recordingVoice = true;
-    m_voiceRecordingSeconds = 0;
-    m_voiceRecordingWaveform = computeWaveformBars(QUuid::createUuid().toString(), 28);
-    m_currentVoiceRecordingPath = QDir::tempPath() + QStringLiteral("/voice_memo_%1.wav").arg(QDateTime::currentMSecsSinceEpoch());
-    m_voiceRecordingTimer.start();
-    emit voiceRecordingChanged();
+void Backend::clearStagedVoiceMemo(bool removeFile) {
+    if (m_playingAudioGuid == QStringLiteral("voice-memo-preview")) {
+        ++m_audioPlaybackGen;
+        m_audioPlaying = false;
+        m_audioProgress = 0.0;
+        m_audioPlaybackElapsedMs = 0;
+        m_audioSeekOffsetMs = 0;
+        m_audioPlaybackTimer.stop();
+        stopAudioPlaybackProcess();
+        m_playingAudioGuid.clear();
+        m_currentAudioLocalFile.clear();
+        m_currentAudioSourceUrl.clear();
+        emit audioPlaybackChanged();
+    }
+    if (removeFile && !m_recordedVoicePath.isEmpty()) {
+        QFile::remove(m_recordedVoicePath);
+    }
+    m_hasRecordedVoiceMemo = false;
+    m_recordedVoiceDurationSeconds = 0;
+    m_recordedVoiceWaveform.clear();
+    m_recordedVoicePath.clear();
+    m_recordedVoiceChatGuid.clear();
 }
 
-void Backend::cancelVoiceRecording() {
-    m_recordingVoice = false;
-    m_voiceRecordingTimer.stop();
+QString Backend::finalizeCapturedVoiceWav(const QString &recPath) {
+    if (recPath.isEmpty()) return QString();
+
+#ifdef IMSG_UNIT_TEST
+    const bool synthesizeForTest = true;
+#else
+    const bool synthesizeForTest = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
+#endif
+
+    if (synthesizeForTest && !QFile::exists(recPath)) {
+        QFile wavFile(recPath);
+        if (wavFile.open(QIODevice::WriteOnly)) {
+            const quint32 sampleRate = 16000;
+            const quint32 numSamples = sampleRate; // 1 second test tone
+            const quint32 dataSize = numSamples * 2;
+            const quint32 fileSize = 36 + dataSize;
+            QByteArray wav;
+            wav.reserve(int(44 + dataSize));
+            auto appendU32 = [&wav](quint32 v) {
+                char b[4] = {char(v & 0xFF), char((v >> 8) & 0xFF), char((v >> 16) & 0xFF), char((v >> 24) & 0xFF)};
+                wav.append(b, 4);
+            };
+            auto appendU16 = [&wav](quint16 v) {
+                char b[2] = {char(v & 0xFF), char((v >> 8) & 0xFF)};
+                wav.append(b, 2);
+            };
+            wav.append("RIFF", 4);
+            appendU32(fileSize);
+            wav.append("WAVEfmt ", 8);
+            appendU32(16);
+            appendU16(1);
+            appendU16(1);
+            appendU32(sampleRate);
+            appendU32(sampleRate * 2);
+            appendU16(2);
+            appendU16(16);
+            wav.append("data", 4);
+            appendU32(dataSize);
+            for (quint32 i = 0; i < numSamples; ++i) {
+                const double s = std::sin(2.0 * 3.14159265358979323846 * 440.0 * double(i) / double(sampleRate));
+                const qint16 pcm = static_cast<qint16>(s * 12000.0);
+                appendU16(static_cast<quint16>(pcm));
+            }
+            wavFile.write(wav);
+            wavFile.close();
+        }
+    }
+
+    const QFileInfo fi(recPath);
+    if (!fi.exists() || fi.size() <= 44 || !hasNonEmptyWavDataChunk(recPath)) {
+        QFile::remove(recPath);
+        emit toastMessage(QStringLiteral("⚠ No microphone audio captured"));
+        return QString();
+    }
+    return recPath;
+}
+
+void Backend::startVoiceRecording() {
+    if (m_recordingVoice) return;
+    clearStagedVoiceMemo(true);
+    stopVoiceRecordProcess(false);
     if (!m_currentVoiceRecordingPath.isEmpty()) {
         QFile::remove(m_currentVoiceRecordingPath);
         m_currentVoiceRecordingPath.clear();
     }
+
+    QString recDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (recDir.isEmpty()) {
+        recDir = QDir::tempPath();
+    } else {
+        recDir += QStringLiteral("/voice_memos");
+    }
+    QDir().mkpath(recDir);
+    const QString targetPath = recDir + QStringLiteral("/voice_memo_%1.wav").arg(QDateTime::currentMSecsSinceEpoch());
+
+#ifndef IMSG_UNIT_TEST
+    if (QGuiApplication::platformName() != QStringLiteral("offscreen")) {
+        QString bin;
+        QStringList args;
+        const QString effectiveIn = effectiveAudioInputDevice();
+        if (!QStandardPaths::findExecutable(QStringLiteral("pw-record")).isEmpty()) {
+            bin = QStringLiteral("pw-record");
+            args << QStringLiteral("--format=s16")
+                 << QStringLiteral("--rate=16000")
+                 << QStringLiteral("--channels=1");
+            if (!effectiveIn.isEmpty()) {
+                args << QStringLiteral("--target") << effectiveIn;
+            }
+            args << targetPath;
+        } else if (!QStandardPaths::findExecutable(QStringLiteral("ffmpeg")).isEmpty()) {
+            bin = QStringLiteral("ffmpeg");
+            args << QStringLiteral("-y") << QStringLiteral("-loglevel") << QStringLiteral("error")
+                 << QStringLiteral("-f") << QStringLiteral("pulse")
+                 << QStringLiteral("-i") << (effectiveIn.isEmpty() ? QStringLiteral("default") : effectiveIn)
+                 << QStringLiteral("-ac") << QStringLiteral("1")
+                 << QStringLiteral("-ar") << QStringLiteral("16000")
+                 << QStringLiteral("-sample_fmt") << QStringLiteral("s16")
+                 << targetPath;
+        } else if (!QStandardPaths::findExecutable(QStringLiteral("arecord")).isEmpty()) {
+            bin = QStringLiteral("arecord");
+            args << QStringLiteral("-q")
+                 << QStringLiteral("-f") << QStringLiteral("S16_LE")
+                 << QStringLiteral("-r") << QStringLiteral("16000")
+                 << QStringLiteral("-c") << QStringLiteral("1")
+                 << targetPath;
+        }
+        if (bin.isEmpty()) {
+            emit toastMessage(QStringLiteral("⚠ No microphone capture tool found (pw-record/ffmpeg/arecord)"));
+            return;
+        }
+        QProcess *proc = new QProcess(this);
+        if (!effectiveIn.isEmpty()) {
+            QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+            env.insert(QStringLiteral("PULSE_SOURCE"), effectiveIn);
+            proc->setProcessEnvironment(env);
+        }
+        proc->start(bin, args);
+        if (!proc->waitForStarted(600)) {
+            proc->deleteLater();
+            emit toastMessage(QStringLiteral("⚠ Failed to start microphone recording"));
+            return;
+        }
+        m_voiceRecordProcess = proc;
+        connect(proc, &QProcess::errorOccurred, this,
+                [this, proc](QProcess::ProcessError) {
+                    if (m_voiceRecordProcess != proc) return;
+                    m_voiceRecordProcess = nullptr;
+                    proc->disconnect(this);
+                    proc->deleteLater();
+                    if (!m_recordingVoice) return;
+                    m_recordingVoice = false;
+                    m_voiceRecordingTimer.stop();
+                    const QString pendingPath = m_currentVoiceRecordingPath;
+                    m_currentVoiceRecordingPath.clear();
+                    const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
+                    if (!salvaged.isEmpty()) {
+                        int dur = wavDurationSeconds(salvaged);
+                        if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+                        m_recordedVoicePath = salvaged;
+                        m_recordedVoiceDurationSeconds = dur;
+                        m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
+                        m_hasRecordedVoiceMemo = true;
+                    } else {
+                        clearStagedVoiceMemo(true);
+                    }
+                    emit voiceRecordingChanged();
+                    emit toastMessage(QStringLiteral("⚠ Microphone recording stopped unexpectedly"));
+                });
+        connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+                [this, proc](int, QProcess::ExitStatus) {
+                    if (m_voiceRecordProcess != proc) return;
+                    m_voiceRecordProcess = nullptr;
+                    proc->disconnect(this);
+                    proc->deleteLater();
+                    if (!m_recordingVoice) return;
+                    m_recordingVoice = false;
+                    m_voiceRecordingTimer.stop();
+                    const QString pendingPath = m_currentVoiceRecordingPath;
+                    m_currentVoiceRecordingPath.clear();
+                    const QString salvaged = finalizeCapturedVoiceWav(pendingPath);
+                    if (!salvaged.isEmpty()) {
+                        int dur = wavDurationSeconds(salvaged);
+                        if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+                        m_recordedVoicePath = salvaged;
+                        m_recordedVoiceDurationSeconds = dur;
+                        m_recordedVoiceWaveform = computeAudioFileWaveformBars(salvaged, salvaged, 28);
+                        m_hasRecordedVoiceMemo = true;
+                    } else {
+                        clearStagedVoiceMemo(true);
+                    }
+                    emit voiceRecordingChanged();
+                    emit toastMessage(QStringLiteral("⚠ Microphone recording stopped unexpectedly"));
+                });
+    }
+#endif
+
+    m_recordingVoice = true;
+    m_voiceRecordingSeconds = 0;
+    m_voiceRecordingWaveform = computeWaveformBars(QUuid::createUuid().toString(), 28);
+    m_currentVoiceRecordingPath = targetPath;
+    m_recordedVoiceChatGuid = m_selectedChatGuid;
+    m_voiceRecordingTimer.start();
+    emit voiceRecordingChanged();
+}
+
+void Backend::stopVoiceRecordingForPreview() {
+    if (!m_recordingVoice) return;
+    m_recordingVoice = false;
+    m_voiceRecordingTimer.stop();
+    stopVoiceRecordProcess(true);
+
+    const QString recPath = finalizeCapturedVoiceWav(m_currentVoiceRecordingPath);
+    m_currentVoiceRecordingPath.clear();
+    if (!recPath.isEmpty()) {
+        int dur = wavDurationSeconds(recPath);
+        if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+        m_recordedVoicePath = recPath;
+        m_recordedVoiceDurationSeconds = dur;
+        m_recordedVoiceWaveform = computeAudioFileWaveformBars(recPath, recPath, 28);
+        m_hasRecordedVoiceMemo = true;
+    } else {
+        clearStagedVoiceMemo(true);
+    }
+    emit voiceRecordingChanged();
+}
+
+void Backend::togglePreviewRecordedVoiceMemo() {
+    if (!m_hasRecordedVoiceMemo || m_recordedVoicePath.isEmpty() || !QFileInfo::exists(m_recordedVoicePath)) {
+        return;
+    }
+    toggleAudioPlayback(QStringLiteral("voice-memo-preview"), m_recordedVoicePath);
+}
+
+bool Backend::canSendRecordedVoiceMemoToSelectedChat() const {
+    if (m_selectedChatGuid.isEmpty()) return false;
+    if (!m_recordedVoiceChatGuid.isEmpty()) {
+        return isSameConversation(m_recordedVoiceChatGuid, m_selectedChatGuid);
+    }
+    return true;
+}
+
+void Backend::sendRecordedVoiceMemo() {
+    if (!m_hasRecordedVoiceMemo || m_recordedVoicePath.isEmpty()) return;
+    const QString recPath = m_recordedVoicePath;
+    const QFileInfo fi(recPath);
+    if (!fi.exists() || fi.size() <= 44 || !hasNonEmptyWavDataChunk(recPath)) {
+        clearStagedVoiceMemo(true);
+        emit voiceRecordingChanged();
+        emit toastMessage(QStringLiteral("⚠ No microphone audio captured"));
+        return;
+    }
+    if (m_selectedChatGuid.isEmpty()) {
+        emit toastMessage(QStringLiteral("⚠ Select a conversation before sending voice memo"));
+        return;
+    }
+    if (!m_recordedVoiceChatGuid.isEmpty() && !isSameConversation(m_recordedVoiceChatGuid, m_selectedChatGuid)) {
+        emit toastMessage(QStringLiteral("⚠ Voice memo belongs to another conversation; switch back or discard it"));
+        return;
+    }
+    if (!m_demoMode && (m_serverUrl.isEmpty() || m_password.isEmpty() || !buildApiUrl(QStringLiteral("/api/v1/message/attachment")).isValid())) {
+        emit toastMessage(QStringLiteral("⚠ Relay server not ready; voice memo kept as draft"));
+        return;
+    }
+    clearStagedVoiceMemo(false);
+    emit voiceRecordingChanged();
+    sendAttachmentInternal(m_selectedChatGuid, recPath, QString(), true);
+}
+
+void Backend::cancelVoiceRecording() {
+    m_recordingVoice = false;
+    m_voiceRecordingSeconds = 0;
+    m_voiceRecordingTimer.stop();
+    stopVoiceRecordProcess(false);
+    if (!m_currentVoiceRecordingPath.isEmpty()) {
+        QFile::remove(m_currentVoiceRecordingPath);
+        m_currentVoiceRecordingPath.clear();
+    }
+    clearStagedVoiceMemo(true);
     emit voiceRecordingChanged();
 }
 
 void Backend::stopAndSendVoiceRecording() {
+    if (!m_recordingVoice && m_hasRecordedVoiceMemo) {
+        sendRecordedVoiceMemo();
+        return;
+    }
     m_recordingVoice = false;
     m_voiceRecordingTimer.stop();
-    emit voiceRecordingChanged();
+    stopVoiceRecordProcess(true);
 
-    if (!m_currentVoiceRecordingPath.isEmpty() && !QFile::exists(m_currentVoiceRecordingPath)) {
-        QFile wavFile(m_currentVoiceRecordingPath);
-        if (wavFile.open(QIODevice::WriteOnly)) {
-            QByteArray header;
-            header.append("RIFF", 4);
-            quint32 fileSize = 44 - 8;
-            header.append(reinterpret_cast<const char*>(&fileSize), 4);
-            header.append("WAVEfmt ", 8);
-            quint32 fmtChunkSize = 16;
-            quint16 audioFormat = 1;
-            quint16 numChannels = 1;
-            quint32 sampleRate = 16000;
-            quint32 byteRate = sampleRate * numChannels * 2;
-            quint16 blockAlign = numChannels * 2;
-            quint16 bitsPerSample = 16;
-            header.append(reinterpret_cast<const char*>(&fmtChunkSize), 4);
-            header.append(reinterpret_cast<const char*>(&audioFormat), 2);
-            header.append(reinterpret_cast<const char*>(&numChannels), 2);
-            header.append(reinterpret_cast<const char*>(&sampleRate), 4);
-            header.append(reinterpret_cast<const char*>(&byteRate), 4);
-            header.append(reinterpret_cast<const char*>(&blockAlign), 2);
-            header.append(reinterpret_cast<const char*>(&bitsPerSample), 2);
-            header.append("data", 4);
-            quint32 dataSize = 0;
-            header.append(reinterpret_cast<const char*>(&dataSize), 4);
-            wavFile.write(header);
-            wavFile.close();
-        }
+    const QString recPath = finalizeCapturedVoiceWav(m_currentVoiceRecordingPath);
+    m_currentVoiceRecordingPath.clear();
+    if (recPath.isEmpty()) {
+        clearStagedVoiceMemo(true);
+        emit voiceRecordingChanged();
+        return;
     }
-    if (!m_selectedChatGuid.isEmpty() && !m_currentVoiceRecordingPath.isEmpty()) {
-        sendAttachment(m_selectedChatGuid, m_currentVoiceRecordingPath, QStringLiteral("Voice Memo"));
-    }
+    int dur = wavDurationSeconds(recPath);
+    if (dur <= 0) dur = qMax(1, m_voiceRecordingSeconds);
+    m_recordedVoicePath = recPath;
+    m_recordedVoiceDurationSeconds = dur;
+    m_recordedVoiceWaveform = computeAudioFileWaveformBars(recPath, recPath, 28);
+    m_hasRecordedVoiceMemo = true;
+    emit voiceRecordingChanged();
+    sendRecordedVoiceMemo();
 }
 
 void Backend::sendMessageWithEffect(const QString &text, const QString &effectId) {
@@ -9403,7 +11641,9 @@ void Backend::sendMessageWithEffect(const QString &text, const QString &effectId
     }
     QNetworkRequest req(url);
     req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    req.setTransferTimeout(45000);
+    QNetworkReply *effReply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    connect(effReply, &QNetworkReply::finished, effReply, &QNetworkReply::deleteLater);
 }
 
 void Backend::scheduleMessage(const QString &text, qint64 sendAtMs) {
