@@ -1,0 +1,46 @@
+name: Build macOS Emoji Tapback Helper
+
+on:
+  push:
+    branches: [main, master, "feat/**", "fix/**"]
+    paths:
+      - "server/macos/**"
+      - ".github/workflows/build-macos-helper.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-helper:
+    name: Build BluePillEmojiTapback.dylib (macOS 15)
+    runs-on: macos-15
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Compile Universal Mach-O Dylib
+        run: |
+          mkdir -p dist
+          xcrun clang \
+            -arch x86_64 -arch arm64 \
+            -mmacosx-version-min=14.0 \
+            -dynamiclib \
+            -fobjc-arc \
+            -Wall -Wextra -Werror \
+            -framework Foundation \
+            -install_name "/Library/Application Support/BluePill/BluePillEmojiTapback.dylib" \
+            -o dist/BluePillEmojiTapback.dylib \
+            server/macos/BluePillEmojiTapback.m
+          codesign -f -s - dist/BluePillEmojiTapback.dylib
+          file dist/BluePillEmojiTapback.dylib
+          lipo -info dist/BluePillEmojiTapback.dylib
+
+      - name: Upload Dylib Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BluePillEmojiTapback-macos15
+          path: dist/BluePillEmojiTapback.dylib
+          retention-days: 30

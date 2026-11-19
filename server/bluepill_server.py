@@ -5007,9 +5007,24 @@ class BluePillEngine:
             "reactionType": reaction,
             "partIndex": part_index,
         }
-        if assoc_emoji:
+        if is_classic:
+            dispatched = self._send_helper_payload("send-reaction", helper_payload)
+        else:
+            # Never dispatch non-classic custom emoji to legacy BlueBubblesHelper "send-reaction":
+            # parseReactionType: returns 0 and causes Messages.app to send the quoted text as a message.
             helper_payload["emoji"] = assoc_emoji
-        dispatched = self._send_helper_payload("send-reaction", helper_payload)
+            helper_payload["isRemoved"] = assoc_type == 3006
+            dispatched, _ = self._send_helper_payload_with_tx(
+                "send-emoji-reaction", helper_payload, wait_timeout=2.0
+            )
+            tx_state = getattr(self._tx_local, "last_state", "")
+            if self.enable_background_daemons and tx_state == "timeout":
+                self.logger.warning(
+                    "[send_reaction] custom emoji tapback timed out waiting for BluePillEmojiTapback helper (emoji=%s guid=%s)",
+                    assoc_emoji,
+                    selected_guid,
+                )
+                dispatched = False
         now_ms = int(time.time() * 1000)
         react_obj: Dict[str, Any] = {
             "guid": f"react-{uuid.uuid4()}",
@@ -13756,6 +13771,13 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
                 sys.platform = orig_r7_plat
                 r7_eng._poll_sent_message_from_db = orig_r7_poll
                 # Verify classic & custom emoji reactions in send_reaction + query_messages
+                recorded_react_actions: List[Tuple[str, Dict[str, Any]]] = []
+
+                def _record_react_tx(act: str, data: Dict[str, Any], wait_timeout: float = 0.8) -> Tuple[bool, str]:
+                    recorded_react_actions.append((act, dict(data)))
+                    return True, f"tx-{act}"
+
+                r7_eng._send_helper_payload_with_tx = _record_react_tx
                 cr_classic = r7_eng.send_reaction({
                     "chatGuid": "iMessage;-;+14155550171",
                     "selectedMessageGuid": "r7-text-1",
@@ -13778,6 +13800,11 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
                 assert cr_remove["associatedMessageType"] == 3006 and cr_remove["associatedMessageEmoji"] == "🔥"
                 q_msgs_after = r7_eng.query_messages({"chatGuid": "iMessage;-;+14155550171", "limit": 20})
                 assert not any(m.get("associatedMessageEmoji") == "🔥" for m in q_msgs_after)
+                assert [a for a, _ in recorded_react_actions] == ["send-reaction", "send-emoji-reaction", "send-emoji-reaction"], (
+                    f"Custom emoji reaction must never dispatch legacy send-reaction: {recorded_react_actions}"
+                )
+                assert recorded_react_actions[1][1].get("emoji") == "🔥" and recorded_react_actions[1][1].get("isRemoved") is False
+                assert recorded_react_actions[2][1].get("emoji") == "🔥" and recorded_react_actions[2][1].get("isRemoved") is True
         finally:
             for p in (r7_db_path, f"{r7_db_path}.chat_state.json"):
                 if os.path.exists(p):
