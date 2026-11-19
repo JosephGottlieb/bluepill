@@ -369,7 +369,20 @@ ApplicationWindow {
     property bool showContactModal: false
     // Thread view (opened from a quoted reply or "N Replies"), and the message to flash after a jump
     property string threadRootGuid: ""
+    property string threadChatGuid: ""
     property bool showThreadView: false
+    function closeThread() {
+        root.showThreadView = false
+        root.threadRootGuid = ""
+        root.threadChatGuid = ""
+    }
+    // A thread belongs to the conversation it was opened from
+    Connections {
+        target: backend
+        function onSelectedChatChanged() {
+            if (root.showThreadView && backend.selectedChatGuid !== root.threadChatGuid) root.closeThread()
+        }
+    }
     property string highlightGuid: ""
     Timer {
         id: highlightTimer
@@ -380,6 +393,7 @@ ApplicationWindow {
         if (!rootGuid || rootGuid.length === 0) return
         root.clearActionMenu()
         root.threadRootGuid = rootGuid
+        root.threadChatGuid = backend.selectedChatGuid
         root.showThreadView = true
         threadReplyInput.text = ""
         threadReplyInput.forceActiveFocus()
@@ -387,6 +401,7 @@ ApplicationWindow {
     function sendThreadReply() {
         var text = threadReplyInput.text.trim()
         if (text.length === 0 || backend.selectedChatGuid.length === 0 || root.threadRootGuid.length === 0) return
+        if (backend.selectedChatGuid !== root.threadChatGuid) { root.closeThread(); return }
         backend.sendMessage(backend.selectedChatGuid, text, root.threadRootGuid)
         threadReplyInput.text = ""
         threadList.positionViewAtEnd()
@@ -397,9 +412,20 @@ ApplicationWindow {
             root.showToast("↑ " + i18n.tr("That message isn't loaded yet; scroll up to load older messages"))
             return
         }
-        root.showThreadView = false
+        root.closeThread()
+        // Cancel any pending restore/settle pass so it can't move the target back out of view
+        messageListView.restoringScrollPosition = false
+        messageListView.restorePassesRemaining = 0
+        scrollRestoreTimer.stop()
+        messageListView.settlingToBottom = false
+        messageListView.settlePassesRemaining = 0
+        bottomSettleTimer.stop()
+        messageListView.prevContentHeight = 0
+        messageListView.prevContentY = 0
         messageListView.stickToBottom = false
+        messageListView.savedStickToBottom = false
         messageListView.positionViewAtIndex(idx, ListView.Center)
+        messageListView.snapshotScrollState()
         root.highlightGuid = backend.messages[idx].guid || ""
         highlightTimer.restart()
     }
@@ -707,6 +733,7 @@ ApplicationWindow {
 
     onShowNewChatModalChanged: {
         if (root.showNewChatModal) {
+            if (root.showThreadView) root.closeThread()
             root.newChatSelectedHandle = ""
             root.newChatSelectedIndex = 0
             root.refreshNewChatSuggestions()
@@ -8718,8 +8745,11 @@ ApplicationWindow {
                                 if (event.modifiers & Qt.ShiftModifier) { event.accepted = false; return }
                                 root.sendThreadReply()
                             }
-                            Keys.onEnterPressed: root.sendThreadReply()
-                            Keys.onEscapePressed: root.showThreadView = false
+                            Keys.onEnterPressed: function(event) {
+                                if (event.modifiers & Qt.ShiftModifier) { event.accepted = false; return }
+                                root.sendThreadReply()
+                            }
+                            Keys.onEscapePressed: root.closeThread()
                         }
                     }
                     Rectangle {

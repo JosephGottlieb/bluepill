@@ -2372,6 +2372,10 @@ private slots:
         }
         batch.append(msg("m-reply-1", "Mmmm, bread", true, t + 60000, "p:0/m-root"));
         batch.append(msg("m-reply-2", "Sourdough?", false, t + 70000, "m-root"));
+        const QString otherChat = QStringLiteral("iMessage;-;+15555550111");
+        QJsonObject other = msg("m-other", "elsewhere", false, t, nullptr);
+        other.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), otherChat}, {QStringLiteral("style"), 45}}});
+        batch.append(other);
         b.ingestMessagesForTest(batch, true);
         b.selectChat(chatGuid);
 
@@ -2440,6 +2444,32 @@ private slots:
         QObject *timeline = win->findChild<QObject *>(QStringLiteral("messageTimelineListView"));
         QVERIFY(timeline);
         QVERIFY(!timeline->property("stickToBottom").toBool());
+        QVERIFY(!timeline->property("restoringScrollPosition").toBool());
+
+        // Shift+Enter on the keypad keeps the draft (newline), like Shift+Return
+        QMetaObject::invokeMethod(win, "openThread", Q_ARG(QVariant, QStringLiteral("m-root")));
+        replyInput->setProperty("text", QStringLiteral("draft"));
+        QKeyEvent shiftEnter(QEvent::KeyPress, Qt::Key_Enter, Qt::ShiftModifier | Qt::KeypadModifier, QStringLiteral("\r"));
+        QCoreApplication::sendEvent(replyInput, &shiftEnter);
+        QCOMPARE(replyInput->property("text").toString().trimmed(), QStringLiteral("draft"));
+        QCOMPARE(b.threadMessages(QStringLiteral("m-root")).size(), 4);
+        QTRY_COMPARE(threadList->property("count").toInt(), 4);  // nothing sent
+
+        // Opening New Message closes the thread
+        win->setProperty("showNewChatModal", true);
+        QVERIFY(!win->property("showThreadView").toBool());
+        win->setProperty("showNewChatModal", false);
+
+        // Switching conversations closes it too, so a reply can't go to the wrong chat
+        QMetaObject::invokeMethod(win, "openThread", Q_ARG(QVariant, QStringLiteral("m-root")));
+        QVERIFY(win->property("showThreadView").toBool());
+        b.selectChat(otherChat);
+        QVERIFY(!win->property("showThreadView").toBool());
+        QCOMPARE(win->property("threadRootGuid").toString(), QString());
+        const int otherBefore = b.messages().size();
+        replyInput->setProperty("text", QStringLiteral("wrong chat"));
+        QMetaObject::invokeMethod(win, "sendThreadReply");
+        QCOMPARE(b.messages().size(), otherBefore);
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
