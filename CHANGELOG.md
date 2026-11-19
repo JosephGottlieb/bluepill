@@ -14,7 +14,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 - **Cleaner conversation header:** it's a transparent strip with the contact centered. Its buttons moved:
   - **Mute** and **Delete** were already in the chat list's hover actions, and **Read/Unread** joins them.
   - **Sync** is in the top bar, next to the filters.
-  - **Top** and **Bottom** are floating ↑ / ↓ arrows. They appear in the conversation's top-right and bottom-right corners when you've scrolled away from either end.
+  - **Top** and **Bottom** are floating ↑ / ↓ arrows. They're small and faint, in the conversation's top-right and bottom-right corners. They appear when you've scrolled away from either end, and only while the mouse moves or the list scrolls; after 1.5 s idle they fade out.
 - **The message box hugs its text:** one line is as tall as the buttons beside it, and the box grows only once text wraps.
 
 ### Fixed

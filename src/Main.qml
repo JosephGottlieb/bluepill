@@ -2573,6 +2573,36 @@ ApplicationWindow {
                     cacheBuffer: 2000
 
                     property bool stickToBottom: true
+                    // Mouse movement / scrolling over the conversation (shows the scroll arrows)
+                    property bool pointerActive: false
+                    function notePointerActivity() {
+                        pointerActive = true
+                        pointerIdleTimer.restart()
+                    }
+                    property point lastPointerScenePos: Qt.point(-1, -1)
+                    Timer {
+                        id: pointerIdleTimer
+                        interval: 1500
+                        onTriggered: messageListView.pointerActive = false
+                    }
+                    HoverHandler {
+                        id: timelineHover
+                        // Content moving under a still cursor also changes point; only
+                        // count real pointer movement (scene position changed).
+                        onPointChanged: {
+                            const p = point.scenePosition
+                            if (p.x !== messageListView.lastPointerScenePos.x || p.y !== messageListView.lastPointerScenePos.y) {
+                                messageListView.lastPointerScenePos = p
+                                messageListView.notePointerActivity()
+                            }
+                        }
+                    }
+                    WheelHandler {
+                        // Scrolling with the wheel counts as activity (the list still scrolls itself)
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        target: null
+                        onWheel: messageListView.notePointerActivity()
+                    }
                     property bool settlingToBottom: false
                     property int settlePassesRemaining: 0
                     property string lastSelectedChatGuid: ""
@@ -2869,6 +2899,7 @@ ApplicationWindow {
                     }
 
                     onMovementStarted: {
+                        notePointerActivity()
                         root.hoveredActionMessageGuid = ""
                         restoringScrollPosition = false
                         scrollRestoreTimer.stop()
@@ -2984,15 +3015,20 @@ ApplicationWindow {
                         objectName: "scrollToTopArrow"
                         parent: messageListView
                         z: 20
-                        width: 36
-                        height: 36
-                        radius: 18
+                        width: 28
+                        height: 28
+                        radius: 14
                         anchors.right: parent.right
-                        anchors.rightMargin: 16
+                        anchors.rightMargin: 10
                         anchors.top: parent.top
-                        anchors.topMargin: 12
-                        visible: messageListView.count > 0 && (messageListView.contentY > messageListView.originY + messageListView.topMargin + 40)
-                        opacity: scrollToTopArrowMouse.containsMouse ? 1.0 : 0.85
+                        anchors.topMargin: 4
+                        // Only while the mouse moves or the list scrolls; fades out when idle
+                        readonly property bool needed: messageListView.count > 0 && (messageListView.contentY > messageListView.originY + messageListView.topMargin + 40)
+                        readonly property bool shown: needed && (messageListView.pointerActive || scrollToTopArrowMouse.containsMouse)
+                        visible: needed && opacity > 0
+                        enabled: shown
+                        opacity: !shown ? 0 : (scrollToTopArrowMouse.containsMouse ? 0.95 : 0.45)
+                        Behavior on opacity { NumberAnimation { duration: 200 } }
                         color: scrollToTopArrowMouse.containsMouse ? theme.accent : theme.lighterBackground
                         border.width: 1
                         border.color: theme.accent
@@ -3002,7 +3038,7 @@ ApplicationWindow {
                         Text {
                             anchors.centerIn: parent
                             text: "↑"
-                            font.pixelSize: theme.fontSize + 2
+                            font.pixelSize: theme.fontSize - 1
                             font.bold: true
                             color: scrollToTopArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
                         }
@@ -3022,15 +3058,20 @@ ApplicationWindow {
                         objectName: "scrollToBottomArrow"
                         parent: messageListView
                         z: 20
-                        width: 36
-                        height: 36
-                        radius: 18
+                        width: 28
+                        height: 28
+                        radius: 14
                         anchors.right: parent.right
-                        anchors.rightMargin: 16
+                        anchors.rightMargin: 10
                         anchors.bottom: parent.bottom
-                        anchors.bottomMargin: 12
-                        visible: messageListView.count > 0 && (!messageListView.atYEnd && messageListView.contentHeight > messageListView.height)
-                        opacity: scrollToBottomArrowMouse.containsMouse ? 1.0 : 0.85
+                        anchors.bottomMargin: 8
+                        // Only while the mouse moves or the list scrolls; fades out when idle
+                        readonly property bool needed: messageListView.count > 0 && (!messageListView.atYEnd && messageListView.contentHeight > messageListView.height)
+                        readonly property bool shown: needed && (messageListView.pointerActive || scrollToBottomArrowMouse.containsMouse)
+                        visible: needed && opacity > 0
+                        enabled: shown
+                        opacity: !shown ? 0 : (scrollToBottomArrowMouse.containsMouse ? 0.95 : 0.45)
+                        Behavior on opacity { NumberAnimation { duration: 200 } }
                         color: scrollToBottomArrowMouse.containsMouse ? theme.accent : theme.lighterBackground
                         border.width: 1
                         border.color: theme.accent
@@ -3040,7 +3081,7 @@ ApplicationWindow {
                         Text {
                             anchors.centerIn: parent
                             text: "↓"
-                            font.pixelSize: theme.fontSize + 2
+                            font.pixelSize: theme.fontSize - 1
                             font.bold: true
                             color: scrollToBottomArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
                         }
