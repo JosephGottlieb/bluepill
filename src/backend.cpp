@@ -2560,6 +2560,77 @@ void Backend::fetchMissingGroupParticipants() {
     }
 }
 
+QString Backend::normalizeServiceName(const QString &raw) {
+    const QString s = raw.trimmed();
+    if (s.compare(QStringLiteral("iMessage"), Qt::CaseInsensitive) == 0) return QStringLiteral("iMessage");
+    if (s.compare(QStringLiteral("RCS"), Qt::CaseInsensitive) == 0) return QStringLiteral("RCS");
+    if (s.compare(QStringLiteral("SMS"), Qt::CaseInsensitive) == 0 ||
+        s.compare(QStringLiteral("MMS"), Qt::CaseInsensitive) == 0) return QStringLiteral("SMS");
+    return QString();
+}
+
+static QString serviceFromMessageJson(const QJsonObject &m) {
+    QString svc = Backend::normalizeServiceName(m.value(QStringLiteral("service")).toString());
+    if (svc.isEmpty()) {
+        svc = Backend::normalizeServiceName(m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("service")).toString());
+    }
+    return svc;
+}
+
+QString Backend::resolveChatService(const QJsonObject &chat, const QJsonObject &message) {
+    // 1. Legacy GUID prefixes ("iMessage;-;", "SMS;+;", "RCS;-;") are authoritative.
+    const QString guid = chat.value(QStringLiteral("guid")).toString().trimmed();
+    const QString prefix = guid.section(QLatin1Char(';'), 0, 0);
+    if (guid.contains(QLatin1Char(';'))) {
+        const QString fromPrefix = normalizeServiceName(prefix);
+        if (!fromPrefix.isEmpty()) return fromPrefix;
+    }
+    // 2. Explicit chat-level service, if the server sends one.
+    for (const char *key : {"serviceName", "service"}) {
+        const QString svc = normalizeServiceName(chat.value(QLatin1String(key)).toString());
+        if (!svc.isEmpty()) return svc;
+    }
+    // 3. The newest message we know of (most reliable for "any;" chats).
+    QString svc = serviceFromMessageJson(message);
+    if (svc.isEmpty()) svc = serviceFromMessageJson(chat.value(QStringLiteral("lastMessage")).toObject());
+    if (!svc.isEmpty()) return svc;
+    // 4. Participant handles: one SMS member makes the thread SMS/MMS.
+    bool sawIMessage = false, sawRcs = false, sawSms = false;
+    for (const QJsonValue &pv : chat.value(QStringLiteral("participants")).toArray()) {
+        const QString ps = normalizeServiceName(pv.toObject().value(QStringLiteral("service")).toString());
+        if (ps == QStringLiteral("iMessage")) sawIMessage = true;
+        else if (ps == QStringLiteral("RCS")) sawRcs = true;
+        else if (ps == QStringLiteral("SMS")) sawSms = true;
+    }
+    if (sawSms) return QStringLiteral("SMS");
+    if (sawRcs) return QStringLiteral("RCS");
+    if (sawIMessage) return QStringLiteral("iMessage");
+    return QString();
+}
+
+void Backend::refineChatServiceFromMessage(const QString &chatGuid, const QJsonObject &msg) {
+    const QString svc = serviceFromMessageJson(msg);
+    if (svc.isEmpty() || chatGuid.isEmpty()) return;
+    // Tapbacks and other associated messages carry the parent's service; fine to use.
+    const qint64 dc = msg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    if (dc < m_chatServiceDates.value(chatGuid, 0)) return;
+    m_chatServiceDates.insert(chatGuid, dc);
+    for (ChatEntry &entry : m_chats) {
+        if (entry.guid != chatGuid) continue;
+        if (entry.service == svc) return;
+        entry.service = svc;
+        if (!m_chatServiceEmitPending) {
+            m_chatServiceEmitPending = true;
+            QTimer::singleShot(0, this, [this]() {
+                m_chatServiceEmitPending = false;
+                emit chatsChanged();
+                emit selectedChatChanged();
+            });
+        }
+        return;
+    }
+}
+
 void Backend::processChatsMetadata(const QJsonArray &arr) {
     bool chatsAddedOrModified = false;
     bool watermarksChanged = false;
@@ -2637,6 +2708,15 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
         if (existingIdx >= 0) {
             ChatEntry &entry = m_chats[existingIdx];
             if (!handles.isEmpty()) entry.participantHandles = handles;
+            if (!m_chatServiceDates.contains(entry.guid)) {
+                QJsonObject svcChat = c;
+                svcChat.insert(QStringLiteral("guid"), rawGuid);
+                const QString svc = resolveChatService(svcChat);
+                if (!svc.isEmpty() && svc != entry.service) {
+                    entry.service = svc;
+                    chatsAddedOrModified = true;
+                }
+            }
             if (!disp.isEmpty()) entry.displayName = disp;
             if (!origGrpId.isEmpty()) entry.originalGroupId = origGrpId;
             if (!grpId.isEmpty()) entry.groupId = grpId;
@@ -2694,8 +2774,11 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
             if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                 entry.participantHandles.append(entry.chatIdentifier);
             }
-            entry.service = guid.startsWith(QStringLiteral("iMessage")) ? QStringLiteral("iMessage")
-                            : (guid.startsWith(QStringLiteral("RCS")) ? QStringLiteral("RCS") : QStringLiteral("SMS"));
+            {
+                QJsonObject svcChat = c;
+                svcChat.insert(QStringLiteral("guid"), rawGuid);
+                entry.service = resolveChatService(svcChat);
+            }
             entry.lastMessageDate = 1;
             entry.lastMessagePreview = QStringLiteral("Tap to view conversation history");
             entry.relativeTime = QString();
@@ -2941,8 +3024,7 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
                 if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                     entry.participantHandles.append(entry.chatIdentifier);
                 }
-                entry.service = cg.startsWith(QStringLiteral("iMessage")) ? QStringLiteral("iMessage")
-                                : (cg.startsWith(QStringLiteral("RCS")) ? QStringLiteral("RCS") : QStringLiteral("SMS"));
+                entry.service = resolveChatService(QJsonObject{{QStringLiteral("guid"), cg}}, m);
                 entry.lastMessageDate = dateCreated;
                 QString preview = extractMessageText(m);
                 entry.lastMessagePreview = preview.replace(QLatin1Char('\n'), QLatin1Char(' '));
@@ -3956,8 +4038,7 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
             if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                 entry.participantHandles.append(entry.chatIdentifier);
             }
-            entry.service = chatGuid.startsWith(QStringLiteral("iMessage")) ? QStringLiteral("iMessage")
-                            : (chatGuid.startsWith(QStringLiteral("RCS")) ? QStringLiteral("RCS") : QStringLiteral("SMS"));
+            entry.service = resolveChatService(QJsonObject{{QStringLiteral("guid"), chatGuid}}, m);
             entry.lastMessageDate = dateCreated;
             entry.lastMessagePreview = preview.replace(QLatin1Char('\n'), QLatin1Char(' '));
             entry.relativeTime = formatRelativeTime(dateCreated);
@@ -5080,7 +5161,10 @@ QVariantList Backend::buildMessageListFromApi(
             replyToSender = messageSenderByGuid.value(rawReplyGuid);
         }
 
-        QString service = m.value(QStringLiteral("service")).toString();
+        QString service = normalizeServiceName(m.value(QStringLiteral("service")).toString());
+        if (service.isEmpty()) {
+            service = normalizeServiceName(m.value(QStringLiteral("handle")).toObject().value(QStringLiteral("service")).toString());
+        }
         if (service.isEmpty()) {
             if (guid.startsWith(QStringLiteral("iMessage"))) service = QStringLiteral("iMessage");
             else if (guid.startsWith(QStringLiteral("RCS"))) service = QStringLiteral("RCS");
@@ -5222,6 +5306,7 @@ void Backend::cacheMessageForChat(const QString &chatGuid, const QJsonObject &ra
         msg.insert(QStringLiteral("originalChatGuid"), rawOrigChatGuid);
     }
     msg.insert(QStringLiteral("chatGuid"), targetGuid);
+    refineChatServiceFromMessage(targetGuid, msg);
     if (m_deletedMessageGuids.contains(msgGuid) || isMessageDeletedOrRetracted(msg)) {
         if (isMessageDeletedOrRetracted(msg)) {
             m_deletedMessageGuids.insert(msgGuid);

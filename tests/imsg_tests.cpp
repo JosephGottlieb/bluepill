@@ -2974,6 +2974,101 @@ private slots:
         QVERIFY(failItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("⚠ Not Delivered")));
     }
 
+    void testResolveChatServiceForAnyPrefixedGuids() {
+        auto chat = [](const char *guid, QJsonArray parts = {}, QJsonObject last = {}) {
+            QJsonObject c{{QStringLiteral("guid"), QString::fromUtf8(guid)}};
+            if (!parts.isEmpty()) c.insert(QStringLiteral("participants"), parts);
+            if (!last.isEmpty()) c.insert(QStringLiteral("lastMessage"), last);
+            return c;
+        };
+        auto part = [](const char *svc) {
+            return QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550100")}, {QStringLiteral("service"), QString::fromUtf8(svc)}};
+        };
+        // Legacy prefixes win
+        QCOMPARE(Backend::resolveChatService(chat("iMessage;-;+15555550100", {part("SMS")})), QStringLiteral("iMessage"));
+        QCOMPARE(Backend::resolveChatService(chat("SMS;-;+15555550100")), QStringLiteral("SMS"));
+        QCOMPARE(Backend::resolveChatService(chat("RCS;+;chat123")), QStringLiteral("RCS"));
+        // macOS 26 "any;" GUIDs: message service, then participants
+        QCOMPARE(Backend::resolveChatService(chat("any;-;+15555550100", {part("iMessage")})), QStringLiteral("iMessage"));
+        QCOMPARE(Backend::resolveChatService(chat("any;-;+15555550100", {part("SMS")},
+                                                  QJsonObject{{QStringLiteral("service"), QStringLiteral("iMessage")}})),
+                 QStringLiteral("iMessage"));
+        QCOMPARE(Backend::resolveChatService(chat("any;-;+15555550100", {part("SMS")}),
+                                             QJsonObject{{QStringLiteral("handle"), QJsonObject{{QStringLiteral("service"), QStringLiteral("RCS")}}}}),
+                 QStringLiteral("RCS"));
+        QCOMPARE(Backend::resolveChatService(chat("any;+;chat9", {part("iMessage"), part("SMS")})), QStringLiteral("SMS"));
+        // Explicit chat-level service field
+        QJsonObject withField = chat("any;-;+15555550100");
+        withField.insert(QStringLiteral("serviceName"), QStringLiteral("iMessage"));
+        QCOMPARE(Backend::resolveChatService(withField), QStringLiteral("iMessage"));
+        // Nothing known -> unknown, not "SMS"
+        QCOMPARE(Backend::resolveChatService(chat("any;-;+15555550100")), QString());
+        QCOMPARE(Backend::normalizeServiceName(QStringLiteral("imessage")), QStringLiteral("iMessage"));
+        QCOMPARE(Backend::normalizeServiceName(QStringLiteral("MMS")), QStringLiteral("SMS"));
+    }
+
+    void testAnyPrefixedChatServiceInChatListAndRefinedByMessages() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_svc.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("cfg_svc.json")));
+
+        const QString imGuid = QStringLiteral("any;-;+15555550100");
+        const QString unkGuid = QStringLiteral("any;-;user@example.com");
+        b.ingestChatsMetadataForTest(QJsonArray{
+            QJsonObject{{QStringLiteral("guid"), imGuid}, {QStringLiteral("style"), 45},
+                        {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550100")},
+                        {QStringLiteral("lastMessageDate"), 1794270000000LL},
+                        {QStringLiteral("participants"), QJsonArray{QJsonObject{
+                            {QStringLiteral("address"), QStringLiteral("+15555550100")},
+                            {QStringLiteral("service"), QStringLiteral("iMessage")}}}}},
+            QJsonObject{{QStringLiteral("guid"), unkGuid}, {QStringLiteral("style"), 45},
+                        {QStringLiteral("chatIdentifier"), QStringLiteral("user@example.com")},
+                        {QStringLiteral("lastMessageDate"), 1794270000000LL}}
+        });
+        auto serviceOf = [&b](const QString &guid) {
+            for (const QVariant &v : b.chats()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("guid")).toString() == guid) return m.value(QStringLiteral("service")).toString();
+            }
+            return QStringLiteral("<missing>");
+        };
+        QCOMPARE(serviceOf(imGuid), QStringLiteral("iMessage"));
+        QCOMPARE(serviceOf(unkGuid), QString());
+
+        // A newer message on the unknown chat tells us it's iMessage
+        const QJsonObject chatRef{{QStringLiteral("guid"), unkGuid}};
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{
+            {QStringLiteral("guid"), QStringLiteral("MSG-SVC-1")},
+            {QStringLiteral("text"), QStringLiteral("hi")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("service"), QStringLiteral("iMessage")},
+            {QStringLiteral("dateCreated"), 1794270005000LL},
+            {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("user@example.com")}}},
+            {QStringLiteral("chats"), QJsonArray{chatRef}}}}, true);
+        QCOMPARE(serviceOf(unkGuid), QStringLiteral("iMessage"));
+
+        // An older SMS message must not override the newer iMessage one
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{
+            {QStringLiteral("guid"), QStringLiteral("MSG-SVC-0")},
+            {QStringLiteral("text"), QStringLiteral("old")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("service"), QStringLiteral("SMS")},
+            {QStringLiteral("dateCreated"), 1794260000000LL},
+            {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("user@example.com")}}},
+            {QStringLiteral("chats"), QJsonArray{chatRef}}}}, false);
+        QCOMPARE(serviceOf(unkGuid), QStringLiteral("iMessage"));
+
+        // Re-sent chat metadata (participants say SMS) must not undo the message-derived answer
+        b.ingestChatsMetadataForTest(QJsonArray{QJsonObject{
+            {QStringLiteral("guid"), unkGuid}, {QStringLiteral("style"), 45},
+            {QStringLiteral("participants"), QJsonArray{QJsonObject{
+                {QStringLiteral("address"), QStringLiteral("user@example.com")},
+                {QStringLiteral("service"), QStringLiteral("SMS")}}}}}});
+        QCOMPARE(serviceOf(unkGuid), QStringLiteral("iMessage"));
+    }
+
     void testBluePillSshUrlAndConfigMigration() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
