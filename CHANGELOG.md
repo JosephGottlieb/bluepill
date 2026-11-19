@@ -5,7 +5,13 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Added
-- **Edit Contact shows the whole Mac contact:** the dialog now fills the name, phone and email from the contact on the Mac, instead of splitting the chat title. Click the contact's name in the conversation header to open it; the separate **Edit Contact** button is gone.
+- **Edit Contact shows the whole Mac contact:** the dialog now fills the name, phone and email from the contact on the Mac, instead of splitting the chat title. The separate **Edit Contact** button is gone.
+- **Contact / conversation info:** clicking the name in the conversation header opens a read-only card over the conversation.
+  - **Details:** everything the Mac has for the contact, with **✎ Edit**, or **＋ Add Contact** for an unknown number.
+  - **Photos:** a grid that opens the photo viewer.
+  - **Links:** each shared link, opened in your browser.
+  - **Files:** other attachments, opened from there.
+  - **Group chats** get the same tabs, and Esc closes the card.
 - **Contact photos instead of initials:** `bluepill-server` serves each contact's AddressBook photo at `/api/v1/contact/<id>/avatar`. That handles the photo stored inline, with or without the leading marker byte, and the newer `Images/` file reference. The client downloads photos only for people you have chats with, 4 at a time, caches them for a day, and shows them as circles in the chat list, the pinned row and the conversation header. Under **On your Mac** it lists every other populated field: middle name, nickname, company, job title, department, all phones and emails with their labels, addresses, URLs, birthday and note. `bluepill-server` now returns these fields from the AddressBook (labels, `middleName`, `jobTitle`, `department`, `addresses`, `urls`, `note`, `birthday`), reading only the columns that exist on that macOS version.
 
 ### Fixed

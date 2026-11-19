@@ -299,6 +299,8 @@ public:
     // A Mac contact's fields for Edit Contact: firstName, lastName, phone, email, and
     // rows ({label, value}) for every populated field. found=false when unknown.
     Q_INVOKABLE QVariantMap contactDetails(const QString &address) const;
+    // Photos, links and files shared in a conversation (newest first): {photos, links, files}
+    Q_INVOKABLE QVariantMap conversationMedia(const QString &chatGuid) const;
     Q_INVOKABLE void loadOlderMessages();
 
     // Emoji shortcode & picker helpers

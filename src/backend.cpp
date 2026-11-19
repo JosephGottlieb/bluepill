@@ -5384,6 +5384,59 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
     }
 }
 
+QVariantMap Backend::conversationMedia(const QString &chatGuid) const {
+    // Photos, links and files shared in a conversation (newest first), for the
+    // contact info view's tabs. Uses the merged canonical chat and its siblings.
+    const QString canon = resolveCanonicalChatGuid(chatGuid.isEmpty() ? m_selectedChatGuid : chatGuid);
+    QList<QJsonObject> msgs;
+    for (auto it = m_chatMessagesCache.constBegin(); it != m_chatMessagesCache.constEnd(); ++it) {
+        if (it.key() == canon || isSameConversation(it.key(), canon)) {
+            for (const QJsonObject &m : it.value()) msgs.append(m);
+        }
+    }
+    std::sort(msgs.begin(), msgs.end(), [](const QJsonObject &a, const QJsonObject &b) {
+        return a.value(QStringLiteral("dateCreated")).toVariant().toLongLong() >
+               b.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+    });
+    QVariantList photos, links, files;
+    QSet<QString> seenLinks, seenAtts;
+    for (const QJsonObject &m : msgs) {
+        const QString guid = m.value(QStringLiteral("guid")).toString();
+        if (m_deletedMessageGuids.contains(guid) || isMessageDeletedOrRetracted(m)) continue;
+        const qint64 date = m.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        const bool fromMe = m.value(QStringLiteral("isFromMe")).toBool();
+        // Tapbacks carry no media of their own
+        if (!normalizeAssociatedGuid(m.value(QStringLiteral("associatedMessageGuid")).toString()).isEmpty()) continue;
+        for (const QJsonValue &av : m.value(QStringLiteral("attachments")).toArray()) {
+            const QJsonObject a = av.toObject();
+            const QString ag = a.value(QStringLiteral("guid")).toString();
+            if (ag.isEmpty() || seenAtts.contains(ag) || a.value(QStringLiteral("hideAttachment")).toBool()) continue;
+            seenAtts.insert(ag);
+            const QString name = a.value(QStringLiteral("transferName")).toString();
+            const QString mime = a.value(QStringLiteral("mimeType")).toString();
+            const QString path = lookupCachedAttachmentPath(m_attachmentPaths, ag);
+            QVariantMap item{{QStringLiteral("guid"), ag}, {QStringLiteral("messageGuid"), guid},
+                             {QStringLiteral("name"), name}, {QStringLiteral("mimeType"), mime},
+                             {QStringLiteral("date"), date}, {QStringLiteral("fromMe"), fromMe},
+                             {QStringLiteral("localUrl"), (!path.isEmpty() && QFileInfo::exists(path)) ? QUrl::fromLocalFile(path).toString() : QString()}};
+            if (isImageMimeOrExt(mime, name)) photos.append(item);
+            else if (!mime.startsWith(QStringLiteral("audio/")) || name.isEmpty() || !name.endsWith(QStringLiteral(".caf"), Qt::CaseInsensitive)) files.append(item);
+        }
+        auto urlIt = sharedMessageUrlRegex().globalMatch(extractMessageText(m));
+        while (urlIt.hasNext()) {
+            const QString url = normalizeExtractedHrefUrl(urlIt.next().captured(0));
+            if (url.isEmpty() || seenLinks.contains(url)) continue;
+            seenLinks.insert(url);
+            const QVariantMap preview = m_linkPreviewCache.value(url);
+            links.append(QVariantMap{{QStringLiteral("url"), url}, {QStringLiteral("messageGuid"), guid},
+                                     {QStringLiteral("title"), preview.value(QStringLiteral("title")).toString()},
+                                     {QStringLiteral("host"), QUrl(url).host()},
+                                     {QStringLiteral("date"), date}, {QStringLiteral("fromMe"), fromMe}});
+        }
+    }
+    return QVariantMap{{QStringLiteral("photos"), photos}, {QStringLiteral("links"), links}, {QStringLiteral("files"), files}};
+}
+
 QVariantMap Backend::contactDetails(const QString &address) const {
     QVariantMap out;
     const QVariantMap rec = m_contactRecords.value(normalizeHandle(address));

@@ -2412,6 +2412,69 @@ private slots:
         QCOMPARE(qml.count(QStringLiteral("root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)")), 1);
     }
 
+    void testContactInfoTabsListPhotosLinksAndFiles() {
+        Backend b(false);
+        QTemporaryDir tempDir;
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_info.json")));
+        b.parseContactsJson(QByteArray(R"([{"id": "uid-1", "firstName": "Alex", "lastName": "Rivera",
+            "phoneNumbers": [{"address": "+15555550100", "label": "Mobile"}], "note": "Met at the conference"}])"));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550100")}, {QStringLiteral("style"), 45}};
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 600000;
+        auto att = [](const char *guid, const char *name, const char *mime) {
+            return QJsonObject{{"guid", QString::fromLatin1(guid)}, {"transferName", QString::fromLatin1(name)}, {"mimeType", QString::fromLatin1(mime)}};
+        };
+        b.ingestMessagesForTest(QJsonArray{
+            QJsonObject{{"guid", "i-1"}, {"text", "look https://example.com/a and https://example.org/b"}, {"isFromMe", false},
+                        {"dateCreated", t}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-2"}, {"text", ""}, {"isFromMe", true}, {"dateCreated", t + 1000},
+                        {"attachments", QJsonArray{att("a-photo-0001", "beach.jpg", "image/jpeg")}}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-3"}, {"text", "the doc"}, {"isFromMe", false}, {"dateCreated", t + 2000},
+                        {"attachments", QJsonArray{att("a-file-0001", "plan.pdf", "application/pdf")}}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-4"}, {"text", "again https://example.com/a"}, {"isFromMe", true}, {"dateCreated", t + 3000},
+                        {"chats", QJsonArray{chatObj}}}}, true);
+        b.selectChat(chatGuid);
+
+        const QVariantMap media = b.conversationMedia(chatGuid);
+        QCOMPARE(media.value(QStringLiteral("photos")).toList().size(), 1);
+        QCOMPARE(media.value(QStringLiteral("files")).toList().size(), 1);
+        QCOMPARE(media.value(QStringLiteral("files")).toList().first().toMap().value(QStringLiteral("name")).toString(), QStringLiteral("plan.pdf"));
+        const QVariantList links = media.value(QStringLiteral("links")).toList();
+        QCOMPARE(links.size(), 2);  // duplicates collapse; newest first
+        QCOMPARE(links.first().toMap().value(QStringLiteral("url")).toString(), QStringLiteral("https://example.com/a"));
+
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        win->resize(1200, 800);
+
+        // Clicking the name opens read-only Details first, with an Edit button
+        QMetaObject::invokeMethod(win, "openContactInfo", Q_ARG(QVariant, 0));
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoTab").toInt(), 0);
+        QVERIFY(!win->property("showContactModal").toBool());
+        QObject *detailRows = win->findChild<QObject *>(QStringLiteral("contactInfoDetailRows"));
+        QVERIFY(detailRows);
+        QTRY_VERIFY(detailRows->property("count").toInt() >= 2);  // phone + note
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("contactInfoEditBtn"))->property("visible").toBool());
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoPhotos"))->property("count").toInt(), 1);
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoLinks"))->property("count").toInt(), 2);
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoFiles"))->property("count").toInt(), 1);
+
+        // The card sits over the conversation, not the sidebar
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("contactInfoCard"));
+        auto *sidebar = win->findChild<QQuickItem *>(QStringLiteral("leftSidebarPane"));
+        QVERIFY(card && sidebar);
+        QVERIFY(!card->mapRectToScene(QRectF(0, 0, card->width(), card->height()))
+                     .intersects(sidebar->mapRectToScene(QRectF(0, 0, sidebar->width(), sidebar->height()))));
+    }
+
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
         Backend backend(false);
         backend.loadDemoData();
