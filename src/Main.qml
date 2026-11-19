@@ -1262,7 +1262,8 @@ ApplicationWindow {
                 anchors.rightMargin: 16
                 spacing: root.isNarrowWindow ? 8 : 12
 
-                // App badge (Clickable Home Page Button) + Connection indicator
+                // App badge + connection dot. The relay status ("Connected v1.2.1 ·
+                // macOS …") shows only while hovering the dot.
                 RowLayout {
                     spacing: 8
                     Rectangle {
@@ -1271,21 +1272,9 @@ ApplicationWindow {
                         height: 30
                         radius: 7
                         implicitWidth: homeBrandRow.implicitWidth + 16
-                        color: !backend.connected
-                                   ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14)
-                                   : (backend.selectedChatGuid.length === 0
-                                          ? theme.selection
-                                          : (homeBrandMouse.containsMouse ? theme.lighterBackground : "transparent"))
-                        border.width: (!backend.connected || backend.selectedChatGuid.length === 0 || homeBrandMouse.containsMouse) ? 1 : 0
-                        border.color: !backend.connected
-                                          ? theme.red
-                                          : (backend.selectedChatGuid.length === 0 ? theme.accent : theme.muted)
-
-                        ToolTip.visible: homeBrandMouse.containsMouse
-                        ToolTip.text: backend.connected
-                                          ? i18n.tr("BluePill Home Dashboard — Connected (Ctrl+H)")
-                                          : i18n.tr("BluePill Home Dashboard — Disconnected (Ctrl+H)")
-                        ToolTip.delay: 350
+                        color: !backend.connected ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14) : "transparent"
+                        border.width: !backend.connected ? 1 : 0
+                        border.color: theme.red
 
                         RowLayout {
                             id: homeBrandRow
@@ -1300,6 +1289,19 @@ ApplicationWindow {
                                 color: backend.connected ? theme.green : theme.red
                                 border.width: 1
                                 border.color: backend.connected ? Qt.lighter(theme.green, 1.3) : Qt.lighter(theme.red, 1.3)
+                                readonly property string statusText: backend.serverStatus
+                                                                     + (backend.syncingHistory ? " · " + i18n.tr("Syncing history…") : "")
+                                ToolTip.visible: statusDotMouse.containsMouse
+                                ToolTip.text: statusText
+                                ToolTip.delay: 150
+                                MouseArea {
+                                    id: statusDotMouse
+                                    objectName: "statusDotMouse"
+                                    anchors.centerIn: parent
+                                    width: 24
+                                    height: 24
+                                    hoverEnabled: true
+                                }
                             }
                             Image {
                                 width: 20
@@ -1313,89 +1315,8 @@ ApplicationWindow {
                                 text: "BluePill"
                                 font.pixelSize: theme.fontSize + 2
                                 font.bold: true
-                                color: !backend.connected
-                                           ? theme.red
-                                           : (backend.selectedChatGuid.length === 0 ? theme.accent : theme.brightForeground)
+                                color: !backend.connected ? theme.red : theme.brightForeground
                             }
-                            Text {
-                                visible: backend.selectedChatGuid.length > 0
-                                text: "⌂"
-                                font.pixelSize: theme.fontSize
-                                color: homeBrandMouse.containsMouse ? theme.accent : theme.darkForeground
-                            }
-                        }
-                        MouseArea {
-                            id: homeBrandMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.clearActionMenu()
-                                root.showShortcutsModal = false
-                                root.showContactModal = false
-                                root.showNewChatModal = false
-                                root.showEmojiPicker = false
-                                backend.clearSelectedChat()
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: topStatusPill
-                        objectName: "topStatusPill"
-                        visible: root.width >= 900
-                        height: 22
-                        radius: 6
-                        color: backend.connected ? theme.lighterBackground : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
-                        border.width: backend.connected ? 0 : 1
-                        border.color: backend.connected ? "transparent" : theme.red
-                        implicitWidth: statusLabel.implicitWidth + 16
-                        Text {
-                            id: statusLabel
-                            objectName: "statusLabel"
-                            anchors.centerIn: parent
-                            text: root.width < 1160
-                                      ? (backend.connected ? i18n.tr("Connected") : i18n.tr("Disconnected"))
-                                      : backend.serverStatus
-                            font.pixelSize: theme.fontSize - 3
-                            font.bold: !backend.connected
-                            color: backend.connected ? theme.foreground : theme.red
-                        }
-                    }
-                    // History Sync Window Setting Pill
-                    Rectangle {
-                        height: 24
-                        radius: 6
-                        implicitWidth: historyPillRow.implicitWidth + 14
-                        color: historyPillMouse.containsMouse ? theme.selection : theme.lighterBackground
-                        border.width: 1
-                        border.color: backend.syncingHistory ? theme.accent : (historyPillMouse.containsMouse ? theme.accent : theme.muted)
-
-                        ToolTip.visible: historyPillMouse.containsMouse
-                        ToolTip.text: i18n.tr("History sync window: ") + backend.historySyncDays + i18n.tr(" days (Click to cycle 7d/14d/30d/60d/90d/180d/365d)")
-                        ToolTip.delay: 350
-
-                        RowLayout {
-                            id: historyPillRow
-                            anchors.centerIn: parent
-                            spacing: 4
-                            Text {
-                                text: backend.syncingHistory ? "↻" : "🕒"
-                                font.pixelSize: theme.fontSize - 3
-                                color: backend.syncingHistory ? theme.accent : theme.foreground
-                            }
-                            Text {
-                                text: backend.historySyncDays + "d"
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: true
-                                color: historyPillMouse.containsMouse || backend.syncingHistory ? theme.accent : theme.foreground
-                            }
-                        }
-                        MouseArea {
-                            id: historyPillMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: backend.cycleHistorySyncDays()
                         }
                     }
                 }
@@ -1407,7 +1328,7 @@ ApplicationWindow {
                     spacing: root.isNarrowWindow ? 4 : 6
                     Repeater {
                         model: [
-                            { key: "all", label: i18n.tr("All") },
+                            { key: "all", label: i18n.tr("All") + (backend.totalChatCount > 0 ? " (" + backend.totalChatCount + ")" : "") },
                             { key: "unread", label: i18n.tr("Unread") + (backend.totalUnread > 0 ? " (" + backend.totalUnread + ")" : "") },
                             { key: "direct", label: i18n.tr("Direct") },
                             { key: "groups", label: i18n.tr("Groups") },
@@ -1998,6 +1919,40 @@ ApplicationWindow {
                             policy: ScrollBar.AsNeeded
                         }
 
+                        // With the Unread filter on, offer "Mark all read" (was a Home page button)
+                        header: Item {
+                            width: chatListView.width
+                            height: markAllReadRow.visible ? 38 : 0
+                            Rectangle {
+                                id: markAllReadRow
+                                objectName: "markAllReadRow"
+                                visible: backend.filterMode === "unread" && backend.totalUnread > 0
+                                anchors.fill: parent
+                                anchors.margins: 4
+                                radius: 6
+                                color: markAllReadMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                border.width: 1
+                                border.color: markAllReadMouse.containsMouse ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✓ " + i18n.tr("Mark all read") + "  ·  Ctrl+Shift+A"
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                MouseArea {
+                                    id: markAllReadMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        backend.markAllChatsRead()
+                                        root.showToast("✓ " + i18n.tr("Marked all chats as read in iMessage"))
+                                    }
+                                }
+                            }
+                        }
+
                         delegate: Rectangle {
                             required property var modelData
                             width: chatListView.width - 12
@@ -2324,580 +2279,33 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 spacing: 0
 
-                // iMessage Home Page Dashboard (shown when no conversation is selected)
+                // Shown when no conversation is open. Everything the old Home page
+                // offered lives in the top bar, the chat list, or Settings.
                 Rectangle {
                     id: homePagePane
+                    objectName: "noConversationPane"
                     visible: backend.selectedChatGuid.length === 0
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     color: theme.background
 
-                    Flickable {
-                        anchors.fill: parent
-                        contentWidth: width
-                        contentHeight: homeDashboardCol.implicitHeight + 56
-                        clip: true
-                        boundsBehavior: Flickable.StopAtBounds
-
-                        ColumnLayout {
-                            id: homeDashboardCol
-                            objectName: "homeDashboardCol"
-                            width: Math.min(parent.width - 48, 960)
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: 28
-                            spacing: 22
-
-                            // Home Hero Banner
-                            Rectangle {
-                                id: homeHeroBanner
-                                objectName: "homeHeroBanner"
-                                Layout.fillWidth: true
-                                readonly property bool compactHeroActions: homeHeroBanner.width > 0 && homeHeroBanner.width < 680
-                                implicitHeight: heroCol.implicitHeight + 36
-                                Layout.preferredHeight: implicitHeight
-                                radius: 12
-                                color: theme.darkBackground
-                                border.width: 1
-                                border.color: theme.lighterBackground
-                                clip: true
-
-                                ColumnLayout {
-                                    id: heroCol
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.margins: 18
-                                    spacing: 14
-
-                                    RowLayout {
-                                        id: heroTopRow
-                                        Layout.fillWidth: true
-                                        spacing: 12
-
-                                        Rectangle {
-                                            Layout.preferredWidth: 48
-                                            Layout.preferredHeight: 48
-                                            width: 48
-                                            height: 48
-                                            radius: 12
-                                            color: theme.selection
-                                            border.width: 1
-                                            border.color: theme.accent
-                                            Image {
-                                                anchors.fill: parent
-                                                anchors.margins: 3
-                                                source: "qrc:/bluepill.svg"
-                                                sourceSize.width: 96
-                                                sourceSize.height: 96
-                                                fillMode: Image.PreserveAspectFit
-                                            }
-                                        }
-
-                                        ColumnLayout {
-                                            id: heroTitleCol
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 180
-                                            clip: true
-                                            spacing: 3
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 8
-                                                Text {
-                                                    id: homeTitleTxt
-                                                    text: i18n.tr("BluePill Home")
-                                                    font.pixelSize: theme.fontSize + 6
-                                                    font.bold: true
-                                                    color: theme.brightForeground
-                                                }
-                                                Rectangle {
-                                                    height: 22
-                                                    implicitHeight: 22
-                                                    Layout.preferredHeight: 22
-                                                    radius: 6
-                                                    implicitWidth: homeStatusTxt.implicitWidth + 14
-                                                    Layout.preferredWidth: implicitWidth
-                                                    Layout.minimumWidth: 60
-                                                    Layout.maximumWidth: homeStatusTxt.implicitWidth + 14
-                                                    Layout.fillWidth: true
-                                                    clip: true
-                                                    color: backend.connected ? Qt.rgba(48/255, 209/255, 88/255, 0.16) : Qt.rgba(255/255, 69/255, 58/255, 0.18)
-                                                    border.width: 1
-                                                    border.color: backend.connected ? theme.green : theme.red
-                                                    Text {
-                                                        id: homeStatusTxt
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                        anchors.left: parent.left
-                                                        anchors.right: parent.right
-                                                        anchors.leftMargin: 7
-                                                        anchors.rightMargin: 7
-                                                        horizontalAlignment: Text.AlignHCenter
-                                                        elide: Text.ElideRight
-                                                        text: backend.serverStatus
-                                                        font.pixelSize: theme.fontSize - 3
-                                                        font.bold: true
-                                                        color: backend.connected ? theme.green : theme.red
-                                                    }
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                            }
-                                            Text {
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
-                                                text: backend.serverUrl.length > 0
-                                                          ? (i18n.tr("Relay: ") + backend.serverUrl + " · " + i18n.tr("Instant local cache + Private API sync"))
-                                                          : i18n.tr("BluePill & BlueBubbles macOS Relay")
-                                                font.pixelSize: theme.fontSize - 2
-                                                color: theme.darkForeground
-                                            }
-                                        }
-
-                                        // Quick Actions in Hero Header
-                                        RowLayout {
-                                            Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                            spacing: 8
-
-                                            Rectangle {
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeNewMsgLbl.implicitWidth + 22
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.accent
-                                                Text {
-                                                    id: homeNewMsgLbl
-                                                    anchors.centerIn: parent
-                                                    text: "+ " + (homeHeroBanner.compactHeroActions ? i18n.tr("New") : i18n.tr("New Message"))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: theme.darkerBackground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        root.showNewChatModal = true
-                                                        newChatRecipient.forceActiveFocus()
-                                                    }
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                id: homeWebUiBtn
-                                                objectName: "homeWebUiBtn"
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeWebUiLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.lighterBackground
-                                                border.width: 1
-                                                border.color: theme.accent
-                                                Text {
-                                                    id: homeWebUiLbl
-                                                    anchors.centerIn: parent
-                                                    text: "🌐 " + (homeHeroBanner.compactHeroActions ? i18n.tr("Web") : i18n.tr("Web UI"))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: theme.brightForeground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: backend.openWebUi()
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                visible: backend.totalUnread > 0
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeMarkAllLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.selection
-                                                border.width: 1
-                                                border.color: theme.accent
-                                                Text {
-                                                    id: homeMarkAllLbl
-                                                    anchors.centerIn: parent
-                                                    text: "✓ " + (homeHeroBanner.compactHeroActions ? i18n.tr("Read") : i18n.tr("Mark All Read"))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: theme.accent
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        backend.markAllChatsRead()
-                                                        root.showToast("✓ " + i18n.tr("Marked all chats as read in iMessage"))
-                                                    }
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeSyncLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.lighterBackground
-                                                border.width: 1
-                                                border.color: theme.muted
-                                                Text {
-                                                    id: homeSyncLbl
-                                                    anchors.centerIn: parent
-                                                    text: backend.syncingHistory ? ("↻ " + i18n.tr("Syncing...")) : ("↻ " + (homeHeroBanner.compactHeroActions ? i18n.tr("Sync") : i18n.tr("Sync Now")))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    color: theme.foreground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: backend.refreshAll()
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                id: homeServerConfigBtn
-                                                objectName: "homeServerConfigBtn"
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeServerLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: backend.needsSetup ? theme.selection : theme.lighterBackground
-                                                border.width: 1
-                                                border.color: backend.needsSetup ? theme.accent : theme.muted
-                                                Text {
-                                                    id: homeServerLbl
-                                                    objectName: "homeServerLbl"
-                                                    anchors.centerIn: parent
-                                                    text: "⚙ " + i18n.tr("Settings")
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: backend.needsSetup
-                                                    color: backend.needsSetup ? theme.accent : theme.foreground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.openServerConfigModal()
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // 3 Summary Metric Cards Row
-                                    RowLayout {
-                                        id: homeSummaryRow
-                                        objectName: "homeSummaryRow"
-                                        Layout.fillWidth: true
-                                        spacing: 12
-
-                                        Rectangle {
-                                            id: homeConversationsCard
-                                            objectName: "homeConversationsCard"
-                                            Layout.fillWidth: true
-                                            Layout.preferredWidth: 160
-                                            Layout.minimumWidth: 90
-                                            implicitHeight: 72
-                                            Layout.preferredHeight: 72
-                                            height: 72
-                                            radius: 9
-                                            color: theme.background
-                                            border.width: 1
-                                            border.color: theme.lighterBackground
-                                            clip: true
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 12
-                                                spacing: 2
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                    text: i18n.tr("CONVERSATIONS")
-                                                    font.pixelSize: theme.fontSize - 4
-                                                    font.bold: true
-                                                    color: theme.darkForeground
-                                                }
-                                                Text {
-                                                    text: String(backend.chats.length)
-                                                    font.pixelSize: theme.fontSize + 5
-                                                    font.bold: true
-                                                    color: theme.brightForeground
-                                                }
-                                            }
-                                        }
-
-                                        Rectangle {
-                                            id: homeUnreadCard
-                                            objectName: "homeUnreadCard"
-                                            Layout.fillWidth: true
-                                            Layout.preferredWidth: 160
-                                            Layout.minimumWidth: 90
-                                            implicitHeight: 72
-                                            Layout.preferredHeight: 72
-                                            height: 72
-                                            radius: 9
-                                            color: theme.background
-                                            border.width: 1
-                                            border.color: backend.totalUnread > 0 ? theme.accent : theme.lighterBackground
-                                            clip: true
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 12
-                                                spacing: 2
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                    text: i18n.tr("UNREAD MESSAGES")
-                                                    font.pixelSize: theme.fontSize - 4
-                                                    font.bold: true
-                                                    color: backend.totalUnread > 0 ? theme.accent : theme.darkForeground
-                                                }
-                                                Text {
-                                                    text: String(backend.totalUnread)
-                                                    font.pixelSize: theme.fontSize + 5
-                                                    font.bold: true
-                                                    color: backend.totalUnread > 0 ? theme.accent : theme.brightForeground
-                                                }
-                                            }
-                                        }
-
-                                        // Configurable History Sync Window Setting Card
-                                        Rectangle {
-                                            id: homeSyncWindowCard
-                                            objectName: "homeSyncWindowCard"
-                                            Layout.fillWidth: true
-                                            Layout.preferredWidth: 320
-                                            Layout.minimumWidth: 210
-                                            implicitHeight: 72
-                                            Layout.preferredHeight: 72
-                                            height: 72
-                                            radius: 9
-                                            color: theme.background
-                                            border.width: 1
-                                            border.color: backend.syncingHistory ? theme.accent : theme.lighterBackground
-                                            clip: true
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 10
-                                                spacing: 6
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    Text {
-                                                        Layout.fillWidth: true
-                                                        elide: Text.ElideRight
-                                                        text: i18n.tr("MESSAGE HISTORY SYNC WINDOW")
-                                                        font.pixelSize: theme.fontSize - 4
-                                                        font.bold: true
-                                                        color: theme.darkForeground
-                                                    }
-                                                    Text {
-                                                        visible: backend.syncingHistory
-                                                        text: i18n.tr("Syncing...")
-                                                        font.pixelSize: theme.fontSize - 4
-                                                        color: theme.accent
-                                                    }
-                                                }
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 4
-                                                    Repeater {
-                                                        model: [7, 14, 30, 60, 90, 180, 365]
-                                                        delegate: Rectangle {
-                                                            required property int modelData
-                                                            Layout.fillWidth: true
-                                                            Layout.minimumWidth: presetDayTxt.implicitWidth + 8
-                                                            Layout.preferredWidth: presetDayTxt.implicitWidth + 10
-                                                            Layout.preferredHeight: 24
-                                                            implicitHeight: 24
-                                                            height: 24
-                                                            radius: 5
-                                                            implicitWidth: presetDayTxt.implicitWidth + 10
-                                                            color: backend.historySyncDays === modelData ? theme.accent : theme.lighterBackground
-                                                            border.width: 1
-                                                            border.color: backend.historySyncDays === modelData ? theme.accent : theme.muted
-                                                            Text {
-                                                                id: presetDayTxt
-                                                                anchors.centerIn: parent
-                                                                text: modelData + "d"
-                                                                font.pixelSize: theme.fontSize - 3
-                                                                font.bold: backend.historySyncDays === modelData
-                                                                color: backend.historySyncDays === modelData ? theme.darkerBackground : theme.foreground
-                                                            }
-                                                            MouseArea {
-                                                                anchors.fill: parent
-                                                                cursorShape: Qt.PointingHandCursor
-                                                                onClicked: backend.setHistorySyncDays(modelData)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Recent Conversations Grid/List on Home Page
-                            ColumnLayout {
-                                id: homeRecentConversationsCol
-                                objectName: "homeRecentConversationsCol"
-                                Layout.fillWidth: true
-                                spacing: 10
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Text {
-                                        text: backend.filterMode === "unread"
-                                                  ? i18n.tr("Unread Conversations")
-                                                  : i18n.tr("Recent Conversations")
-                                        font.pixelSize: theme.fontSize + 1
-                                        font.bold: true
-                                        color: theme.brightForeground
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    Text {
-                                        text: i18n.tr("Click any conversation to open · Right-click to toggle read/unread")
-                                        font.pixelSize: theme.fontSize - 3
-                                        color: theme.darkForeground
-                                        elide: Text.ElideRight
-                                    }
-                                }
-
-                                Repeater {
-                                    model: backend.chats.slice(0, 12)
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        Layout.fillWidth: true
-                                        implicitHeight: 62
-                                        Layout.preferredHeight: 62
-                                        height: 62
-                                        radius: 10
-                                        color: homeCardMouse.containsMouse ? theme.lighterBackground : theme.darkBackground
-                                        border.width: 1
-                                        border.color: modelData.unreadCount > 0 ? theme.accent : theme.lighterBackground
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 14
-                                            anchors.rightMargin: 14
-                                            spacing: 12
-
-                                            Rectangle {
-                                                Layout.preferredWidth: 40
-                                                Layout.preferredHeight: 40
-                                                width: 40
-                                                height: 40
-                                                radius: 20
-                                                color: modelData.avatarColor || theme.accent
-                                                Text {
-                                                    anchors.centerIn: parent
-                                                    text: modelData.initials || "?"
-                                                    font.pixelSize: theme.fontSize - 1
-                                                    font.bold: true
-                                                    color: "#ffffff"
-                                                }
-                                            }
-
-                                            ColumnLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 3
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 8
-                                                    Text {
-                                                        text: modelData.title
-                                                        font.pixelSize: theme.fontSize
-                                                        font.bold: true
-                                                        color: theme.brightForeground
-                                                        elide: Text.ElideRight
-                                                    }
-                                                    Rectangle {
-                                                        visible: modelData.unreadCount > 0
-                                                        height: 18
-                                                        radius: 9
-                                                        implicitWidth: Math.max(18, homeUnreadCountTxt.implicitWidth + 10)
-                                                        color: theme.accent
-                                                        Text {
-                                                            id: homeUnreadCountTxt
-                                                            anchors.centerIn: parent
-                                                            text: String(modelData.unreadCount)
-                                                            font.pixelSize: theme.fontSize - 4
-                                                            font.bold: true
-                                                            color: theme.darkerBackground
-                                                        }
-                                                    }
-                                                    Item { Layout.fillWidth: true }
-                                                    Text {
-                                                        text: modelData.relativeTime
-                                                        font.pixelSize: theme.fontSize - 3
-                                                        color: modelData.unreadCount > 0 ? theme.accent : theme.darkForeground
-                                                    }
-                                                }
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    text: modelData.lastMessagePreview
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    color: modelData.unreadCount > 0 ? theme.foreground : theme.darkForeground
-                                                    elide: Text.ElideRight
-                                                }
-                                            }
-                                        }
-
-                                        MouseArea {
-                                            id: homeCardMouse
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                            onClicked: function(mouse) {
-                                                if (mouse.button === Qt.RightButton) {
-                                                    backend.toggleChatReadUnread(modelData.guid)
-                                                } else {
-                                                    var win = root
-                                                    backend.selectChat(modelData.guid)
-                                                    if (win) win.focusAndScrollChat()
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Keyboard Shortcuts Quick Strip
-                            Rectangle {
-                                Layout.fillWidth: true
-                                implicitHeight: 42
-                                Layout.preferredHeight: 42
-                                height: 42
-                                radius: 8
-                                color: theme.darkBackground
-                                border.width: 1
-                                border.color: theme.lighterBackground
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 14
-                                    anchors.rightMargin: 14
-                                    spacing: 14
-                                    Text {
-                                        text: "⌂ Ctrl+H / Esc: Home   ·   Ctrl+N: New Message   ·   Ctrl+F: Search   ·   Ctrl+Shift+U: Read/Unread   ·   Ctrl+Shift+A: Mark All Read   ·   Ctrl+K: All Shortcuts"
-                                        font.pixelSize: theme.fontSize - 3
-                                        color: theme.darkForeground
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                            }
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: 10
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: i18n.tr("Select a conversation")
+                            font.pixelSize: theme.fontSize + 2
+                            font.bold: true
+                            color: theme.foreground
+                        }
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: i18n.tr("or press Ctrl+N to start a new message")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
                         }
                     }
-
                 }
 
                 // Active Chat Header (dynamically adapts between 1-row wide layout and 2-row split-screen layout so contact name/metadata and action buttons never overlap or clip)
@@ -6751,7 +6159,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
-                ComboBox {
+                ThemedComboBox {
                     id: notesPageSizeSelector
                     objectName: "notesPageSizeSelector"
                     Layout.preferredWidth: 74
@@ -7536,7 +6944,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
-                ComboBox {
+                ThemedComboBox {
                     id: eventsPageSizeSelector
                     objectName: "eventsPageSizeSelector"
                     Layout.preferredWidth: 74
@@ -7595,7 +7003,7 @@ ApplicationWindow {
                         }
                     }
 
-                    ComboBox {
+                    ThemedComboBox {
                         id: eventCalendarSelector
                         Layout.preferredWidth: 120
                         model: {
@@ -7827,7 +7235,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
-                ComboBox {
+                ThemedComboBox {
                     id: photosPageSizeSelector
                     objectName: "photosPageSizeSelector"
                     Layout.preferredWidth: 72
@@ -9042,6 +8450,98 @@ ApplicationWindow {
                     }
                 }
 
+                // Message history and relay tools (moved here from the old Home page
+                // and the top bar's "60d" pill)
+                ColumnLayout {
+                    id: historySettingsCol
+                    objectName: "historySettingsCol"
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: "🕒 " + i18n.tr("Message History Sync Window")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+                        Repeater {
+                            model: [
+                                { label: backend.syncingHistory ? ("↻ " + i18n.tr("Syncing...")) : ("↻ " + i18n.tr("Sync Now")), name: "settingsSyncNowBtn", run: function() { backend.refreshAll() } },
+                                { label: "🌐 " + i18n.tr("Web UI"), name: "settingsWebUiBtn", run: function() { backend.openWebUi() } }
+                            ]
+                            delegate: Rectangle {
+                                required property var modelData
+                                objectName: modelData.name
+                                height: 26
+                                radius: 6
+                                implicitWidth: toolLbl.implicitWidth + 18
+                                color: toolMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                border.width: 1
+                                border.color: toolMouse.containsMouse ? theme.accent : theme.muted
+                                Text {
+                                    id: toolLbl
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                MouseArea {
+                                    id: toolMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: modelData.run()
+                                }
+                            }
+                        }
+                    }
+
+                    Flow {
+                        objectName: "historySyncWindowChoices"
+                        Layout.fillWidth: true
+                        spacing: 6
+                        Repeater {
+                            model: [7, 14, 30, 60, 90, 180, 365]
+                            delegate: Rectangle {
+                                required property int modelData
+                                height: 28
+                                width: dayLbl.implicitWidth + 22
+                                radius: 6
+                                color: backend.historySyncDays === modelData ? theme.accent : (dayMouse.containsMouse ? theme.selection : theme.lighterBackground)
+                                border.width: 1
+                                border.color: backend.historySyncDays === modelData ? theme.accent : theme.muted
+                                Text {
+                                    id: dayLbl
+                                    anchors.centerIn: parent
+                                    text: modelData + "d"
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: backend.historySyncDays === modelData
+                                    color: backend.historySyncDays === modelData ? theme.darkerBackground : theme.foreground
+                                }
+                                MouseArea {
+                                    id: dayMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.setHistorySyncDays(modelData)
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("How far back conversations are synced from the Mac.")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.darkForeground
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
                 // Customizable Notifications & Audio Alert Settings
                 ColumnLayout {
                     id: notificationsSettingsCol
@@ -9293,7 +8793,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize - 3
                                 color: theme.darkForeground
                             }
-                            ComboBox {
+                            ThemedComboBox {
                                 id: audioInputDeviceCombo
                                 objectName: "audioInputDeviceCombo"
                                 Layout.fillWidth: true
@@ -9317,7 +8817,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize - 3
                                 color: theme.darkForeground
                             }
-                            ComboBox {
+                            ThemedComboBox {
                                 id: audioOutputDeviceCombo
                                 objectName: "audioOutputDeviceCombo"
                                 Layout.fillWidth: true
@@ -9467,7 +8967,7 @@ ApplicationWindow {
 
                 Repeater {
                     model: [
-                        { keys: "Ctrl+H / Esc", desc: "Open iMessage Home Page dashboard" },
+                        { keys: "Ctrl+H / Esc", desc: "Close the open conversation" },
                         { keys: "Ctrl+K / F1", desc: "Toggle this keyboard shortcuts dialog" },
                         { keys: "Ctrl+F / /", desc: "Focus conversation search filter" },
                         { keys: "Alt+Down / Ctrl+J", desc: "Next conversation in sidebar" },

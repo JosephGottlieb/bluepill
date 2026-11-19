@@ -1018,10 +1018,13 @@ private slots:
         const QString qml = QString::fromUtf8(qmlFile.readAll());
         QVERIFY(qml.contains(QStringLiteral("backend.clearSelectedChat")));
         QVERIFY(qml.contains(QStringLiteral("Ctrl+H")));
-        QVERIFY(qml.contains(QStringLiteral("iMessage Home")));
+        // No Home dashboard: an empty pane, and the sync window lives in Settings only
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"noConversationPane\"")));
+        QVERIFY(!qml.contains(QStringLiteral("iMessage Home Page Dashboard")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"historySettingsCol\"")));
         QVERIFY(qml.contains(QStringLiteral("backend.historySyncDays")));
         QVERIFY(qml.contains(QStringLiteral("backend.setHistorySyncDays")));
-        QVERIFY(qml.contains(QStringLiteral("backend.cycleHistorySyncDays")));
+        QVERIFY(!qml.contains(QStringLiteral("backend.cycleHistorySyncDays")));
     }
 
     void testVerificationCodeExtractionAndCopyToClipboard() {
@@ -2286,10 +2289,13 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("function resolveAttachmentUrl(attGuid, initialUrl)")));
 
         // Verify Home View summary cards have explicit preferred/minimum widths and heights so Message History Sync Window never crushes sibling cards or overlaps Recent Conversations
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeConversationsCard\"")));
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeUnreadCard\"")));
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeSyncWindowCard\"")));
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeRecentConversationsCol\"")));
+        // Home's cards were folded into the top bar ("All (N)", "Unread (N)") and Settings
+        QVERIFY(!qml.contains(QStringLiteral("objectName: \"homeConversationsCard\"")));
+        QVERIFY(qml.contains(QStringLiteral("backend.totalChatCount")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"historySyncWindowChoices\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"markAllReadRow\"")));
+        // Every dropdown is themed
+        QVERIFY(!QRegularExpression(QStringLiteral(R"(^\s*ComboBox \{)"), QRegularExpression::MultilineOption).match(qml).hasMatch());
 
         // Verify native in-app Photo Lightbox / Gallery Viewer is wired in Main.qml instead of external viewer
         QVERIFY(qml.contains(QStringLiteral("id: photoViewerModal")));
@@ -4801,22 +4807,36 @@ private slots:
 
             auto *statusDot = win->findChild<QQuickItem *>(QStringLiteral("topConnectionStatusDot"));
             auto *serverBtnText = win->findChild<QQuickItem *>(QStringLiteral("serverTopBtnText"));
-            auto *homeSettingsText = win->findChild<QQuickItem *>(QStringLiteral("homeServerLbl"));
+            // Repeater delegates aren't QObject children: walk the visual tree
+            std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+                if (!item) return nullptr;
+                if (item->objectName() == name) return item;
+                for (QQuickItem *c : item->childItems())
+                    if (QQuickItem *f = findVisual(c, name)) return f;
+                return nullptr;
+            };
+            auto *historyCol = win->findChild<QQuickItem *>(QStringLiteral("historySettingsCol"));
+            QVERIFY(historyCol != nullptr);
+            auto *syncNowBtn = findVisual(historyCol, QStringLiteral("settingsSyncNowBtn"));
+            auto *webUiBtn = findVisual(historyCol, QStringLiteral("settingsWebUiBtn"));
             auto *settingsTitle = win->findChild<QQuickItem *>(QStringLiteral("settingsModalTitle"));
             auto *cfgBadge = win->findChild<QQuickItem *>(QStringLiteral("cfgStatusBadge"));
             auto *previewBtn = win->findChild<QQuickItem *>(QStringLiteral("previewSoundBtn"));
             auto *presetGrid = win->findChild<QQuickItem *>(QStringLiteral("soundPresetGrid"));
             QVERIFY(statusDot != nullptr);
             QVERIFY(serverBtnText != nullptr);
-            QVERIFY(homeSettingsText != nullptr);
+            QVERIFY(syncNowBtn != nullptr);
+            QVERIFY(webUiBtn != nullptr);
+            // The relay status isn't printed in the top bar; it's the dot's tooltip
+            QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("topStatusPill")) == nullptr);
+            QCOMPARE(statusDot->property("statusText").toString(), b2.serverStatus());
             QVERIFY(settingsTitle != nullptr);
             QVERIFY(cfgBadge != nullptr);
             QVERIFY(previewBtn != nullptr);
             QVERIFY(presetGrid != nullptr);
 
-            // Top button, Home dashboard button, and modal title all say "Settings"
+            // Top button and modal title say "Settings"
             QCOMPARE(serverBtnText->property("text").toString(), QStringLiteral("Settings"));
-            QCOMPARE(homeSettingsText->property("text").toString(), QStringLiteral("⚙ Settings"));
             QCOMPARE(settingsTitle->property("text").toString(), QStringLiteral("⚙ Settings"));
 
             // Initially disconnected -> top-left dot is red (theme.red) and badge says Disconnected

@@ -100,6 +100,8 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList pinnedChats READ pinnedChats NOTIFY chatsChanged)
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
     Q_PROPERTY(int totalUnread READ totalUnread NOTIFY chatsChanged)
+    // Number of conversations, ignoring the filter and search (shown as "All (N)")
+    Q_PROPERTY(int totalChatCount READ totalChatCount NOTIFY chatsChanged)
     Q_PROPERTY(bool windowActive READ windowActive WRITE setWindowActive NOTIFY windowActiveChanged)
     Q_PROPERTY(bool hasOlderMessages READ hasOlderMessages NOTIFY olderMessagesChanged)
     Q_PROPERTY(bool loadingOlderMessages READ loadingOlderMessages NOTIFY olderMessagesChanged)
@@ -181,6 +183,7 @@ public:
     QVariantList pinnedChats() const;
     QVariantList messages() const { return m_messages; }
     int totalUnread() const;
+    int totalChatCount() const { return static_cast<int>(m_chats.size()); }
     bool windowActive() const { return m_windowActive; }
     bool hasOlderMessages() const;
     bool loadingOlderMessages() const { return m_loadingOlderMessages; }
