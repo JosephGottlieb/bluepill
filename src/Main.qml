@@ -1,6 +1,7 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Shapes
 
 ApplicationWindow {
     id: root
@@ -1503,7 +1504,8 @@ ApplicationWindow {
                 anchors.rightMargin: 16
                 spacing: root.isNarrowWindow ? 8 : 12
 
-                // App badge (Clickable Home Page Button) + Connection indicator
+                // App badge + connection dot. The relay status ("Connected v1.2.1 ·
+                // macOS …") shows only while hovering the dot.
                 RowLayout {
                     spacing: 8
                     Rectangle {
@@ -1512,21 +1514,9 @@ ApplicationWindow {
                         height: 30
                         radius: 7
                         implicitWidth: homeBrandRow.implicitWidth + 16
-                        color: !backend.connected
-                                   ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14)
-                                   : (backend.selectedChatGuid.length === 0
-                                          ? theme.selection
-                                          : (homeBrandMouse.containsMouse ? theme.lighterBackground : "transparent"))
-                        border.width: (!backend.connected || backend.selectedChatGuid.length === 0 || homeBrandMouse.containsMouse) ? 1 : 0
-                        border.color: !backend.connected
-                                          ? theme.red
-                                          : (backend.selectedChatGuid.length === 0 ? theme.accent : theme.muted)
-
-                        ToolTip.visible: homeBrandMouse.containsMouse
-                        ToolTip.text: backend.connected
-                                          ? i18n.tr("BluePill Home Dashboard — Connected (Ctrl+H)")
-                                          : i18n.tr("BluePill Home Dashboard — Disconnected (Ctrl+H)")
-                        ToolTip.delay: 350
+                        color: !backend.connected ? Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.14) : "transparent"
+                        border.width: !backend.connected ? 1 : 0
+                        border.color: theme.red
 
                         RowLayout {
                             id: homeBrandRow
@@ -1541,6 +1531,19 @@ ApplicationWindow {
                                 color: backend.connected ? theme.green : theme.red
                                 border.width: 1
                                 border.color: backend.connected ? Qt.lighter(theme.green, 1.3) : Qt.lighter(theme.red, 1.3)
+                                readonly property string statusText: backend.serverStatus
+                                                                     + (backend.syncingHistory ? " · " + i18n.tr("Syncing history…") : "")
+                                ToolTip.visible: statusDotMouse.containsMouse
+                                ToolTip.text: statusText
+                                ToolTip.delay: 150
+                                MouseArea {
+                                    id: statusDotMouse
+                                    objectName: "statusDotMouse"
+                                    anchors.centerIn: parent
+                                    width: 24
+                                    height: 24
+                                    hoverEnabled: true
+                                }
                             }
                             Image {
                                 width: 20
@@ -1554,89 +1557,8 @@ ApplicationWindow {
                                 text: "BluePill"
                                 font.pixelSize: theme.fontSize + 2
                                 font.bold: true
-                                color: !backend.connected
-                                           ? theme.red
-                                           : (backend.selectedChatGuid.length === 0 ? theme.accent : theme.brightForeground)
+                                color: !backend.connected ? theme.red : theme.brightForeground
                             }
-                            Text {
-                                visible: backend.selectedChatGuid.length > 0
-                                text: "⌂"
-                                font.pixelSize: theme.fontSize
-                                color: homeBrandMouse.containsMouse ? theme.accent : theme.darkForeground
-                            }
-                        }
-                        MouseArea {
-                            id: homeBrandMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
-                                root.clearActionMenu()
-                                root.showShortcutsModal = false
-                                root.showContactModal = false
-                                root.showNewChatModal = false
-                                root.showEmojiPicker = false
-                                backend.clearSelectedChat()
-                            }
-                        }
-                    }
-                    Rectangle {
-                        id: topStatusPill
-                        objectName: "topStatusPill"
-                        visible: root.width >= 900
-                        height: 22
-                        radius: 6
-                        color: backend.connected ? theme.lighterBackground : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
-                        border.width: backend.connected ? 0 : 1
-                        border.color: backend.connected ? "transparent" : theme.red
-                        implicitWidth: statusLabel.implicitWidth + 16
-                        Text {
-                            id: statusLabel
-                            objectName: "statusLabel"
-                            anchors.centerIn: parent
-                            text: root.width < 1160
-                                      ? (backend.connected ? i18n.tr("Connected") : i18n.tr("Disconnected"))
-                                      : backend.serverStatus
-                            font.pixelSize: theme.fontSize - 3
-                            font.bold: !backend.connected
-                            color: backend.connected ? theme.foreground : theme.red
-                        }
-                    }
-                    // History Sync Window Setting Pill
-                    Rectangle {
-                        height: 24
-                        radius: 6
-                        implicitWidth: historyPillRow.implicitWidth + 14
-                        color: historyPillMouse.containsMouse ? theme.selection : theme.lighterBackground
-                        border.width: 1
-                        border.color: backend.syncingHistory ? theme.accent : (historyPillMouse.containsMouse ? theme.accent : theme.muted)
-
-                        ToolTip.visible: historyPillMouse.containsMouse
-                        ToolTip.text: i18n.tr("History sync window: ") + backend.historySyncDays + i18n.tr(" days (Click to cycle 7d/14d/30d/60d/90d/180d/365d)")
-                        ToolTip.delay: 350
-
-                        RowLayout {
-                            id: historyPillRow
-                            anchors.centerIn: parent
-                            spacing: 4
-                            Text {
-                                text: backend.syncingHistory ? "↻" : "🕒"
-                                font.pixelSize: theme.fontSize - 3
-                                color: backend.syncingHistory ? theme.accent : theme.foreground
-                            }
-                            Text {
-                                text: backend.historySyncDays + "d"
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: true
-                                color: historyPillMouse.containsMouse || backend.syncingHistory ? theme.accent : theme.foreground
-                            }
-                        }
-                        MouseArea {
-                            id: historyPillMouse
-                            anchors.fill: parent
-                            hoverEnabled: true
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: backend.cycleHistorySyncDays()
                         }
                     }
                 }
@@ -1648,7 +1570,7 @@ ApplicationWindow {
                     spacing: root.isNarrowWindow ? 4 : 6
                     Repeater {
                         model: [
-                            { key: "all", label: i18n.tr("All") },
+                            { key: "all", label: i18n.tr("All") + (backend.totalChatCount > 0 ? " (" + backend.totalChatCount + ")" : "") },
                             { key: "unread", label: i18n.tr("Unread") + (backend.totalUnread > 0 ? " (" + backend.totalUnread + ")" : "") },
                             { key: "direct", label: i18n.tr("Direct") },
                             { key: "groups", label: i18n.tr("Groups") },
@@ -1680,6 +1602,44 @@ ApplicationWindow {
                     }
                 }
 
+                // Sync (was in the conversation header): conversations and contacts
+                Rectangle {
+                    id: topSyncBtn
+                    objectName: "topSyncBtn"
+                    width: 34
+                    height: 30
+                    radius: 7
+                    color: topSyncMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: (topSyncMouse.containsMouse || backend.syncingHistory) ? theme.accent : theme.muted
+                    ToolTip.visible: topSyncMouse.containsMouse
+                    ToolTip.text: backend.syncingHistory ? i18n.tr("Syncing…") : i18n.tr("Sync conversations and contacts (Ctrl+R)")
+                    ToolTip.delay: 400
+                    Text {
+                        id: topSyncLbl
+                        anchors.centerIn: parent
+                        text: "↻"
+                        font.pixelSize: theme.fontSize + 2
+                        // Spins while history syncs
+                        RotationAnimation on rotation {
+                            running: backend.syncingHistory
+                            from: 0; to: 360; duration: 1000; loops: Animation.Infinite
+                            onRunningChanged: if (!running) topSyncLbl.rotation = 0
+                        }
+                        color: backend.syncingHistory ? theme.accent : theme.foreground
+                    }
+                    MouseArea {
+                        id: topSyncMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            backend.refreshAll()
+                            backend.syncContactsNow()
+                        }
+                    }
+                }
+
                 // Global Notifications Toggle Button
                 Rectangle {
                     width: 32
@@ -1701,25 +1661,37 @@ ApplicationWindow {
                     }
                 }
 
-                // New Message Button
+                // New Message: a compose icon (pencil over paper), no label
                 Rectangle {
+                    id: topComposeBtn
+                    objectName: "topComposeBtn"
                     height: 30
+                    width: 34
                     radius: 7
-                    implicitWidth: newMsgText.implicitWidth + (root.isNarrowWindow ? 16 : 22)
-                    color: theme.selection
+                    color: composeMouse.containsMouse ? theme.accent : theme.selection
                     border.width: 1
                     border.color: theme.accent
+                    ToolTip.visible: composeMouse.containsMouse
+                    ToolTip.text: i18n.tr("New Message (Ctrl+N)")
+                    ToolTip.delay: 400
 
-                    Text {
-                        id: newMsgText
+                    // Material Design Icons "square-edit-outline" (Apache-2.0), drawn in the theme color
+                    Shape {
                         anchors.centerIn: parent
-                        text: "+ " + (root.width < 980 ? i18n.tr("New") : i18n.tr("New Message"))
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.accent
+                        width: 24
+                        height: 24
+                        scale: 0.8
+                        antialiasing: true
+                        ShapePath {
+                            strokeWidth: -1
+                            fillColor: composeMouse.containsMouse ? theme.darkerBackground : theme.accent
+                            PathSvg { path: "M5 3c-1.11 0-2 .89-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7H5V5h7V3H5m12.78 1a.69.69 0 0 0-.48.2l-1.22 1.21 2.5 2.5L19.8 6.7c.26-.26.26-.7 0-.95L18.25 4.2c-.13-.13-.3-.2-.47-.2m-2.41 2.12L8 13.5V16h2.5l7.37-7.38-2.5-2.5z" }
+                        }
                     }
                     MouseArea {
+                        id: composeMouse
                         anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             root.showNewChatModal = true
@@ -1734,7 +1706,7 @@ ApplicationWindow {
                     objectName: "topServerConfigBtn"
                     height: 30
                     radius: 7
-                    implicitWidth: serverTopLbl.implicitWidth + 16
+                    implicitWidth: 34
                     color: root.showServerConfigModal ? theme.accent : theme.lighterBackground
                     border.width: 1
                     border.color: (root.showServerConfigModal || backend.needsSetup) ? theme.accent : theme.muted
@@ -1749,13 +1721,14 @@ ApplicationWindow {
                         spacing: 5
                         Text {
                             text: "⚙"
-                            font.pixelSize: theme.fontSize - 1
+                            font.pixelSize: theme.fontSize + 2
                             color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
                         }
                         Text {
+                            // Icon only (the tooltip says "Settings"); kept for tests/accessibility
                             id: serverTopBtnText
                             objectName: "serverTopBtnText"
-                            visible: root.width >= 900
+                            visible: false
                             text: i18n.tr("Settings")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
@@ -2241,6 +2214,40 @@ ApplicationWindow {
                             policy: ScrollBar.AsNeeded
                         }
 
+                        // With the Unread filter on, offer "Mark all read" (was a Home page button)
+                        header: Item {
+                            width: chatListView.width
+                            height: markAllReadRow.visible ? 38 : 0
+                            Rectangle {
+                                id: markAllReadRow
+                                objectName: "markAllReadRow"
+                                visible: backend.filterMode === "unread" && backend.totalUnread > 0
+                                anchors.fill: parent
+                                anchors.margins: 4
+                                radius: 6
+                                color: markAllReadMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                border.width: 1
+                                border.color: markAllReadMouse.containsMouse ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "✓ " + i18n.tr("Mark all read") + "  ·  Ctrl+Shift+A"
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                MouseArea {
+                                    id: markAllReadMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        backend.markAllChatsRead()
+                                        root.showToast("✓ " + i18n.tr("Marked all chats as read in iMessage"))
+                                    }
+                                }
+                            }
+                        }
+
                         delegate: Rectangle {
                             required property var modelData
                             width: chatListView.width - 12
@@ -2324,8 +2331,38 @@ ApplicationWindow {
                                             maximumLineCount: 1
                                         }
 
+                                        // Read/unread toggle (was the header's Read button)
                                         Rectangle {
-                                            visible: chatHover.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            id: rowReadToggleBtn
+                                            objectName: "rowReadToggleBtn"
+                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            width: 22
+                                            height: 20
+                                            radius: 5
+                                            z: 3
+                                            color: rowReadMouse.containsMouse ? theme.accent : theme.background
+                                            border.width: 1
+                                            border.color: theme.muted
+                                            ToolTip.visible: rowReadMouse.containsMouse
+                                            ToolTip.text: modelData.unreadCount > 0 ? i18n.tr("Mark as read") : i18n.tr("Mark as unread")
+                                            ToolTip.delay: 400
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: modelData.unreadCount > 0 ? "✓" : "●"
+                                                font.pixelSize: theme.fontSize - 3
+                                                color: rowReadMouse.containsMouse ? theme.darkerBackground : theme.foreground
+                                            }
+                                            MouseArea {
+                                                id: rowReadMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: backend.toggleChatReadUnread(modelData.guid)
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2349,7 +2386,7 @@ ApplicationWindow {
 
                                         Rectangle {
                                             id: rowDeleteChatBtn
-                                            visible: chatHover.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2552,580 +2589,33 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 spacing: 0
 
-                // iMessage Home Page Dashboard (shown when no conversation is selected)
+                // Shown when no conversation is open. Everything the old Home page
+                // offered lives in the top bar, the chat list, or Settings.
                 Rectangle {
                     id: homePagePane
+                    objectName: "noConversationPane"
                     visible: backend.selectedChatGuid.length === 0
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     color: theme.background
 
-                    Flickable {
-                        anchors.fill: parent
-                        contentWidth: width
-                        contentHeight: homeDashboardCol.implicitHeight + 56
-                        clip: true
-                        boundsBehavior: Flickable.StopAtBounds
-
-                        ColumnLayout {
-                            id: homeDashboardCol
-                            objectName: "homeDashboardCol"
-                            width: Math.min(parent.width - 48, 960)
-                            anchors.horizontalCenter: parent.horizontalCenter
-                            y: 28
-                            spacing: 22
-
-                            // Home Hero Banner
-                            Rectangle {
-                                id: homeHeroBanner
-                                objectName: "homeHeroBanner"
-                                Layout.fillWidth: true
-                                readonly property bool compactHeroActions: homeHeroBanner.width > 0 && homeHeroBanner.width < 680
-                                implicitHeight: heroCol.implicitHeight + 36
-                                Layout.preferredHeight: implicitHeight
-                                radius: 12
-                                color: theme.darkBackground
-                                border.width: 1
-                                border.color: theme.lighterBackground
-                                clip: true
-
-                                ColumnLayout {
-                                    id: heroCol
-                                    anchors.left: parent.left
-                                    anchors.right: parent.right
-                                    anchors.top: parent.top
-                                    anchors.margins: 18
-                                    spacing: 14
-
-                                    RowLayout {
-                                        id: heroTopRow
-                                        Layout.fillWidth: true
-                                        spacing: 12
-
-                                        Rectangle {
-                                            Layout.preferredWidth: 48
-                                            Layout.preferredHeight: 48
-                                            width: 48
-                                            height: 48
-                                            radius: 12
-                                            color: theme.selection
-                                            border.width: 1
-                                            border.color: theme.accent
-                                            Image {
-                                                anchors.fill: parent
-                                                anchors.margins: 3
-                                                source: "qrc:/bluepill.svg"
-                                                sourceSize.width: 96
-                                                sourceSize.height: 96
-                                                fillMode: Image.PreserveAspectFit
-                                            }
-                                        }
-
-                                        ColumnLayout {
-                                            id: heroTitleCol
-                                            Layout.fillWidth: true
-                                            Layout.minimumWidth: 180
-                                            clip: true
-                                            spacing: 3
-                                            RowLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 8
-                                                Text {
-                                                    id: homeTitleTxt
-                                                    text: i18n.tr("BluePill Home")
-                                                    font.pixelSize: theme.fontSize + 6
-                                                    font.bold: true
-                                                    color: theme.brightForeground
-                                                }
-                                                Rectangle {
-                                                    height: 22
-                                                    implicitHeight: 22
-                                                    Layout.preferredHeight: 22
-                                                    radius: 6
-                                                    implicitWidth: homeStatusTxt.implicitWidth + 14
-                                                    Layout.preferredWidth: implicitWidth
-                                                    Layout.minimumWidth: 60
-                                                    Layout.maximumWidth: homeStatusTxt.implicitWidth + 14
-                                                    Layout.fillWidth: true
-                                                    clip: true
-                                                    color: backend.connected ? Qt.rgba(48/255, 209/255, 88/255, 0.16) : Qt.rgba(255/255, 69/255, 58/255, 0.18)
-                                                    border.width: 1
-                                                    border.color: backend.connected ? theme.green : theme.red
-                                                    Text {
-                                                        id: homeStatusTxt
-                                                        anchors.verticalCenter: parent.verticalCenter
-                                                        anchors.left: parent.left
-                                                        anchors.right: parent.right
-                                                        anchors.leftMargin: 7
-                                                        anchors.rightMargin: 7
-                                                        horizontalAlignment: Text.AlignHCenter
-                                                        elide: Text.ElideRight
-                                                        text: backend.serverStatus
-                                                        font.pixelSize: theme.fontSize - 3
-                                                        font.bold: true
-                                                        color: backend.connected ? theme.green : theme.red
-                                                    }
-                                                }
-                                                Item { Layout.fillWidth: true }
-                                            }
-                                            Text {
-                                                Layout.fillWidth: true
-                                                elide: Text.ElideRight
-                                                text: backend.serverUrl.length > 0
-                                                          ? (i18n.tr("Relay: ") + backend.serverUrl + " · " + i18n.tr("Instant local cache + Private API sync"))
-                                                          : i18n.tr("BluePill & BlueBubbles macOS Relay")
-                                                font.pixelSize: theme.fontSize - 2
-                                                color: theme.darkForeground
-                                            }
-                                        }
-
-                                        // Quick Actions in Hero Header
-                                        RowLayout {
-                                            Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
-                                            spacing: 8
-
-                                            Rectangle {
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeNewMsgLbl.implicitWidth + 22
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.accent
-                                                Text {
-                                                    id: homeNewMsgLbl
-                                                    anchors.centerIn: parent
-                                                    text: "+ " + (homeHeroBanner.compactHeroActions ? i18n.tr("New") : i18n.tr("New Message"))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: theme.darkerBackground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        root.showNewChatModal = true
-                                                        newChatRecipient.forceActiveFocus()
-                                                    }
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                id: homeWebUiBtn
-                                                objectName: "homeWebUiBtn"
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeWebUiLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.lighterBackground
-                                                border.width: 1
-                                                border.color: theme.accent
-                                                Text {
-                                                    id: homeWebUiLbl
-                                                    anchors.centerIn: parent
-                                                    text: "🌐 " + (homeHeroBanner.compactHeroActions ? i18n.tr("Web") : i18n.tr("Web UI"))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: theme.brightForeground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: backend.openWebUi()
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                visible: backend.totalUnread > 0
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeMarkAllLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.selection
-                                                border.width: 1
-                                                border.color: theme.accent
-                                                Text {
-                                                    id: homeMarkAllLbl
-                                                    anchors.centerIn: parent
-                                                    text: "✓ " + (homeHeroBanner.compactHeroActions ? i18n.tr("Read") : i18n.tr("Mark All Read"))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: true
-                                                    color: theme.accent
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: {
-                                                        backend.markAllChatsRead()
-                                                        root.showToast("✓ " + i18n.tr("Marked all chats as read in iMessage"))
-                                                    }
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeSyncLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: theme.lighterBackground
-                                                border.width: 1
-                                                border.color: theme.muted
-                                                Text {
-                                                    id: homeSyncLbl
-                                                    anchors.centerIn: parent
-                                                    text: backend.syncingHistory ? ("↻ " + i18n.tr("Syncing...")) : ("↻ " + (homeHeroBanner.compactHeroActions ? i18n.tr("Sync") : i18n.tr("Sync Now")))
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    color: theme.foreground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: backend.refreshAll()
-                                                }
-                                            }
-
-                                            Rectangle {
-                                                id: homeServerConfigBtn
-                                                objectName: "homeServerConfigBtn"
-                                                height: 34
-                                                implicitHeight: 34
-                                                Layout.preferredHeight: 34
-                                                radius: 8
-                                                implicitWidth: homeServerLbl.implicitWidth + 20
-                                                Layout.preferredWidth: implicitWidth
-                                                color: backend.needsSetup ? theme.selection : theme.lighterBackground
-                                                border.width: 1
-                                                border.color: backend.needsSetup ? theme.accent : theme.muted
-                                                Text {
-                                                    id: homeServerLbl
-                                                    objectName: "homeServerLbl"
-                                                    anchors.centerIn: parent
-                                                    text: "⚙ " + i18n.tr("Settings")
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    font.bold: backend.needsSetup
-                                                    color: backend.needsSetup ? theme.accent : theme.foreground
-                                                }
-                                                MouseArea {
-                                                    anchors.fill: parent
-                                                    cursorShape: Qt.PointingHandCursor
-                                                    onClicked: root.openServerConfigModal()
-                                                }
-                                            }
-                                        }
-                                    }
-
-                                    // 3 Summary Metric Cards Row
-                                    RowLayout {
-                                        id: homeSummaryRow
-                                        objectName: "homeSummaryRow"
-                                        Layout.fillWidth: true
-                                        spacing: 12
-
-                                        Rectangle {
-                                            id: homeConversationsCard
-                                            objectName: "homeConversationsCard"
-                                            Layout.fillWidth: true
-                                            Layout.preferredWidth: 160
-                                            Layout.minimumWidth: 90
-                                            implicitHeight: 72
-                                            Layout.preferredHeight: 72
-                                            height: 72
-                                            radius: 9
-                                            color: theme.background
-                                            border.width: 1
-                                            border.color: theme.lighterBackground
-                                            clip: true
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 12
-                                                spacing: 2
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                    text: i18n.tr("CONVERSATIONS")
-                                                    font.pixelSize: theme.fontSize - 4
-                                                    font.bold: true
-                                                    color: theme.darkForeground
-                                                }
-                                                Text {
-                                                    text: String(backend.chats.length)
-                                                    font.pixelSize: theme.fontSize + 5
-                                                    font.bold: true
-                                                    color: theme.brightForeground
-                                                }
-                                            }
-                                        }
-
-                                        Rectangle {
-                                            id: homeUnreadCard
-                                            objectName: "homeUnreadCard"
-                                            Layout.fillWidth: true
-                                            Layout.preferredWidth: 160
-                                            Layout.minimumWidth: 90
-                                            implicitHeight: 72
-                                            Layout.preferredHeight: 72
-                                            height: 72
-                                            radius: 9
-                                            color: theme.background
-                                            border.width: 1
-                                            border.color: backend.totalUnread > 0 ? theme.accent : theme.lighterBackground
-                                            clip: true
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 12
-                                                spacing: 2
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    elide: Text.ElideRight
-                                                    text: i18n.tr("UNREAD MESSAGES")
-                                                    font.pixelSize: theme.fontSize - 4
-                                                    font.bold: true
-                                                    color: backend.totalUnread > 0 ? theme.accent : theme.darkForeground
-                                                }
-                                                Text {
-                                                    text: String(backend.totalUnread)
-                                                    font.pixelSize: theme.fontSize + 5
-                                                    font.bold: true
-                                                    color: backend.totalUnread > 0 ? theme.accent : theme.brightForeground
-                                                }
-                                            }
-                                        }
-
-                                        // Configurable History Sync Window Setting Card
-                                        Rectangle {
-                                            id: homeSyncWindowCard
-                                            objectName: "homeSyncWindowCard"
-                                            Layout.fillWidth: true
-                                            Layout.preferredWidth: 320
-                                            Layout.minimumWidth: 210
-                                            implicitHeight: 72
-                                            Layout.preferredHeight: 72
-                                            height: 72
-                                            radius: 9
-                                            color: theme.background
-                                            border.width: 1
-                                            border.color: backend.syncingHistory ? theme.accent : theme.lighterBackground
-                                            clip: true
-                                            ColumnLayout {
-                                                anchors.fill: parent
-                                                anchors.margins: 10
-                                                spacing: 6
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    Text {
-                                                        Layout.fillWidth: true
-                                                        elide: Text.ElideRight
-                                                        text: i18n.tr("MESSAGE HISTORY SYNC WINDOW")
-                                                        font.pixelSize: theme.fontSize - 4
-                                                        font.bold: true
-                                                        color: theme.darkForeground
-                                                    }
-                                                    Text {
-                                                        visible: backend.syncingHistory
-                                                        text: i18n.tr("Syncing...")
-                                                        font.pixelSize: theme.fontSize - 4
-                                                        color: theme.accent
-                                                    }
-                                                }
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 4
-                                                    Repeater {
-                                                        model: [7, 14, 30, 60, 90, 180, 365]
-                                                        delegate: Rectangle {
-                                                            required property int modelData
-                                                            Layout.fillWidth: true
-                                                            Layout.minimumWidth: presetDayTxt.implicitWidth + 8
-                                                            Layout.preferredWidth: presetDayTxt.implicitWidth + 10
-                                                            Layout.preferredHeight: 24
-                                                            implicitHeight: 24
-                                                            height: 24
-                                                            radius: 5
-                                                            implicitWidth: presetDayTxt.implicitWidth + 10
-                                                            color: backend.historySyncDays === modelData ? theme.accent : theme.lighterBackground
-                                                            border.width: 1
-                                                            border.color: backend.historySyncDays === modelData ? theme.accent : theme.muted
-                                                            Text {
-                                                                id: presetDayTxt
-                                                                anchors.centerIn: parent
-                                                                text: modelData + "d"
-                                                                font.pixelSize: theme.fontSize - 3
-                                                                font.bold: backend.historySyncDays === modelData
-                                                                color: backend.historySyncDays === modelData ? theme.darkerBackground : theme.foreground
-                                                            }
-                                                            MouseArea {
-                                                                anchors.fill: parent
-                                                                cursorShape: Qt.PointingHandCursor
-                                                                onClicked: backend.setHistorySyncDays(modelData)
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Recent Conversations Grid/List on Home Page
-                            ColumnLayout {
-                                id: homeRecentConversationsCol
-                                objectName: "homeRecentConversationsCol"
-                                Layout.fillWidth: true
-                                spacing: 10
-
-                                RowLayout {
-                                    Layout.fillWidth: true
-                                    Text {
-                                        text: backend.filterMode === "unread"
-                                                  ? i18n.tr("Unread Conversations")
-                                                  : i18n.tr("Recent Conversations")
-                                        font.pixelSize: theme.fontSize + 1
-                                        font.bold: true
-                                        color: theme.brightForeground
-                                    }
-                                    Item { Layout.fillWidth: true }
-                                    Text {
-                                        text: i18n.tr("Click any conversation to open · Right-click to toggle read/unread")
-                                        font.pixelSize: theme.fontSize - 3
-                                        color: theme.darkForeground
-                                        elide: Text.ElideRight
-                                    }
-                                }
-
-                                Repeater {
-                                    model: backend.chats.slice(0, 12)
-                                    delegate: Rectangle {
-                                        required property var modelData
-                                        Layout.fillWidth: true
-                                        implicitHeight: 62
-                                        Layout.preferredHeight: 62
-                                        height: 62
-                                        radius: 10
-                                        color: homeCardMouse.containsMouse ? theme.lighterBackground : theme.darkBackground
-                                        border.width: 1
-                                        border.color: modelData.unreadCount > 0 ? theme.accent : theme.lighterBackground
-
-                                        RowLayout {
-                                            anchors.fill: parent
-                                            anchors.leftMargin: 14
-                                            anchors.rightMargin: 14
-                                            spacing: 12
-
-                                            Rectangle {
-                                                Layout.preferredWidth: 40
-                                                Layout.preferredHeight: 40
-                                                width: 40
-                                                height: 40
-                                                radius: 20
-                                                color: modelData.avatarColor || theme.accent
-                                                Text {
-                                                    anchors.centerIn: parent
-                                                    text: modelData.initials || "?"
-                                                    font.pixelSize: theme.fontSize - 1
-                                                    font.bold: true
-                                                    color: "#ffffff"
-                                                }
-                                            }
-
-                                            ColumnLayout {
-                                                Layout.fillWidth: true
-                                                spacing: 3
-                                                RowLayout {
-                                                    Layout.fillWidth: true
-                                                    spacing: 8
-                                                    Text {
-                                                        text: modelData.title
-                                                        font.pixelSize: theme.fontSize
-                                                        font.bold: true
-                                                        color: theme.brightForeground
-                                                        elide: Text.ElideRight
-                                                    }
-                                                    Rectangle {
-                                                        visible: modelData.unreadCount > 0
-                                                        height: 18
-                                                        radius: 9
-                                                        implicitWidth: Math.max(18, homeUnreadCountTxt.implicitWidth + 10)
-                                                        color: theme.accent
-                                                        Text {
-                                                            id: homeUnreadCountTxt
-                                                            anchors.centerIn: parent
-                                                            text: String(modelData.unreadCount)
-                                                            font.pixelSize: theme.fontSize - 4
-                                                            font.bold: true
-                                                            color: theme.darkerBackground
-                                                        }
-                                                    }
-                                                    Item { Layout.fillWidth: true }
-                                                    Text {
-                                                        text: modelData.relativeTime
-                                                        font.pixelSize: theme.fontSize - 3
-                                                        color: modelData.unreadCount > 0 ? theme.accent : theme.darkForeground
-                                                    }
-                                                }
-                                                Text {
-                                                    Layout.fillWidth: true
-                                                    text: modelData.lastMessagePreview
-                                                    font.pixelSize: theme.fontSize - 2
-                                                    color: modelData.unreadCount > 0 ? theme.foreground : theme.darkForeground
-                                                    elide: Text.ElideRight
-                                                }
-                                            }
-                                        }
-
-                                        MouseArea {
-                                            id: homeCardMouse
-                                            anchors.fill: parent
-                                            hoverEnabled: true
-                                            cursorShape: Qt.PointingHandCursor
-                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                            onClicked: function(mouse) {
-                                                if (mouse.button === Qt.RightButton) {
-                                                    backend.toggleChatReadUnread(modelData.guid)
-                                                } else {
-                                                    var win = root
-                                                    backend.selectChat(modelData.guid)
-                                                    if (win) win.focusAndScrollChat()
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            // Keyboard Shortcuts Quick Strip
-                            Rectangle {
-                                Layout.fillWidth: true
-                                implicitHeight: 42
-                                Layout.preferredHeight: 42
-                                height: 42
-                                radius: 8
-                                color: theme.darkBackground
-                                border.width: 1
-                                border.color: theme.lighterBackground
-                                RowLayout {
-                                    anchors.fill: parent
-                                    anchors.leftMargin: 14
-                                    anchors.rightMargin: 14
-                                    spacing: 14
-                                    Text {
-                                        text: "⌂ Ctrl+H / Esc: Home   ·   Ctrl+N: New Message   ·   Ctrl+F: Search   ·   Ctrl+Shift+U: Read/Unread   ·   Ctrl+Shift+A: Mark All Read   ·   Ctrl+K: All Shortcuts"
-                                        font.pixelSize: theme.fontSize - 3
-                                        color: theme.darkForeground
-                                        elide: Text.ElideRight
-                                        Layout.fillWidth: true
-                                    }
-                                }
-                            }
+                    ColumnLayout {
+                        anchors.centerIn: parent
+                        spacing: 10
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: i18n.tr("Select a conversation")
+                            font.pixelSize: theme.fontSize + 2
+                            font.bold: true
+                            color: theme.foreground
+                        }
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: i18n.tr("or press Ctrl+N to start a new message")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
                         }
                     }
-
                 }
 
                 // Active Chat Header (dynamically adapts between 1-row wide layout and 2-row split-screen layout so contact name/metadata and action buttons never overlap or clip)
@@ -3139,21 +2629,23 @@ ApplicationWindow {
                     readonly property int actionBtnPad: compactActionButtons ? 14 : 20
                     readonly property real naturalIdentityWidth: 16 + 44 + 12 + Math.max(contactTitleText.implicitWidth + 8 + hdrSrvPill.implicitWidth, contactSubtitleText.visible ? contactSubtitleText.implicitWidth : 0) + 16
                     readonly property real naturalActionsWidth: headerActionsRow.implicitWidth
-                    readonly property bool stackChatHeaderRows: (activeChatHeader.width > 0) && (activeChatHeader.width < 900) && ((naturalIdentityWidth + naturalActionsWidth + 44) > activeChatHeader.width || activeChatHeader.width < 700)
-                    implicitHeight: stackChatHeaderRows ? 104 : 68
+                    // One row: the actions moved to hover menus, the top bar and the
+                    // timeline's floating arrows, so nothing needs a second row.
+                    readonly property bool stackChatHeaderRows: false
+                    implicitHeight: 60
                     Layout.preferredHeight: implicitHeight
-                    color: theme.darkBackground
+                    // Transparent strip with the contact centered, like Messages
+                    color: "transparent"
 
                     // Left / Top Side: Contact Identity Card
                     Rectangle {
                         id: contactIdentityCard
                         objectName: "contactIdentityCard"
-                        x: 18
-                        y: activeChatHeader.stackChatHeaderRows ? 8 : Math.round((activeChatHeader.height - height) / 2)
-                        height: activeChatHeader.stackChatHeaderRows ? 48 : 52
-                        readonly property real maxAllowedWidth: activeChatHeader.stackChatHeaderRows
-                                                                    ? Math.max(180, activeChatHeader.width - 36)
-                                                                    : Math.max(180, activeChatHeader.width - headerActionsRow.width - 44)
+                        readonly property real sideReserve: headerActionsRow.width > 0 ? headerActionsRow.width + 26 : 18
+                        x: Math.max(18, Math.round((activeChatHeader.width - width) / 2))
+                        y: Math.round((activeChatHeader.height - height) / 2)
+                        height: 52
+                        readonly property real maxAllowedWidth: Math.max(180, activeChatHeader.width - 2 * sideReserve)
                         width: Math.min(activeChatHeader.naturalIdentityWidth, maxAllowedWidth)
                         radius: 8
                         clip: true
@@ -3259,193 +2751,10 @@ ApplicationWindow {
                     Row {
                         id: headerActionsRow
                         objectName: "headerActionsRow"
-                        x: activeChatHeader.stackChatHeaderRows
-                               ? 18
-                               : Math.max(18, activeChatHeader.width - width - 18)
-                        y: activeChatHeader.stackChatHeaderRows
-                               ? 62
-                               : Math.round((activeChatHeader.height - height) / 2)
+                        x: Math.max(18, activeChatHeader.width - width - 18)
+                        y: Math.round((activeChatHeader.height - height) / 2)
                         spacing: activeChatHeader.compactActionButtons ? 5 : 8
 
-                        // Scroll to Top Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: topBtnLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: topBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: topBtnMouse.containsMouse ? theme.accent : theme.muted
-
-                            Text {
-                                id: topBtnLbl
-                                anchors.centerIn: parent
-                                text: "↑ " + i18n.tr("Top")
-                                font.pixelSize: theme.fontSize - 2
-                                color: topBtnMouse.containsMouse ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                id: topBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: messageListView.scrollToTop()
-                            }
-                        }
-
-                        // Scroll to Bottom Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: bottomBtnLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: bottomBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: bottomBtnMouse.containsMouse ? theme.accent : theme.muted
-
-                            Text {
-                                id: bottomBtnLbl
-                                anchors.centerIn: parent
-                                text: "↓ " + i18n.tr("Bottom")
-                                font.pixelSize: theme.fontSize - 2
-                                color: bottomBtnMouse.containsMouse ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                id: bottomBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: messageListView.scrollToBottom()
-                            }
-                        }
-
-                        // Mute / Unmute Conversation Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: muteChatLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: backend.selectedChatMuted ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.selectedChatMuted ? theme.accent : theme.muted
-
-                            Text {
-                                id: muteChatLbl
-                                anchors.centerIn: parent
-                                text: backend.selectedChatMuted ? ("🔔 " + i18n.tr("Muted")) : ("🔕 " + i18n.tr("Mute"))
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.selectedChatMuted
-                                color: backend.selectedChatMuted ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.toggleChatMute(backend.selectedChatGuid)
-                            }
-                        }
-
-                        // Mark Read Button (Bidirectional iMessage Read/Unread Sync)
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: markReadLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: backend.selectedChatUnreadCount > 0 ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.selectedChatUnreadCount > 0 ? theme.accent : theme.muted
-
-                            Text {
-                                id: markReadLbl
-                                anchors.centerIn: parent
-                                text: backend.selectedChatUnreadCount > 0
-                                          ? ("✓ " + (activeChatHeader.ultraCompactActionButtons ? i18n.tr("Read") : i18n.tr("Mark Read")))
-                                          : ("✓ " + i18n.tr("Read"))
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.selectedChatUnreadCount > 0
-                                color: backend.selectedChatUnreadCount > 0 ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                onClicked: function(mouse) {
-                                    if (mouse.button === Qt.RightButton) {
-                                        backend.markChatUnread(backend.selectedChatGuid)
-                                        root.showToast("● " + i18n.tr("Marked chat as unread in iMessage"))
-                                    } else {
-                                        if (backend.selectedChatUnreadCount > 0) {
-                                            backend.markChatRead(backend.selectedChatGuid)
-                                            root.showToast("✓ " + i18n.tr("Marked chat as read in iMessage"))
-                                        } else {
-                                            backend.toggleChatReadUnread(backend.selectedChatGuid)
-                                            if (backend.selectedChatUnreadCount > 0) {
-                                                root.showToast("● " + i18n.tr("Marked chat as unread in iMessage"))
-                                            } else {
-                                                root.showToast("✓ " + i18n.tr("Marked chat as read in iMessage"))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Sync Contacts / Refresh Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: refreshLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: theme.lighterBackground
-                            border.width: 1
-                            border.color: theme.muted
-
-                            Text {
-                                id: refreshLbl
-                                anchors.centerIn: parent
-                                text: "↻ " + i18n.tr("Sync")
-                                font.pixelSize: theme.fontSize - 2
-                                color: theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.syncContactsNow()
-                            }
-                        }
-
-                        // Delete Conversation Button (deletes conversation & syncs across iPhone/iCloud)
-                        Rectangle {
-                            id: headerDeleteChatBtn
-                            height: 32
-                            radius: 8
-                            width: 34
-                            color: headerDeleteChatMouse.containsMouse ? "#3b1d26" : theme.lighterBackground
-                            border.width: 1
-                            border.color: headerDeleteChatMouse.containsMouse ? "#f7768e" : theme.muted
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "󰆴"
-                                font.pixelSize: theme.fontSize
-                                color: headerDeleteChatMouse.containsMouse ? "#f7768e" : theme.foreground
-                            }
-                            MouseArea {
-                                id: headerDeleteChatMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.pendingDeleteChatGuid = backend.selectedChatGuid
-                                    root.pendingDeleteChatTitle = backend.selectedChatTitle
-                                    root.showDeleteChatModal = true
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        width: parent.width
-                        height: 1
-                        color: theme.lighterBackground
                     }
                 }
 
@@ -3464,6 +2773,105 @@ ApplicationWindow {
                     cacheBuffer: 2000
 
                     property bool stickToBottom: true
+                    // Mouse movement / scrolling over the conversation (shows the scroll arrows)
+                    property bool pointerActive: false
+                    function notePointerActivity() {
+                        pointerActive = true
+                        pointerIdleTimer.restart()
+                    }
+                    property point lastPointerScenePos: Qt.point(-1, -1)
+                    Timer {
+                        id: pointerIdleTimer
+                        interval: 1500
+                        onTriggered: messageListView.pointerActive = false
+                    }
+                    HoverHandler {
+                        id: timelineHover
+                        // Content moving under a still cursor also changes point; only
+                        // count real pointer movement (scene position changed).
+                        onPointChanged: {
+                            const p = point.scenePosition
+                            if (p.x !== messageListView.lastPointerScenePos.x || p.y !== messageListView.lastPointerScenePos.y) {
+                                messageListView.lastPointerScenePos = p
+                                messageListView.notePointerActivity()
+                            }
+                        }
+                    }
+                    // The default Flickable wheel step is tiny (3 notches ≈ 18px); scroll a
+                    // fixed ~110px per notch instead, speeding up while the wheel spins fast.
+                    WheelHandler {
+                        id: timelineWheel
+                        acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
+                        target: null
+                        property double lastWheelMs: 0
+                        property real boost: 1
+                        onWheel: function(event) {
+                            const now = Date.now()
+                            boost = (now - lastWheelMs < 120) ? Math.min(2.5, boost + 0.25) : 1
+                            lastWheelMs = now
+                            const dy = event.pixelDelta.y !== 0 ? event.pixelDelta.y * 1.5
+                                                                : (event.angleDelta.y / 120) * 110 * boost
+                            messageListView.scrollByWheel(dy)
+                        }
+                    }
+                    function scrollBounds() {
+                        const minY = originY - topMargin
+                        return { min: minY, max: Math.max(minY, originY + contentHeight - height + bottomMargin) }
+                    }
+                    function scrollByWheel(dy) {
+                        if (dy === 0) return
+                        notePointerActivity()
+                        smoothScrollAnim.stop()
+                        restoringScrollPosition = false
+                        scrollRestoreTimer.stop()
+                        settlingToBottom = false
+                        bottomSettleTimer.stop()
+                        const b = scrollBounds()
+                        contentY = Math.max(b.min, Math.min(b.max, contentY - dy))
+                        stickToBottom = isNearBottom()
+                        savedStickToBottom = stickToBottom
+                        if (dy > 0 && contentY <= b.min + 1 && backend.hasOlderMessages && !backend.loadingOlderMessages) {
+                            prevContentHeight = contentHeight
+                            prevContentY = contentY
+                            backend.loadOlderMessages()
+                        }
+                    }
+                    // ↑ / ↓ arrows: animate there, then settle exactly (heights are estimates
+                    // until delegates exist)
+                    NumberAnimation {
+                        id: smoothScrollAnim
+                        target: messageListView
+                        property: "contentY"
+                        easing.type: Easing.OutCubic
+                        property bool toEnd: false
+                        property string chatGuid: ""
+                        onFinished: {
+                            if (chatGuid !== backend.selectedChatGuid) return
+                            toEnd ? messageListView.scrollToBottom() : messageListView.scrollToTop()
+                        }
+                    }
+                    readonly property alias smoothScrolling: smoothScrollAnim.running
+                    function smoothScrollTo(toEnd) {
+                        smoothScrollAnim.stop()
+                        restoringScrollPosition = false
+                        scrollRestoreTimer.stop()
+                        settlingToBottom = false
+                        bottomSettleTimer.stop()
+                        stickToBottom = false
+                        const b = scrollBounds()
+                        const goal = toEnd ? b.max : b.min
+                        const dist = Math.abs(goal - contentY)
+                        if (dist < 2) {
+                            if (toEnd) scrollToBottom(); else scrollToTop()
+                            return
+                        }
+                        smoothScrollAnim.toEnd = toEnd
+                        smoothScrollAnim.chatGuid = backend.selectedChatGuid
+                        smoothScrollAnim.from = contentY
+                        smoothScrollAnim.to = goal
+                        smoothScrollAnim.duration = Math.min(700, 220 + dist / 12)
+                        smoothScrollAnim.start()
+                    }
                     property bool settlingToBottom: false
                     property int settlePassesRemaining: 0
                     property string lastSelectedChatGuid: ""
@@ -3760,6 +3168,8 @@ ApplicationWindow {
                     }
 
                     onMovementStarted: {
+                        notePointerActivity()
+                        smoothScrollAnim.stop()
                         root.hoveredActionMessageGuid = ""
                         restoringScrollPosition = false
                         scrollRestoreTimer.stop()
@@ -3776,6 +3186,7 @@ ApplicationWindow {
                         target: backend
                         function onSelectedChatChanged() {
                             if (backend.selectedChatGuid !== messageListView.lastSelectedChatGuid) {
+                                smoothScrollAnim.stop()
                                 messageListView.lastSelectedChatGuid = backend.selectedChatGuid
                                 messageListView.scrollToBottom()
                             }
@@ -3866,6 +3277,92 @@ ApplicationWindow {
 
                     ScrollBar.vertical: ScrollBar {
                         policy: ScrollBar.AsNeeded
+                    }
+
+                    // Floating "Top (Ctrl+Home)" arrow (replaces the header's Top button). Parented to
+                    // the ListView itself so it stays put while the content scrolls.
+                    Rectangle {
+                        id: scrollToTopArrow
+                        objectName: "scrollToTopArrow"
+                        parent: messageListView
+                        z: 20
+                        width: 28
+                        height: 28
+                        radius: 14
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.top: parent.top
+                        anchors.topMargin: 4
+                        // Only while the mouse moves or the list scrolls; fades out when idle
+                        readonly property bool needed: messageListView.count > 0 && (messageListView.contentY > messageListView.originY + messageListView.topMargin + 40)
+                        readonly property bool shown: needed && (messageListView.pointerActive || scrollToTopArrowMouse.containsMouse)
+                        visible: needed && opacity > 0
+                        enabled: shown
+                        opacity: !shown ? 0 : (scrollToTopArrowMouse.containsMouse ? 0.95 : 0.45)
+                        Behavior on opacity { NumberAnimation { duration: 200 } }
+                        color: scrollToTopArrowMouse.containsMouse ? theme.accent : theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.accent
+                        ToolTip.visible: scrollToTopArrowMouse.containsMouse
+                        ToolTip.text: i18n.tr("Top (Ctrl+Home)")
+                        ToolTip.delay: 400
+                        Text {
+                            anchors.centerIn: parent
+                            text: "↑"
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: scrollToTopArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
+                        }
+                        MouseArea {
+                            id: scrollToTopArrowMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: messageListView.smoothScrollTo(false)
+                        }
+                    }
+
+                    // Floating "Newest messages (Ctrl+End)" arrow (replaces the header's Bottom button). Parented to
+                    // the ListView itself so it stays put while the content scrolls.
+                    Rectangle {
+                        id: scrollToBottomArrow
+                        objectName: "scrollToBottomArrow"
+                        parent: messageListView
+                        z: 20
+                        width: 28
+                        height: 28
+                        radius: 14
+                        anchors.right: parent.right
+                        anchors.rightMargin: 10
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 8
+                        // Only while the mouse moves or the list scrolls; fades out when idle
+                        readonly property bool needed: messageListView.count > 0 && (!messageListView.atYEnd && messageListView.contentHeight > messageListView.height)
+                        readonly property bool shown: needed && (messageListView.pointerActive || scrollToBottomArrowMouse.containsMouse)
+                        visible: needed && opacity > 0
+                        enabled: shown
+                        opacity: !shown ? 0 : (scrollToBottomArrowMouse.containsMouse ? 0.95 : 0.45)
+                        Behavior on opacity { NumberAnimation { duration: 200 } }
+                        color: scrollToBottomArrowMouse.containsMouse ? theme.accent : theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.accent
+                        ToolTip.visible: scrollToBottomArrowMouse.containsMouse
+                        ToolTip.text: i18n.tr("Newest messages (Ctrl+End)")
+                        ToolTip.delay: 400
+                        Text {
+                            anchors.centerIn: parent
+                            text: "↓"
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: scrollToBottomArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
+                        }
+                        MouseArea {
+                            id: scrollToBottomArrowMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: messageListView.smoothScrollTo(true)
+                        }
                     }
 
                     delegate: ColumnLayout {
@@ -5965,7 +5462,8 @@ ApplicationWindow {
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(160, Math.max(72, theme.fontSize + 52, composerInput.contentHeight + composerInput.topPadding + composerInput.bottomPadding + 28))
+                    // Hugs the input: one line is as tall as the buttons, and it grows as text wraps
+                    Layout.preferredHeight: Math.min(160, Math.max(64, composerBox.Layout.preferredHeight + 20))
                     color: theme.darkBackground
 
                     Rectangle {
@@ -6017,8 +5515,12 @@ ApplicationWindow {
                         }
 
                         Rectangle {
+                            id: composerBox
+                            objectName: "composerBox"
                             Layout.fillWidth: true
-                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignVCenter
+                            // No empty space under a single line; up to ~6 lines before scrolling
+                            Layout.preferredHeight: Math.min(140, Math.max(44, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))
                             radius: theme.radius
                             color: theme.background
                             border.width: 1
@@ -6029,8 +5531,8 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
                                 anchors.rightMargin: 8
-                                topPadding: 10
-                                bottomPadding: 14
+                                topPadding: 11
+                                bottomPadding: 11
                                 objectName: "composerInput"
                                 leftPadding: 4
                                 rightPadding: 4
@@ -7157,7 +6659,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
-                ComboBox {
+                ThemedComboBox {
                     id: notesPageSizeSelector
                     objectName: "notesPageSizeSelector"
                     Layout.preferredWidth: 74
@@ -7942,7 +7444,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
-                ComboBox {
+                ThemedComboBox {
                     id: eventsPageSizeSelector
                     objectName: "eventsPageSizeSelector"
                     Layout.preferredWidth: 74
@@ -8001,7 +7503,7 @@ ApplicationWindow {
                         }
                     }
 
-                    ComboBox {
+                    ThemedComboBox {
                         id: eventCalendarSelector
                         Layout.preferredWidth: 120
                         model: {
@@ -8233,7 +7735,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
-                ComboBox {
+                ThemedComboBox {
                     id: photosPageSizeSelector
                     objectName: "photosPageSizeSelector"
                     Layout.preferredWidth: 72
@@ -10318,6 +9820,92 @@ ApplicationWindow {
                     }
                 }
 
+                // Message history and relay tools (moved here from the old Home page
+                // and the top bar's "60d" pill)
+                ColumnLayout {
+                    id: historySettingsCol
+                    objectName: "historySettingsCol"
+                    Layout.fillWidth: true
+                    spacing: 6
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: "🕒 " + i18n.tr("Message History Sync Window")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+                        Repeater {
+                            model: [
+                                { label: "🌐 " + i18n.tr("Web UI"), name: "settingsWebUiBtn", run: function() { backend.openWebUi() } }
+                            ]
+                            delegate: Rectangle {
+                                required property var modelData
+                                objectName: modelData.name
+                                height: 26
+                                radius: 6
+                                implicitWidth: toolLbl.implicitWidth + 18
+                                color: toolMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                border.width: activeFocus ? 2 : 1
+                                border.color: (toolMouse.containsMouse || activeFocus) ? theme.accent : theme.muted
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: modelData.label
+                                Accessible.onPressAction: modelData.run()
+                                Keys.onReturnPressed: modelData.run()
+                                Keys.onEnterPressed: modelData.run()
+                                Keys.onSpacePressed: modelData.run()
+                                Text {
+                                    id: toolLbl
+                                    anchors.centerIn: parent
+                                    text: modelData.label
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                MouseArea {
+                                    id: toolMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: modelData.run()
+                                }
+                            }
+                        }
+                    }
+
+                    ThemedComboBox {
+                        id: historySyncWindowCombo
+                        objectName: "historySyncWindowChoices"
+                        Layout.preferredWidth: 180
+                        Accessible.name: i18n.tr("Message History Sync Window")
+                        textRole: "label"
+                        valueRole: "days"
+                        // Presets, plus the current value if it was set to something else
+                        model: {
+                            const presets = [7, 14, 30, 60, 90, 180, 365]
+                            const cur = backend.historySyncDays
+                            const days = presets.indexOf(cur) >= 0 || cur <= 0 ? presets
+                                       : presets.concat([cur]).sort(function(a, b) { return a - b })
+                            return days.map(function(d) {
+                                return { days: d, label: d === 365 ? i18n.tr("1 year") : i18n.tr("%1 days").arg(d) }
+                            })
+                        }
+                        currentIndex: indexOfValue(backend.historySyncDays)
+                        onActivated: backend.setHistorySyncDays(currentValue)
+                    }
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("How far back conversations are synced from the Mac.")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.darkForeground
+                        wrapMode: Text.WordWrap
+                    }
+                }
+
                 // Customizable Notifications & Audio Alert Settings
                 ColumnLayout {
                     id: notificationsSettingsCol
@@ -10569,7 +10157,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize - 3
                                 color: theme.darkForeground
                             }
-                            ComboBox {
+                            ThemedComboBox {
                                 id: audioInputDeviceCombo
                                 objectName: "audioInputDeviceCombo"
                                 Layout.fillWidth: true
@@ -10593,7 +10181,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize - 3
                                 color: theme.darkForeground
                             }
-                            ComboBox {
+                            ThemedComboBox {
                                 id: audioOutputDeviceCombo
                                 objectName: "audioOutputDeviceCombo"
                                 Layout.fillWidth: true
@@ -10742,7 +10330,7 @@ ApplicationWindow {
 
                 Repeater {
                     model: [
-                        { keys: "Ctrl+H / Esc", desc: "Open iMessage Home Page dashboard" },
+                        { keys: "Ctrl+H / Esc", desc: "Close the open conversation" },
                         { keys: "Ctrl+K / F1", desc: "Toggle this keyboard shortcuts dialog" },
                         { keys: "Ctrl+F / /", desc: "Focus conversation search filter" },
                         { keys: "Alt+Down / Ctrl+J", desc: "Next conversation in sidebar" },

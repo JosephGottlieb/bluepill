@@ -592,8 +592,10 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("bottomSettleTimer")));
         QVERIFY(qml.contains(QStringLiteral("messageListView.scrollToTop()")));
         QVERIFY(qml.contains(QStringLiteral("messageListView.scrollToBottom()")));
-        QVERIFY(qml.contains(QStringLiteral("i18n.tr(\"Top\")")));
-        QVERIFY(qml.contains(QStringLiteral("i18n.tr(\"Bottom\")")));
+        // Top/Bottom are floating arrows over the timeline, not header buttons
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"scrollToTopArrow\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"scrollToBottomArrow\"")));
+        QVERIFY(!qml.contains(QStringLiteral("i18n.tr(\"Bottom\")")));
         QVERIFY(qml.contains(QStringLiteral("Load older messages")));
     }
 
@@ -1028,10 +1030,13 @@ private slots:
         const QString qml = QString::fromUtf8(qmlFile.readAll());
         QVERIFY(qml.contains(QStringLiteral("backend.clearSelectedChat")));
         QVERIFY(qml.contains(QStringLiteral("Ctrl+H")));
-        QVERIFY(qml.contains(QStringLiteral("iMessage Home")));
+        // No Home dashboard: an empty pane, and the sync window lives in Settings only
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"noConversationPane\"")));
+        QVERIFY(!qml.contains(QStringLiteral("iMessage Home Page Dashboard")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"historySettingsCol\"")));
         QVERIFY(qml.contains(QStringLiteral("backend.historySyncDays")));
         QVERIFY(qml.contains(QStringLiteral("backend.setHistorySyncDays")));
-        QVERIFY(qml.contains(QStringLiteral("backend.cycleHistorySyncDays")));
+        QVERIFY(!qml.contains(QStringLiteral("backend.cycleHistorySyncDays")));
     }
 
     void testVerificationCodeExtractionAndCopyToClipboard() {
@@ -1576,8 +1581,10 @@ private slots:
         const QString qml = QString::fromUtf8(qmlFile.readAll());
 
         // 1. Verify Bottom Message Composer Bar height & composerInput bottomPadding for descenders (p, q, g, y, j)
-        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(160, Math.max(72, theme.fontSize + 52, composerInput.contentHeight + composerInput.topPadding + composerInput.bottomPadding + 28))")));
-        QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 8\n                                anchors.rightMargin: 8\n                                topPadding: 10\n                                bottomPadding: 14")));
+        // The input hugs its text (even padding, room for descenders), and the bar hugs the input
+        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(160, Math.max(64, composerBox.Layout.preferredHeight + 20))")));
+        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(140, Math.max(44, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))")));
+        QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 8\n                                anchors.rightMargin: 8\n                                topPadding: 11\n                                bottomPadding: 11")));
 
         // 2. Verify New Message modal, Search Bar, and Emoji Search Field bottomPadding & expanded heights
         QVERIFY(qml.contains(QStringLiteral("id: newChatRecipient\n                        anchors.fill: parent\n                        anchors.leftMargin: 10\n                        anchors.rightMargin: 10\n                        topPadding: 8\n                        bottomPadding: 12")));
@@ -2308,10 +2315,13 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("function resolveAttachmentUrl(attGuid, initialUrl)")));
 
         // Verify Home View summary cards have explicit preferred/minimum widths and heights so Message History Sync Window never crushes sibling cards or overlaps Recent Conversations
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeConversationsCard\"")));
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeUnreadCard\"")));
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeSyncWindowCard\"")));
-        QVERIFY(qml.contains(QStringLiteral("objectName: \"homeRecentConversationsCol\"")));
+        // Home's cards were folded into the top bar ("All (N)", "Unread (N)") and Settings
+        QVERIFY(!qml.contains(QStringLiteral("objectName: \"homeConversationsCard\"")));
+        QVERIFY(qml.contains(QStringLiteral("backend.totalChatCount")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"historySyncWindowChoices\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"markAllReadRow\"")));
+        // Every dropdown is themed
+        QVERIFY(!QRegularExpression(QStringLiteral(R"(^\s*ComboBox \{)"), QRegularExpression::MultilineOption).match(qml).hasMatch());
 
         // Verify native in-app Photo Lightbox / Gallery Viewer is wired in Main.qml instead of external viewer
         QVERIFY(qml.contains(QStringLiteral("id: photoViewerModal")));
@@ -2360,6 +2370,84 @@ private slots:
         dummyWin.setProperty("showPhotoViewer", false);
         QKeyEvent passRight(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
+    }
+
+    void testTimelineWheelSpeedAndAnimatedScrollArrows() {
+        Backend backend(false);
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        QJsonArray batch;
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 3600000;
+        for (int i = 0; i < 120; ++i)
+            batch.append(QJsonObject{{"guid", QStringLiteral("w-%1").arg(i)}, {"text", QStringLiteral("message number %1").arg(i)},
+                                     {"isFromMe", i % 2 == 0}, {"service", "iMessage"}, {"dateCreated", t + i * 1000},
+                                     {"chats", QJsonArray{chatObj}}});
+        const QString otherGuid = QStringLiteral("iMessage;-;+15555550101");
+        batch.append(QJsonObject{{"guid", QStringLiteral("w-other")}, {"text", QStringLiteral("other chat")},
+                                 {"isFromMe", false}, {"service", "iMessage"}, {"dateCreated", t},
+                                 {"chats", QJsonArray{QJsonObject{{QStringLiteral("guid"), otherGuid}, {QStringLiteral("style"), 45}}}}});
+        backend.ingestMessagesForTest(batch, true);
+        backend.selectChat(chatGuid);
+        Theme theme; Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        win->resize(1180, 600); win->show(); QTest::qWait(500);
+        auto *lv = win->findChild<QQuickItem *>(QStringLiteral("messageTimelineListView"));
+        const QPointF c = lv->mapToScene(QPointF(lv->width()/2, lv->height()/2));
+        const qreal y0 = lv->property("contentY").toReal();
+        for (int i = 0; i < 3; ++i) {
+            QWheelEvent ev(c, win->mapToGlobal(c.toPoint()), QPoint(), QPoint(0, 120), Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+            QCoreApplication::sendEvent(win, &ev);
+            QTest::qWait(40);
+        }
+        QTest::qWait(300);
+        // ~110px a notch, faster while spinning (the default moved 3 notches only ~18px)
+        const qreal moved = y0 - lv->property("contentY").toReal();
+        QVERIFY2(moved >= 300 && moved <= 500, qPrintable(QString::number(moved)));
+        QVERIFY(!lv->property("stickToBottom").toBool());
+
+        // The ↑ arrow animates up instead of jumping, then lands at the very top
+        const qreal before = lv->property("contentY").toReal();
+        QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, false));
+        // No synchronous jump: the animation is running and contentY hasn't moved yet
+        QVERIFY(lv->property("smoothScrolling").toBool());
+        QCOMPARE(lv->property("contentY").toReal(), before);
+        QTRY_VERIFY_WITH_TIMEOUT(lv->property("atYBeginning").toBool(), 3000);
+        // ...and ↓ back to the newest message, sticking there
+        QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, true));
+        // (scrollToBottom() rests the last message above the 46px bottom margin)
+        auto atBottom = [&]() {
+            const qreal end = lv->property("originY").toReal() + lv->property("contentHeight").toReal() - lv->height();
+            return lv->property("stickToBottom").toBool() && qAbs(lv->property("contentY").toReal() - end) <= 2.0;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(atBottom(), 3000);
+
+        // Switching conversations mid-animation cancels it, so the new chat stays at its newest message
+        QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, false));
+        QVERIFY(lv->property("smoothScrolling").toBool());
+        backend.selectChat(otherGuid);
+        QVERIFY(!lv->property("smoothScrolling").toBool());
+        QTest::qWait(800);
+        QVERIFY(lv->property("stickToBottom").toBool());
+
+        // Settings: the sync window is a themed dropdown bound to the backend
+        QObject *syncCombo = win->findChild<QObject *>(QStringLiteral("historySyncWindowChoices"));
+        QVERIFY(syncCombo);
+        backend.setHistorySyncDays(30);
+        QCOMPARE(syncCombo->property("currentValue").toInt(), 30);
+        QCOMPARE(syncCombo->property("displayText").toString(), QStringLiteral("30 days"));
+        QCOMPARE(syncCombo->property("count").toInt(), 7);
+        syncCombo->setProperty("currentIndex", 6);
+        QMetaObject::invokeMethod(syncCombo, "activated", Q_ARG(int, 6));
+        QCOMPARE(backend.historySyncDays(), 365);
+        QCOMPARE(syncCombo->property("displayText").toString(), QStringLiteral("1 year"));
+        backend.setHistorySyncDays(45);  // a non-preset value still shows
+        QCOMPARE(syncCombo->property("count").toInt(), 8);
+        QCOMPARE(syncCombo->property("currentValue").toInt(), 45);
     }
 
     void testEditMessageAndTwoMinuteEditUnsendWindow() {
@@ -3121,49 +3209,27 @@ private slots:
         QVERIFY(headerActionsRow != nullptr);
         QVERIFY(leftSidebarPane != nullptr);
 
-        // 1. Wide window (1400px): single-row header (height 68), zero overlap
-        win->setWidth(1400);
-        win->setHeight(820);
-        QCoreApplication::processEvents();
-        QTRY_VERIFY_WITH_TIMEOUT(activeChatHeader->width() > 1000, 1000);
-        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), false, 1000);
-        QCOMPARE(qRound(activeChatHeader->height()), 68);
-        QVERIFY2(contactIdentityCard->x() + contactIdentityCard->width() <= headerActionsRow->x(),
-                 "In 1-row wide mode, contactIdentityCard must not overlap headerActionsRow");
-        if (!qEnvironmentVariableIsEmpty("IMSG_WIDE_SCREENSHOT")) {
-            win->grabWindow().save(QString::fromUtf8(qgetenv("IMSG_WIDE_SCREENSHOT")));
+        // One transparent 60px row at every width; the contact is centered and never
+        // overlaps what's left of the actions row.
+        QCOMPARE(activeChatHeader->property("color").value<QColor>().alpha(), 0);
+        for (int w : {1400, 900, 720}) {
+            win->setWidth(w);
+            win->setHeight(820);
+            QCoreApplication::processEvents();
+            QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), false, 1000);
+            QCOMPARE(qRound(activeChatHeader->height()), 60);
+            const QRectF identity(contactIdentityCard->x(), contactIdentityCard->y(),
+                                  contactIdentityCard->width(), contactIdentityCard->height());
+            const QRectF actions(headerActionsRow->x(), headerActionsRow->y(),
+                                 headerActionsRow->width(), headerActionsRow->height());
+            QVERIFY2(actions.width() == 0 || !identity.intersects(actions), qPrintable(QStringLiteral("overlap at %1px").arg(w)));
+            QVERIFY2(qAbs(identity.center().x() - activeChatHeader->width() / 2.0) <= 1.0,
+                     qPrintable(QStringLiteral("not centered at %1px: %2 vs %3").arg(w).arg(identity.center().x()).arg(activeChatHeader->width() / 2.0)));
+            QVERIFY(actions.right() <= activeChatHeader->width());
+            if (w == 1400 && !qEnvironmentVariableIsEmpty("IMSG_WIDE_SCREENSHOT")) {
+                win->grabWindow().save(QString::fromUtf8(qgetenv("IMSG_WIDE_SCREENSHOT")));
+            }
         }
-
-        // 2. 50% Desktop Split (900px): dynamic 2-row header (height 104), zero overlap, full name visible
-        win->setWidth(900);
-        QCoreApplication::processEvents();
-        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), true, 1000);
-        QCOMPARE(qRound(activeChatHeader->height()), 104);
-        const QRectF identityRect900(contactIdentityCard->x(), contactIdentityCard->y(),
-                                     contactIdentityCard->width(), contactIdentityCard->height());
-        const QRectF actionsRect900(headerActionsRow->x(), headerActionsRow->y(),
-                                    headerActionsRow->width(), headerActionsRow->height());
-        QVERIFY2(!identityRect900.intersects(actionsRect900),
-                 "In 50% split mode (900px), contactIdentityCard and headerActionsRow must have zero geometric overlap");
-        QVERIFY2(actionsRect900.right() <= activeChatHeader->width(),
-                 "In 50% split mode (900px), action buttons row must fit within activeChatHeader width");
-        if (!qEnvironmentVariableIsEmpty("IMSG_SPLIT_SCREENSHOT")) {
-            win->grabWindow().save(QString::fromUtf8(qgetenv("IMSG_SPLIT_SCREENSHOT")));
-        }
-
-        // 3. Narrow split (720px): compact buttons on row 2, zero overlap
-        win->setWidth(720);
-        QCoreApplication::processEvents();
-        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), true, 1000);
-        QCOMPARE(activeChatHeader->property("ultraCompactActionButtons").toBool(), true);
-        const QRectF identityRect720(contactIdentityCard->x(), contactIdentityCard->y(),
-                                     contactIdentityCard->width(), contactIdentityCard->height());
-        const QRectF actionsRect720(headerActionsRow->x(), headerActionsRow->y(),
-                                    headerActionsRow->width(), headerActionsRow->height());
-        QVERIFY2(!identityRect720.intersects(actionsRect720),
-                 "In narrow split mode (720px), contactIdentityCard and headerActionsRow must have zero geometric overlap");
-        QVERIFY2(actionsRect720.right() <= activeChatHeader->width(),
-                 "In narrow split mode (720px), compact action buttons must fit within activeChatHeader width");
 
         QVERIFY2(qmlWarnings.isEmpty(), qPrintable(qmlWarnings.join(QStringLiteral("\n"))));
     }
@@ -3388,6 +3454,28 @@ private slots:
         QVERIFY2(!listView->property("atYBeginning").toBool() && midOffsetFromTop > 150.0,
                  "Mid-chat scroll position must be strictly below the top of the chat");
 
+        // contentY - originY is not a stable position for a ListView with variable-height
+        // delegates: originY is Qt's size estimate and shifts when delegates are rebuilt even
+        // though nothing on screen moves. Anchor on the message actually shown mid-viewport.
+        struct ViewAnchor { int index = -1; qreal topInView = 0.0; };
+        auto viewAnchor = [&]() {
+            ViewAnchor a;
+            const qreal cy = listView->property("contentY").toReal();
+            const qreal probeY = cy + listView->height() / 2.0;
+            QMetaObject::invokeMethod(listView, "indexAt", Q_RETURN_ARG(int, a.index),
+                                      Q_ARG(qreal, listView->width() / 2.0), Q_ARG(qreal, probeY));
+            QQuickItem *item = nullptr;
+            if (a.index >= 0) {
+                QMetaObject::invokeMethod(listView, "itemAtIndex", Q_RETURN_ARG(QQuickItem *, item),
+                                          Q_ARG(int, a.index));
+            }
+            if (item) a.topInView = item->y() - cy;
+            return a;
+        };
+        const ViewAnchor midAnchor = viewAnchor();
+        QVERIFY2(midAnchor.index > 0 && midAnchor.index < 34,
+                 qPrintable(QStringLiteral("Expected a mid-chat message in view, got index %1").arg(midAnchor.index)));
+
         // Perform a tapback while scrolled up in the middle of Alpine Trail Crew -> must stay at mid-chat and never jump to top!
         b.sendReaction(alpineChatGuid, QStringLiteral("MSG-ALPINE-20"), QStringLiteral("👍"));
         QCoreApplication::processEvents();
@@ -3398,9 +3486,11 @@ private slots:
         QCOMPARE(listView->property("stickToBottom").toBool(), false);
         QVERIFY2(!listView->property("atYBeginning").toBool() && afterTapbackOffsetFromTop > 150.0,
                  "Tapback while scrolled up must NEVER reset messageListView to the top of the chat");
-        QVERIFY2(qAbs(afterTapbackOffsetFromTop - midOffsetFromTop) < 120.0,
-                 qPrintable(QStringLiteral("Expected scroll offset near %1 after tapback, got %2")
-                                .arg(midOffsetFromTop).arg(afterTapbackOffsetFromTop)));
+        const ViewAnchor afterAnchor = viewAnchor();
+        QVERIFY2(afterAnchor.index == midAnchor.index && qAbs(afterAnchor.topInView - midAnchor.topInView) < 8.0,
+                 qPrintable(QStringLiteral("Expected message %1 at %2px in view after tapback, got message %3 at %4px")
+                                .arg(midAnchor.index).arg(midAnchor.topInView)
+                                .arg(afterAnchor.index).arg(afterAnchor.topInView)));
     }
 
     void testReactionPillHoverTooltipAndGroupSenderNames() {
@@ -6320,22 +6410,36 @@ private slots:
 
             auto *statusDot = win->findChild<QQuickItem *>(QStringLiteral("topConnectionStatusDot"));
             auto *serverBtnText = win->findChild<QQuickItem *>(QStringLiteral("serverTopBtnText"));
-            auto *homeSettingsText = win->findChild<QQuickItem *>(QStringLiteral("homeServerLbl"));
+            // Repeater delegates aren't QObject children: walk the visual tree
+            std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+                if (!item) return nullptr;
+                if (item->objectName() == name) return item;
+                for (QQuickItem *c : item->childItems())
+                    if (QQuickItem *f = findVisual(c, name)) return f;
+                return nullptr;
+            };
+            auto *historyCol = win->findChild<QQuickItem *>(QStringLiteral("historySettingsCol"));
+            QVERIFY(historyCol != nullptr);
+            auto *syncNowBtn = win->findChild<QQuickItem *>(QStringLiteral("topSyncBtn"));  // Sync lives in the top bar
+            auto *webUiBtn = findVisual(historyCol, QStringLiteral("settingsWebUiBtn"));
             auto *settingsTitle = win->findChild<QQuickItem *>(QStringLiteral("settingsModalTitle"));
             auto *cfgBadge = win->findChild<QQuickItem *>(QStringLiteral("cfgStatusBadge"));
             auto *previewBtn = win->findChild<QQuickItem *>(QStringLiteral("previewSoundBtn"));
             auto *presetGrid = win->findChild<QQuickItem *>(QStringLiteral("soundPresetGrid"));
             QVERIFY(statusDot != nullptr);
             QVERIFY(serverBtnText != nullptr);
-            QVERIFY(homeSettingsText != nullptr);
+            QVERIFY(syncNowBtn != nullptr);
+            QVERIFY(webUiBtn != nullptr);
+            // The relay status isn't printed in the top bar; it's the dot's tooltip
+            QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("topStatusPill")) == nullptr);
+            QCOMPARE(statusDot->property("statusText").toString(), b2.serverStatus());
             QVERIFY(settingsTitle != nullptr);
             QVERIFY(cfgBadge != nullptr);
             QVERIFY(previewBtn != nullptr);
             QVERIFY(presetGrid != nullptr);
 
-            // Top button, Home dashboard button, and modal title all say "Settings"
+            // Top button and modal title say "Settings"
             QCOMPARE(serverBtnText->property("text").toString(), QStringLiteral("Settings"));
-            QCOMPARE(homeSettingsText->property("text").toString(), QStringLiteral("⚙ Settings"));
             QCOMPARE(settingsTitle->property("text").toString(), QStringLiteral("⚙ Settings"));
 
             // Initially disconnected -> top-left dot is red (theme.red) and badge says Disconnected

@@ -4,6 +4,25 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+### Changed
+- **No more Home page:** with no conversation open, the right pane shows a short hint instead of a dashboard that repeated the top bar and the chat list. Its pieces moved:
+  - The conversation count is now part of the filter (**All (N)**).
+  - The history sync window (now a dropdown) and **Web UI** are in **Settings**. **Sync** is in the top bar.
+  - **Mark all read** appears at the top of the **Unread** view, and Ctrl+Shift+A still works.
+  - Ctrl+H still closes the open conversation.
+- **Quieter top bar:** the relay status ("Connected v1.2.1 · macOS …") shows only while hovering the connection dot, and the `60d` history pill is gone.
+- **Cleaner conversation header:** it's a transparent strip with the contact centered. Its buttons moved:
+  - **Mute** and **Delete** were already in the chat list's hover actions, and **Read/Unread** joins them.
+  - **Sync** is in the top bar, next to the filters.
+  - **Top** and **Bottom** are floating ↑ / ↓ arrows. They're small and faint, in the conversation's top-right and bottom-right corners. They appear when you've scrolled away from either end, and only while the mouse moves or the list scrolls; after 1.5 s idle they fade out.
+- **Faster wheel scrolling, animated jumps:**
+  - **Wheel:** one notch scrolls about 110 px, speeding up to 2.5× while the wheel spins. Before, 3 notches moved about 18 px. Touchpads follow your finger.
+  - **Arrows:** the ↑ / ↓ arrows animate there instead of jumping.
+- **Icon-only top-bar buttons:** **New Message** is a compose icon (pencil over paper), **Settings** is the gear, and **Sync** is ↻, which spins while history syncs. Tooltips name each one, and Ctrl+N, Ctrl+, and Ctrl+R still work.
+- **The message box hugs its text:** one line is as tall as the buttons beside it, and the box grows only once text wraps.
+- **Message actions open on right-click:** hovering a message no longer outlines it or pops up the tapback / Reply / Copy / Delete bar. Right-click a message or photo to open the bar, and left-click elsewhere or press Esc to close it. Right-click used to copy the message; that's now the bar's **Copy** button.
+- **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
+
 ### Added
 - **GIFs play inline:** GIF and WebP attachments animate in the conversation and in the photo viewer (`AnimatedImage`). Animated WebP needs Qt's WebP image plugin (`qt6-imageformats`). GIFs pause while scrolled off screen.
 - **Photos and emoji without text are shown without a bubble**, like iOS Messages. A photo sent on its own shows with rounded corners and no bubble behind it; a message of one to three emoji is shown large, with no bubble. Photos with a caption, and text that contains emoji, keep their bubble.
@@ -28,10 +47,10 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 - **Contact photos instead of initials:** `bluepill-server` serves each contact's AddressBook photo at `/api/v1/contact/<id>/avatar`. That handles the photo stored inline, with or without the leading marker byte, and the newer `Images/` file reference. The client downloads photos only for people you have chats with, 4 at a time, caches them for a day, and shows them as circles in the chat list, the pinned row and the conversation header. Under **On your Mac** it lists every other populated field: middle name, nickname, company, job title, department, all phones and emails with their labels, addresses, URLs, birthday and note. `bluepill-server` now returns these fields from the AddressBook (labels, `middleName`, `jobTitle`, `department`, `addresses`, `urls`, `note`, `birthday`), reading only the columns that exist on that macOS version.
 - **Edit sent iMessages:** right-click a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back, and your unsent draft is restored when you finish or cancel the edit.
 - **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
-- **Message actions open on right-click:** hovering a message no longer outlines it or pops up the tapback / Reply / Copy / Delete bar. Right-click a message or photo to open the bar, and left-click elsewhere or press Esc to close it. Right-click used to copy the message; that's now the bar's **Copy** button.
-- **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
 
 ### Fixed
+- **Dropdowns follow the theme:** the microphone and speaker pickers, and the page-size and calendar selectors, no longer render as white system widgets.
+- **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
 - **The pinned row shows your Mac's pinned conversations:**
   - **What changed:** it reads the Mac's pins (`GET /api/v1/pinned`) in the Mac's order, instead of showing the four most recent chats when nothing was pinned locally.
   - **Right-click:** on a pinned contact it opens the conversation menu instead of silently pinning that chat, which used to hide the other three.
