@@ -2943,13 +2943,18 @@ class BluePillEngine:
         if custom_snapshot and out:
             seen_guids = {str(m.get("guid") or "") for m in out}
             norm_seen_guids = {g.split("/", 1)[-1] if "/" in g else g for g in seen_guids if g}
-            existing_custom_keys = {
-                (
-                    str(m.get("associatedMessageGuid") or ""),
-                    str(m.get("associatedMessageEmoji") or ""),
-                    bool(m.get("isFromMe", False)),
-                    str((m.get("handle") or {}).get("address") or ""),
+            def _custom_react_dedup_key(item: Dict[str, Any]) -> Tuple[str, str, bool, str]:
+                is_me = bool(item.get("isFromMe", False))
+                addr = "" if is_me else str((item.get("handle") or {}).get("address") or "")
+                return (
+                    str(item.get("associatedMessageGuid") or ""),
+                    str(item.get("associatedMessageEmoji") or ""),
+                    is_me,
+                    addr,
                 )
+
+            existing_custom_keys = {
+                _custom_react_dedup_key(m)
                 for m in out
                 if m.get("associatedMessageEmoji")
             }
@@ -2957,13 +2962,7 @@ class BluePillEngine:
                 cr_guid = str(cr.get("guid") or "")
                 cr_assoc = str(cr.get("associatedMessageGuid") or "")
                 cr_target = cr_assoc.split("/", 1)[-1] if "/" in cr_assoc else cr_assoc
-                cr_emoji = str(cr.get("associatedMessageEmoji") or "")
-                cr_key = (
-                    cr_assoc,
-                    cr_emoji,
-                    bool(cr.get("isFromMe", True)),
-                    str((cr.get("handle") or {}).get("address") or ""),
-                )
+                cr_key = _custom_react_dedup_key(cr)
                 if (
                     cr_guid
                     and cr_target in norm_seen_guids
@@ -13805,6 +13804,27 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
                 )
                 assert recorded_react_actions[1][1].get("emoji") == "🔥" and recorded_react_actions[1][1].get("isRemoved") is False
                 assert recorded_react_actions[2][1].get("emoji") == "🔥" and recorded_react_actions[2][1].get("isRemoved") is True
+                # Outgoing chat.db 2006 row with recipient handle must deduplicate synthetic custom_reactions entry
+                r7_eng.send_reaction({
+                    "chatGuid": "iMessage;-;+14155550171",
+                    "selectedMessageGuid": "r7-text-1",
+                    "reaction": "🔥",
+                })
+                c_db_react = sqlite3.connect(r7_db_path)
+                c_db_react.execute(
+                    "INSERT OR IGNORE INTO handle (ROWID, id, service) VALUES (1, '+14155550171', 'iMessage');"
+                )
+                c_db_react.execute(
+                    "INSERT INTO message VALUES (34, 'r7-db-fire-34', 'Reacted 🔥 to “unrelated earlier text”', NULL, '', 1, 0, 700000490000000000, 0, 0, 1, 1, 1, 1, 0, 'iMessage', 0, 0, '', 'p:0/r7-text-1', 2006, '🔥', '', '', '', 0, 0, 0, 0, 0, 0, '', 0, '', 0);"
+                )
+                c_db_react.execute("INSERT INTO chat_message_join VALUES (1, 34, 700000490000000000);")
+                c_db_react.commit()
+                c_db_react.close()
+                q_msgs_dedup = r7_eng.query_messages({"chatGuid": "iMessage;-;+14155550171", "limit": 20})
+                fire_rows = [m for m in q_msgs_dedup if m.get("associatedMessageEmoji") == "🔥" and m.get("associatedMessageType") == 2006]
+                assert len(fire_rows) == 1 and fire_rows[0].get("guid") == "r7-db-fire-34", (
+                    f"Expected 1 deduplicated chat.db custom reaction row, got: {fire_rows}"
+                )
         finally:
             for p in (r7_db_path, f"{r7_db_path}.chat_state.json"):
                 if os.path.exists(p):
