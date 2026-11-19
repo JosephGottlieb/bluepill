@@ -70,6 +70,8 @@ struct MessageModel {
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool connected READ connected NOTIFY statusChanged)
+    // How long after sending a message it can still be edited or unsent.
+    Q_PROPERTY(int messageEditWindowMs READ messageEditWindowMs CONSTANT)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY statusChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl NOTIFY configChanged)
@@ -319,6 +321,8 @@ public:
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setFilterMode(const QString &mode);
     Q_INVOKABLE void refreshAll();
+    // file:// URL of an attachment already on disk, or "".
+    Q_INVOKABLE QString cachedAttachmentUrl(const QString &attachmentGuid) const;
     Q_INVOKABLE void selectChat(const QString &chatGuid);
     Q_INVOKABLE bool isSameConversation(const QString &guidA, const QString &guidB) const;
     Q_INVOKABLE QString resolveCanonicalChatGuid(const QString &chatGuid) const;
@@ -333,6 +337,10 @@ public:
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
+    Q_INVOKABLE void editMessage(const QString &messageGuid, const QString &newText);
+    static constexpr int kMessageEditWindowMs = 2 * 60 * 1000;
+    int editRepliesProcessedForTest() const { return m_editRepliesProcessed; }
+    int messageEditWindowMs() const { return kMessageEditWindowMs; }
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
@@ -343,6 +351,11 @@ public:
     Q_INVOKABLE void seedDemoData() { loadDemoData(); }
     Q_INVOKABLE void saveContact(const QString &firstName, const QString &lastName, const QString &phone, const QString &email);
     Q_INVOKABLE void syncContactsNow();
+    // A Mac contact's fields for Edit Contact: firstName, lastName, phone, email, and
+    // rows ({label, value}) for every populated field. found=false when unknown.
+    Q_INVOKABLE QVariantMap contactDetails(const QString &address) const;
+    // Photos, links and files shared in a conversation (newest first): {photos, links, files}
+    Q_INVOKABLE QVariantMap conversationMedia(const QString &chatGuid) const;
     Q_INVOKABLE void loadOlderMessages();
 
     // Emoji shortcode & picker helpers
@@ -438,6 +451,13 @@ public:
         m_lastSoundPresetPlayed.clear();
     }
     void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
+    QString contactAvatarApiPathForTest(const QString &handle) const { return m_contactAvatarApiPaths.value(normalizeHandle(handle)); }
+    QString contactAvatarCacheFileForTest(const QString &apiPath) const { return avatarCacheFile(apiPath); }
+    void setAvatarRetryBaseMsForTest(qint64 ms) { m_avatarRetryBaseMs = ms; }
+    void expireContactAvatarsForTest() { for (auto it = m_contactAvatarFetchedAtMs.begin(); it != m_contactAvatarFetchedAtMs.end(); ++it) it.value() -= kAvatarRefreshMs + 1; }
+    void fetchContactAvatarsForChatsForTest() { fetchContactAvatarsForChats(); }
+    void applyContactAvatarForTest(const QString &apiPath, const QString &file) { applyContactAvatar(apiPath, file); }
+    void downloadAttachmentForTest(const QString &guid, const QString &transferName) { downloadAttachment(guid, transferName, false); }
     bool tailnetCheckPendingForTest() const { return tailnetCheckPending(); }
 
     // Pure testable helpers
@@ -456,6 +476,7 @@ public:
     static bool isDecodableImageFile(const QString &path);
     static QString formatExpressiveEffectLabel(const QString &styleId);
     static QString extractFirstUrl(const QString &text);
+    static QString stripTrailingUrlPunctuation(QString url);
     static bool isYouTubeUrl(const QString &url);
     static QString formatMessageTextWithLinks(const QString &raw);
     static bool isImageMimeOrExt(const QString &mime, const QString &fileName);
@@ -600,6 +621,31 @@ signals:
     void pendingDeliveryCheckFinishedForTest();
 
 private:
+    // Finds a cached message; chatKey gets the m_chatMessagesCache key it's under.
+    QJsonObject findCachedMessage(const QString &messageGuid, QString *chatKey = nullptr) const;
+    // The chat a message actually belongs to on the Mac (not the merged canonical chat).
+    static QString messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid);
+    void applyLocalUnsend(const QString &messageGuid, const QString &chatGuid);
+    // Edits to one message go to the Mac one at a time, in order: while one is
+    // in flight only the newest further edit waits behind it. A failure rolls
+    // back to the last text the Mac confirmed, unless a sync changed it meanwhile.
+    struct EditSnapshot { QString text; QJsonValue dateEdited; QJsonValue attributed; };
+    struct EditTracking {
+        bool inFlight = false;
+        bool hasQueued = false;
+        QString queuedText;
+        QString shownText;      // what this client last put on screen
+        QString chatKey;
+        QString sendChatGuid;
+        int partIndex = 0;
+        EditSnapshot confirmed;
+    };
+    QHash<QString, EditTracking> m_editTracking;
+    int m_editRepliesProcessed = 0;
+    void sendEditRequest(const QString &msgGuid, const QString &text);
+    void applyEditedText(const QString &chatKey, const QString &msgGuid, const QString &text,
+                         const QJsonValue &dateEdited, const QJsonValue &attributed);
+    static bool parseJsonReplyObject(const QByteArray &bytes, QJsonObject *out);
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
     QNetworkRequest makeSocketIoRequest(const QList<QPair<QString, QString>> &extraQueryItems = {}, int timeoutMs = 85000) const;
     QUrl buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems = {}) const;
@@ -752,6 +798,26 @@ private:
     QString m_selectedChatGuid;
 
     QHash<QString, QString> m_contactNames;
+    QHash<QString, QVariantMap> m_contactRecords;  // full Mac contact, by normalized handle
+    // Contact photos served by bluepill-server, fetched for chat participants
+    QHash<QString, QString> m_contactAvatarApiPaths;  // normalized handle -> /api/v1/contact/<id>/avatar
+    QStringList m_contactAvatarQueue;
+    // Fetch state, keyed by relay + avatar path (avatarFetchKey)
+    QSet<QString> m_contactAvatarInFlight;
+    QHash<QString, qint64> m_contactAvatarFetchedAtMs;              // last success (or fresh disk copy)
+    struct AvatarFailure { int attempts = 0; qint64 retryAtMs = 0; };
+    QHash<QString, AvatarFailure> m_contactAvatarFailures;
+    int m_contactAvatarsInFlight = 0;
+    bool m_avatarScanPending = false;
+    qint64 m_avatarRetryBaseMs = 30000;
+    static constexpr qint64 kAvatarRefreshMs = 24LL * 60 * 60 * 1000;
+    static constexpr int kAvatarMaxAttempts = 5;
+    QString avatarFetchKey(const QString &apiPath) const;
+    QString avatarCacheFile(const QString &apiPath) const;
+    bool m_avatarRefreshPending = false;
+    void fetchContactAvatarsForChats();
+    void pumpContactAvatarQueue();
+    void applyContactAvatar(const QString &apiPath, const QString &file);
     QHash<QString, QString> m_contactRawAddresses;
     QHash<QString, QString> m_contactAvatars;
     QHash<QString, QStringList> m_chatParticipants;
