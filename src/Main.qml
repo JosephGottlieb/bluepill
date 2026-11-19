@@ -419,6 +419,68 @@ ApplicationWindow {
     property bool showShortcutsModal: false
     property bool showNewChatModal: false
     property bool showContactModal: false
+    // Thread view (opened from a quoted reply or "N Replies"), and the message to flash after a jump
+    property string threadRootGuid: ""
+    property string threadChatGuid: ""
+    property bool showThreadView: false
+    function closeThread() {
+        root.showThreadView = false
+        root.threadRootGuid = ""
+        root.threadChatGuid = ""
+    }
+    // A thread belongs to the conversation it was opened from
+    Connections {
+        target: backend
+        function onSelectedChatChanged() {
+            if (root.showThreadView && backend.selectedChatGuid !== root.threadChatGuid) root.closeThread()
+        }
+    }
+    property string highlightGuid: ""
+    Timer {
+        id: highlightTimer
+        interval: 1600
+        onTriggered: root.highlightGuid = ""
+    }
+    function openThread(rootGuid) {
+        if (!rootGuid || rootGuid.length === 0) return
+        root.clearActionMenu()
+        root.threadRootGuid = rootGuid
+        root.threadChatGuid = backend.selectedChatGuid
+        root.showThreadView = true
+        threadReplyInput.text = ""
+        threadReplyInput.forceActiveFocus()
+    }
+    function sendThreadReply() {
+        var text = threadReplyInput.text.trim()
+        if (text.length === 0 || backend.selectedChatGuid.length === 0 || root.threadRootGuid.length === 0) return
+        if (backend.selectedChatGuid !== root.threadChatGuid) { root.closeThread(); return }
+        backend.sendMessage(backend.selectedChatGuid, text, root.threadRootGuid)
+        threadReplyInput.text = ""
+        threadList.positionViewAtEnd()
+    }
+    function jumpToMessage(guid) {
+        var idx = backend.messageIndexForGuid(guid || "")
+        if (idx < 0) {
+            root.showToast("↑ " + i18n.tr("That message isn't loaded yet; scroll up to load older messages"))
+            return
+        }
+        root.closeThread()
+        // Cancel any pending restore/settle pass so it can't move the target back out of view
+        messageListView.restoringScrollPosition = false
+        messageListView.restorePassesRemaining = 0
+        scrollRestoreTimer.stop()
+        messageListView.settlingToBottom = false
+        messageListView.settlePassesRemaining = 0
+        bottomSettleTimer.stop()
+        messageListView.prevContentHeight = 0
+        messageListView.prevContentY = 0
+        messageListView.stickToBottom = false
+        messageListView.savedStickToBottom = false
+        messageListView.positionViewAtIndex(idx, ListView.Center)
+        messageListView.snapshotScrollState()
+        root.highlightGuid = backend.messages[idx].guid || ""
+        highlightTimer.restart()
+    }
     property bool showDeleteChatModal: false
     property bool showServerConfigModal: false
     property bool showServerPassword: false
@@ -829,6 +891,7 @@ ApplicationWindow {
 
     onShowNewChatModalChanged: {
         if (root.showNewChatModal) {
+            if (root.showThreadView) root.closeThread()
             root.newChatSelectedHandle = ""
             root.newChatSelectedIndex = 0
             root.refreshNewChatSuggestions()
@@ -1373,6 +1436,8 @@ ApplicationWindow {
                 root.showContactModal = false
             } else if (root.showNewChatModal) {
                 root.showNewChatModal = false
+            } else if (root.showThreadView) {
+                root.showThreadView = false
             } else if (root.showContactInfo) {
                 root.closeContactInfo()
             } else if (root.showEmojiPicker) {
@@ -2109,7 +2174,9 @@ ApplicationWindow {
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: function(mouse) {
                                             if (mouse.button === Qt.RightButton) {
-                                                backend.togglePinChat(modelData.guid)
+                                                // Same menu as the chat list (with Unpin)
+                                                var p = pinTileMouse.mapToItem(root.contentItem, mouse.x, mouse.y)
+                                                chatContextMenuPopup.openForChat(modelData, p.x, p.y)
                                             } else {
                                                 var win = root
                                                 var pinGuid = modelData.guid
@@ -3446,11 +3513,23 @@ ApplicationWindow {
                             Layout.maximumWidth: maxBannerWidth
                             radius: 6
                             clip: true
-                            color: theme.darkBackground
+                            color: replyBannerMouse.containsMouse ? theme.lighterBackground : theme.darkBackground
                             border.width: 1
-                            border.color: theme.muted
+                            border.color: replyBannerMouse.containsMouse ? theme.accent : theme.muted
                             implicitWidth: Math.min(maxBannerWidth, Math.max(replySenderTxt.implicitWidth, Math.min(maxBannerWidth - 16, replyBodyTxt.implicitWidth)) + 16)
                             implicitHeight: replyPreviewCol.implicitHeight + 12
+
+                            // Click the quote to see the whole thread (and jump to the original)
+                            MouseArea {
+                                id: replyBannerMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openThread(modelData.replyToGuid || "")
+                            }
+                            ToolTip.visible: replyBannerMouse.containsMouse
+                            ToolTip.text: i18n.tr("Show thread")
+                            ToolTip.delay: 500
 
                             ColumnLayout {
                                 id: replyPreviewCol
@@ -3845,6 +3924,19 @@ ApplicationWindow {
                                     id: bubbleRect
                                     anchors.fill: parent
                                     radius: theme.radius + 2
+
+                                    // Flash after jumping here from a thread
+                                    Rectangle {
+                                        objectName: "jumpHighlightRing"
+                                        anchors.fill: parent
+                                        radius: parent.radius
+                                        color: "transparent"
+                                        border.width: 3
+                                        border.color: theme.accent
+                                        z: 10
+                                        opacity: root.highlightGuid !== "" && root.highlightGuid === modelData.guid ? 1 : 0
+                                        Behavior on opacity { NumberAnimation { duration: 250 } }
+                                    }
                                     color: modelData.isFromMe
                                            ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
                                            : "#1e2430"
@@ -4520,6 +4612,27 @@ ApplicationWindow {
                                     anchors.fill: parent
                                     onClicked: root.clearActionMenu()
                                 }
+                            }
+                        }
+
+                        // "N Replies" under a message that started a thread
+                        Text {
+                            objectName: "threadRepliesLink"
+                            visible: (modelData.replyCount || 0) > 0
+                            Layout.alignment: modelData.isFromMe ? Qt.AlignRight : Qt.AlignLeft
+                            Layout.leftMargin: modelData.isFromMe ? 0 : 26
+                            Layout.rightMargin: modelData.isFromMe ? 26 : 0
+                            text: (modelData.replyCount || 0) === 1 ? i18n.tr("1 Reply") : ((modelData.replyCount || 0) + " " + i18n.tr("Replies"))
+                            font.pixelSize: theme.fontSize - 3
+                            font.bold: true
+                            font.underline: repliesLinkMouse.containsMouse
+                            color: theme.accent
+                            MouseArea {
+                                id: repliesLinkMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openThread(modelData.guid)
                             }
                         }
 
@@ -8555,6 +8668,203 @@ ApplicationWindow {
         }
     }
 
+    // Thread view: the original message and its replies, like Messages on iOS/macOS
+    Rectangle {
+        id: threadViewModal
+        objectName: "threadViewModal"
+        visible: root.showThreadView
+        // Covers only the open conversation (not the sidebar), so the thread
+        // card is centered over the chat it belongs to.
+        readonly property point paneOrigin: {
+            void (conversationPane.x + conversationPane.y + conversationPane.width + conversationPane.height + root.width + root.height)
+            return conversationPane.mapToItem(threadViewModal.parent, 0, 0)
+        }
+        x: paneOrigin.x
+        y: paneOrigin.y
+        width: conversationPane.width
+        height: conversationPane.height
+        color: "#aa0e0e14"
+        z: 998
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true  // takes hover from the timeline underneath (no stray tooltips)
+            onClicked: root.showThreadView = false
+        }
+
+        Rectangle {
+            objectName: "threadViewCard"
+            width: Math.min(560, parent.width - 80)
+            height: Math.min(parent.height - 80, threadCol.implicitHeight + 44)
+            anchors.centerIn: parent
+            radius: theme.radius + 2
+            color: theme.darkBackground
+            border.width: 1
+            border.color: theme.accent
+            MouseArea { anchors.fill: parent }  // keep clicks inside from closing it
+
+            ColumnLayout {
+                id: threadCol
+                anchors.fill: parent
+                anchors.margins: 22
+                spacing: 10
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("Thread")
+                        font.pixelSize: theme.fontSize + 3
+                        font.bold: true
+                        color: theme.brightForeground
+                    }
+                    Text {
+                        text: "✕"
+                        font.pixelSize: theme.fontSize + 1
+                        color: theme.foreground
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showThreadView = false
+                        }
+                    }
+                }
+
+                ListView {
+                    id: threadList
+                    objectName: "threadList"
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    Layout.preferredHeight: contentHeight
+                    clip: true
+                    spacing: 8
+                    boundsBehavior: Flickable.StopAtBounds
+                    // Re-read whenever the timeline changes
+                    model: root.showThreadView ? (backend.messages, backend.threadMessages(root.threadRootGuid)) : []
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    delegate: Rectangle {
+                        id: threadItem
+                        required property var modelData
+                        required property int index
+                        readonly property bool isRoot: modelData.guid === root.threadRootGuid
+                        width: ListView.view.width
+                        height: threadItemCol.implicitHeight + 16
+                        radius: 8
+                        color: threadItemMouse.containsMouse ? theme.lighterBackground : (isRoot ? theme.selection : "transparent")
+                        border.width: isRoot ? 1 : 0
+                        border.color: theme.accent
+
+                        ColumnLayout {
+                            id: threadItemCol
+                            anchors.left: parent.left
+                            anchors.right: parent.right
+                            anchors.top: parent.top
+                            anchors.margins: 8
+                            spacing: 2
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: threadItem.modelData.isFromMe ? i18n.tr("You") : (threadItem.modelData.senderName || "")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: threadItem.modelData.isFromMe ? theme.accent : (threadItem.modelData.senderColor || theme.accent)
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    text: threadItem.modelData.timeText || ""
+                                    font.pixelSize: theme.fontSize - 4
+                                    color: theme.darkForeground
+                                }
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: (threadItem.modelData.text || "").length > 0
+                                      ? threadItem.modelData.text
+                                      : (threadItem.modelData.hasImageAttachment ? "📷 " + i18n.tr("Photo") : (threadItem.modelData.hasFileAttachment ? "📎 " + i18n.tr("Attachment") : ""))
+                                textFormat: Text.PlainText
+                                wrapMode: Text.Wrap
+                                font.pixelSize: theme.fontSize - 1
+                                color: theme.foreground
+                            }
+                            Text {
+                                visible: threadItem.isRoot
+                                text: "↑ " + i18n.tr("Show in conversation")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.accent
+                            }
+                        }
+                        MouseArea {
+                            id: threadItemMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.jumpToMessage(threadItem.modelData.guid)
+                        }
+                    }
+                }
+
+                // Reply to the thread without leaving it
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 8
+                    Rectangle {
+                        Layout.fillWidth: true
+                        Layout.preferredHeight: Math.min(120, Math.max(40, Math.ceil(threadReplyInput.contentHeight) + threadReplyInput.topPadding + threadReplyInput.bottomPadding))
+                        radius: theme.radius
+                        color: theme.background
+                        border.width: 1
+                        border.color: threadReplyInput.activeFocus ? theme.accent : theme.muted
+                        TextArea {
+                            id: threadReplyInput
+                            objectName: "threadReplyInput"
+                            anchors.fill: parent
+                            anchors.leftMargin: 6
+                            anchors.rightMargin: 6
+                            topPadding: 9
+                            bottomPadding: 9
+                            placeholderText: i18n.tr("Reply to thread… (Enter to send)")
+                            placeholderTextColor: theme.darkForeground
+                            color: theme.brightForeground
+                            font.pixelSize: theme.fontSize
+                            wrapMode: TextArea.Wrap
+                            background: Item {}
+                            Keys.onReturnPressed: function(event) {
+                                if (event.modifiers & Qt.ShiftModifier) { event.accepted = false; return }
+                                root.sendThreadReply()
+                            }
+                            Keys.onEnterPressed: function(event) {
+                                if (event.modifiers & Qt.ShiftModifier) { event.accepted = false; return }
+                                root.sendThreadReply()
+                            }
+                            Keys.onEscapePressed: root.closeThread()
+                        }
+                    }
+                    Rectangle {
+                        objectName: "threadReplySendBtn"
+                        Layout.preferredWidth: 70
+                        Layout.preferredHeight: 40
+                        radius: theme.radius
+                        readonly property bool canSend: threadReplyInput.text.trim().length > 0
+                        color: canSend ? theme.accent : theme.lighterBackground
+                        Text {
+                            anchors.centerIn: parent
+                            text: i18n.tr("Reply")
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: parent.canSend ? "#ffffff" : theme.darkForeground
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.sendThreadReply()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Add / Edit Contact Modal Overlay
     Rectangle {
         visible: root.showContactModal
@@ -9992,6 +10302,8 @@ ApplicationWindow {
         property int targetUnreadCount: 0
         property bool targetIsMuted: false
         property bool targetIsGroup: false
+        // Live: a Mac-pin refresh while the menu is open updates the label it acts on
+        property bool targetIsPinned: (void(backend.pinnedChats), backend.isChatPinned(targetChatGuid))
         property real menuX: 100
         property real menuY: 100
 
@@ -10003,7 +10315,7 @@ ApplicationWindow {
             targetIsMuted = chatObj.isMuted || false
             targetIsGroup = chatObj.isGroup || false
             menuX = Math.min(Math.max(12, gx), root.width - 252)
-            menuY = Math.min(Math.max(12, gy), root.height - 230)
+            menuY = Math.min(Math.max(12, gy), root.height - 266)
             visible = true
         }
 
@@ -10092,6 +10404,36 @@ ApplicationWindow {
                             if (g.length > 0) {
                                 backend.toggleChatMute(g)
                             }
+                        }
+                    }
+                }
+
+                // Pin / Unpin (pins from the Mac show first in the sidebar row)
+                Rectangle {
+                    objectName: "ctxPinItem"
+                    Layout.fillWidth: true
+                    height: 32
+                    radius: 6
+                    color: ctxPinMouse.containsMouse ? theme.selection : "transparent"
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        text: chatContextMenuPopup.targetIsPinned
+                              ? ("󰐄  " + i18n.tr("Unpin"))
+                              : ("󰐃  " + i18n.tr("Pin"))
+                        font.pixelSize: theme.fontSize - 1
+                        color: theme.brightForeground
+                    }
+                    MouseArea {
+                        id: ctxPinMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var g = chatContextMenuPopup.targetChatGuid
+                            chatContextMenuPopup.visible = false
+                            if (g.length > 0) backend.togglePinChat(g)
                         }
                     }
                 }

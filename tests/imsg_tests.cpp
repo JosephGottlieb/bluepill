@@ -3041,6 +3041,139 @@ private slots:
         QVERIFY(!win->property("showContactInfo").toBool());
     }
 
+    void testQuotedReplyOpensThreadAndJumpsToOriginal() {
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+        QTemporaryDir tempDir;
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_thread.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_thread.json")));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 600000;
+        auto msg = [&](const char *guid, const char *text, bool fromMe, qint64 ts, const char *replyTo) {
+            QJsonObject m{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                          {QStringLiteral("isFromMe"), fromMe}, {QStringLiteral("service"), QStringLiteral("iMessage")},
+                          {QStringLiteral("dateCreated"), ts}, {QStringLiteral("chats"), QJsonArray{chatObj}}};
+            if (replyTo) m.insert(QStringLiteral("threadOriginatorGuid"), QString::fromLatin1(replyTo));
+            return m;
+        };
+        QJsonArray batch{msg("m-root", "Go to bread", false, t, nullptr)};
+        for (int i = 0; i < 25; ++i) {
+            batch.append(msg(qPrintable(QStringLiteral("m-filler-%1").arg(i)), "filler", i % 2, t + 1000 + i * 1000, nullptr));
+        }
+        batch.append(msg("m-reply-1", "Mmmm, bread", true, t + 60000, "p:0/m-root"));
+        batch.append(msg("m-reply-2", "Sourdough?", false, t + 70000, "m-root"));
+        const QString otherChat = QStringLiteral("iMessage;-;+15555550111");
+        QJsonObject other = msg("m-other", "elsewhere", false, t, nullptr);
+        other.insert(QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), otherChat}, {QStringLiteral("style"), 45}}});
+        batch.append(other);
+        b.ingestMessagesForTest(batch, true);
+        b.selectChat(chatGuid);
+
+        // Replies quote the original; the original counts its replies
+        QVariantMap root, reply1;
+        for (const QVariant &v : b.messages()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("guid")) == QStringLiteral("m-root")) root = m;
+            if (m.value(QStringLiteral("guid")) == QStringLiteral("m-reply-1")) reply1 = m;
+        }
+        QCOMPARE(root.value(QStringLiteral("replyCount")).toInt(), 2);
+        QCOMPARE(reply1.value(QStringLiteral("replyToGuid")).toString(), QStringLiteral("m-root"));
+        QCOMPARE(reply1.value(QStringLiteral("replyToText")).toString(), QStringLiteral("Go to bread"));
+        const QVariantList thread = b.threadMessages(QStringLiteral("p:0/m-root"));
+        QCOMPARE(thread.size(), 3);
+        QCOMPARE(thread.first().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("m-root"));
+        QVERIFY(b.messageIndexForGuid(QStringLiteral("m-root")) >= 0);
+        QCOMPARE(b.messageIndexForGuid(QStringLiteral("m-missing")), -1);
+
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win);
+        win->resize(1200, 800);
+
+        // Clicking the quote opens the thread with the original first
+        QMetaObject::invokeMethod(win, "openThread", Q_ARG(QVariant, QStringLiteral("m-root")));
+        QVERIFY(win->property("showThreadView").toBool());
+        QObject *threadList = win->findChild<QObject *>(QStringLiteral("threadList"));
+        QVERIFY(threadList);
+        QTRY_COMPARE(threadList->property("count").toInt(), 3);
+
+        // The thread card sits over the open conversation, never over the sidebar
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("threadViewCard"));
+        auto *pane = win->findChild<QQuickItem *>(QStringLiteral("conversationPane"));
+        auto *sidebar = win->findChild<QQuickItem *>(QStringLiteral("leftSidebarPane"));
+        QVERIFY(card && pane && sidebar);
+        QTRY_VERIFY(card->width() > 0);
+        const QRectF cardRect = card->mapRectToScene(QRectF(0, 0, card->width(), card->height()));
+        const QRectF paneRect = pane->mapRectToScene(QRectF(0, 0, pane->width(), pane->height()));
+        const QRectF sideRect = sidebar->mapRectToScene(QRectF(0, 0, sidebar->width(), sidebar->height()));
+        QVERIFY2(!cardRect.intersects(sideRect), "thread card overlaps the conversation list");
+        QVERIFY(paneRect.contains(cardRect));
+        QVERIFY(qAbs(cardRect.center().x() - paneRect.center().x()) <= 1.0);
+
+        // Replying from the thread view adds a reply to this thread
+        QObject *replyInput = win->findChild<QObject *>(QStringLiteral("threadReplyInput"));
+        QVERIFY(replyInput);
+        replyInput->setProperty("text", QStringLiteral("Rye, obviously"));
+        QMetaObject::invokeMethod(win, "sendThreadReply");
+        QCOMPARE(replyInput->property("text").toString(), QString());
+        QTRY_COMPARE(threadList->property("count").toInt(), 4);
+        const QVariantList after = b.threadMessages(QStringLiteral("m-root"));
+        QCOMPARE(after.last().toMap().value(QStringLiteral("text")).toString(), QStringLiteral("Rye, obviously"));
+
+        // Choosing the original closes the thread, scrolls there and flashes it
+        QMetaObject::invokeMethod(win, "jumpToMessage", Q_ARG(QVariant, QStringLiteral("m-root")));
+        QVERIFY(!win->property("showThreadView").toBool());
+        QCOMPARE(win->property("highlightGuid").toString(), QStringLiteral("m-root"));
+        QObject *timeline = win->findChild<QObject *>(QStringLiteral("messageTimelineListView"));
+        QVERIFY(timeline);
+        QVERIFY(!timeline->property("stickToBottom").toBool());
+        QVERIFY(!timeline->property("restoringScrollPosition").toBool());
+
+        // Shift+Enter on the keypad keeps the draft (newline), like Shift+Return
+        QMetaObject::invokeMethod(win, "openThread", Q_ARG(QVariant, QStringLiteral("m-root")));
+        replyInput->setProperty("text", QStringLiteral("draft"));
+        QKeyEvent shiftEnter(QEvent::KeyPress, Qt::Key_Enter, Qt::ShiftModifier | Qt::KeypadModifier, QStringLiteral("\r"));
+        QCoreApplication::sendEvent(replyInput, &shiftEnter);
+        const QString afterShiftEnter = replyInput->property("text").toString();
+        QVERIFY2(afterShiftEnter.contains(QLatin1Char('\n')), qPrintable(afterShiftEnter));  // a newline went in
+        QCOMPARE(afterShiftEnter.trimmed(), QStringLiteral("draft"));
+        QCOMPARE(b.threadMessages(QStringLiteral("m-root")).size(), 4);
+        QTRY_COMPARE(threadList->property("count").toInt(), 4);  // nothing sent
+
+        // Opening New Message closes the thread
+        win->setProperty("showNewChatModal", true);
+        QVERIFY(!win->property("showThreadView").toBool());
+        win->setProperty("showNewChatModal", false);
+
+        // Switching conversations closes it too, so a reply can't go to the wrong chat
+        QMetaObject::invokeMethod(win, "openThread", Q_ARG(QVariant, QStringLiteral("m-root")));
+        QVERIFY(win->property("showThreadView").toBool());
+        b.selectChat(otherChat);
+        QVERIFY(!win->property("showThreadView").toBool());
+        QCOMPARE(win->property("threadRootGuid").toString(), QString());
+        const int otherBefore = b.messages().size();
+        replyInput->setProperty("text", QStringLiteral("wrong chat"));
+        QMetaObject::invokeMethod(win, "sendThreadReply");
+        QCOMPARE(b.messages().size(), otherBefore);
+    }
+
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
         Backend backend(false);
         backend.loadDemoData();
@@ -3622,23 +3755,136 @@ private slots:
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
         b.loadDemoData();
 
-        // By default, pinnedChats returns top 4 demo conversations
-        const QVariantList defaultPins = b.pinnedChats();
-        QCOMPARE(defaultPins.size(), 4);
-        QCOMPARE(defaultPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
+        // The row shows the Mac's pins (demo mode fakes three), not the most recent chats
+        const QVariantList macPins = b.pinnedChats();
+        QCOMPARE(macPins.size(), 3);
+        QCOMPARE(macPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
+        const QString alexGuid = macPins.first().toMap().value(QStringLiteral("guid")).toString();
 
-        // Explicitly pin Elena Vance -> pinnedChats now contains only explicitly pinned chats
+        // No Mac pins and none added here: the row is empty
+        b.setMacPins({});
+        QCOMPARE(b.pinnedChats().size(), 0);
+        QCOMPARE(b.isChatPinned(alexGuid), false);
+
+        // Mac pins come back in the Mac's order; one given by chat identifier only still resolves
         const QString elenaGuid = QStringLiteral("iMessage;-;elena.vance@example.com");
-        QCOMPARE(b.isChatPinned(elenaGuid), false);
+        b.setMacPins({QVariantMap{{"guid", "any;-;elena.vance@example.com"}, {"chatIdentifier", "elena.vance@example.com"}},
+                      QVariantMap{{"guid", alexGuid}}});
+        QCOMPARE(b.pinnedChats().size(), 2);
+        QCOMPARE(b.pinnedChats().at(0).toMap().value(QStringLiteral("guid")).toString(), elenaGuid);
+        QVERIFY(b.isChatPinned(alexGuid));
+
+        // Unpinning a Mac pin hides it here; pinning it again brings it back
         b.togglePinChat(elenaGuid);
-        QCOMPARE(b.isChatPinned(elenaGuid), true);
+        QCOMPARE(b.isChatPinned(elenaGuid), false);
+        QCOMPARE(b.pinnedChats().size(), 1);
+        b.togglePinChat(elenaGuid);
+        QVERIFY(b.isChatPinned(elenaGuid));
+
+        // Pinning another chat adds it after the Mac's pins
+        const QString otherGuid = b.chats().last().toMap().value(QStringLiteral("guid")).toString();
+        QVERIFY(!b.isChatPinned(otherGuid));
+        b.togglePinChat(otherGuid);
+        QCOMPARE(b.pinnedChats().size(), 3);
+        QCOMPARE(b.pinnedChats().last().toMap().value(QStringLiteral("guid")).toString(), otherGuid);
+        b.togglePinChat(otherGuid);
+        QCOMPARE(b.pinnedChats().size(), 2);
+
+        // Pinned entries carry what the context menu needs
+        b.toggleChatMute(alexGuid);
+        QVariantMap alexPin;
+        for (const QVariant &v : b.pinnedChats())
+            if (v.toMap().value(QStringLiteral("guid")).toString() == alexGuid) alexPin = v.toMap();
+        QVERIFY(alexPin.value(QStringLiteral("isMuted")).toBool());
+        QVERIFY(!alexPin.value(QStringLiteral("address")).toString().isEmpty());
+        b.toggleChatMute(alexGuid);
+
+        // The /pinned response path keeps identifier-only records
+        b.applyMacPinsResponseForTest(R"({"status":200,"data":[{"chatIdentifier":"elena.vance@example.com"},{"pinIndex":3}]})");
         QCOMPARE(b.pinnedChats().size(), 1);
         QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), elenaGuid);
+    }
 
-        // Unpin Elena Vance -> falls back to top 4
-        b.togglePinChat(elenaGuid);
-        QCOMPARE(b.isChatPinned(elenaGuid), false);
-        QCOMPARE(b.pinnedChats().size(), 4);
+    void testMacPinsPreferExactGuidAndLoadOlderPinnedChats() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        // Fake relay: answers chat/query for one old pinned chat that isn't in the chat page
+        const QString oldPinned = QStringLiteral("iMessage;-;+15555550188");
+        QStringList queried;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QTcpSocket *, QByteArray> pinSockBuffers;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &req = pinSockBuffers[sock];
+                    req += sock->readAll();
+                    const int hdrEnd = req.indexOf("\r\n\r\n");
+                    if (hdrEnd < 0) return;
+                    const QByteArray headLower = req.left(hdrEnd).toLower();
+                    int clLen = 0;
+                    const int clIdx = headLower.indexOf("content-length:");
+                    if (clIdx >= 0) clLen = headLower.mid(clIdx + 15, headLower.indexOf('\r', clIdx) - clIdx - 15).trimmed().toInt();
+                    if (req.size() < hdrEnd + 4 + clLen) return;
+                    QByteArray body = R"({"status":200,"data":[]})";
+                    if (req.startsWith("POST /api/v1/chat/query") && req.contains("+15555550188")) {
+                        queried << oldPinned;
+                        body = QJsonDocument(QJsonObject{{"status", 200}, {"data", QJsonArray{QJsonObject{
+                            {"guid", oldPinned}, {"chatIdentifier", "+15555550188"}, {"style", 45}, {"displayName", ""},
+                            {"participants", QJsonArray{QJsonObject{{"address", "+15555550188"}}}}}}}}).toJson(QJsonDocument::Compact);
+                    }
+                    sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
+                                QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        qputenv("BLUEPILL_SERVER_URL", QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()).toUtf8());
+        qputenv("BLUEPILL_PASSWORD", QByteArrayLiteral("test-pass"));
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pin2.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_pin2.json")));
+        b.loadCredentials();
+
+        // SMS and iMessage chats with the same number: the SMS one is more recent
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 60000;
+        auto msgIn = [&](const char *guid, const QString &chat, qint64 ts) {
+            return QJsonObject{{"guid", QString::fromLatin1(guid)}, {"text", "hi"}, {"isFromMe", false}, {"dateCreated", ts},
+                               {"handle", QJsonObject{{"address", "+15555550142"}}},
+                               {"chats", QJsonArray{QJsonObject{{"guid", chat}, {"chatIdentifier", "+15555550142"}, {"style", 45}}}}};
+        };
+        const QString smsGuid = QStringLiteral("SMS;-;+15555550142");
+        const QString imGuid = QStringLiteral("iMessage;-;+15555550142");
+        b.ingestMessagesForTest(QJsonArray{msgIn("p-im", imGuid, t), msgIn("p-sms", smsGuid, t + 5000)}, true);
+        QStringList guids;
+        for (const QVariant &v : b.chats()) guids << v.toMap().value(QStringLiteral("guid")).toString();
+        QCOMPARE(guids, (QStringList{smsGuid, imGuid}));  // SMS first
+        // An iMessage pin resolves to the iMessage chat, not the first chat with that number
+        b.setMacPins({QVariantMap{{"guid", imGuid}, {"chatIdentifier", "+15555550142"}}});
+        QCOMPARE(b.pinnedChats().size(), 1);
+        QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), imGuid);
+
+        // A pin for a chat outside the loaded page is fetched and shows up in the row
+        b.setMacPins({QVariantMap{{"guid", oldPinned}}});
+        QTRY_COMPARE_WITH_TIMEOUT(queried.size(), 1, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.isChatPinned(oldPinned), 3000);
+        QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), oldPinned);
+        // ...only once
+        b.setMacPins({QVariantMap{{"guid", oldPinned}, {"pinIndex", 1}}});
+        QTest::qWait(200);
+        QCOMPARE(queried.size(), 1);
     }
 
     void testBluePillEditedExpressiveAndFailureBadges() {

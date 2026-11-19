@@ -320,6 +320,11 @@ public:
     Q_INVOKABLE bool isChatMuted(const QString &chatGuid) const;
     Q_INVOKABLE void togglePinChat(const QString &chatGuid);
     Q_INVOKABLE bool isChatPinned(const QString &chatGuid) const;
+    // Pins: the Mac's (Messages' pinned conversations), minus ones unpinned here, plus ones pinned here
+    QStringList macPinnedChatGuids() const;
+    QStringList effectivePinnedChatGuids() const;
+    void setMacPins(const QList<QVariantMap> &pins);
+    void applyMacPinsResponseForTest(const QByteArray &body) { applyMacPinsResponse(body); }
 
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setFilterMode(const QString &mode);
@@ -340,6 +345,10 @@ public:
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
+    // A thread: the original message plus every loaded reply to it, in timeline order.
+    Q_INVOKABLE QVariantList threadMessages(const QString &rootGuid) const;
+    // Index of a message in messages(), or -1 when it isn't loaded.
+    Q_INVOKABLE int messageIndexForGuid(const QString &guid) const;
     Q_INVOKABLE void editMessage(const QString &messageGuid, const QString &newText);
     static constexpr int kMessageEditWindowMs = 2 * 60 * 1000;
     int editRepliesProcessedForTest() const { return m_editRepliesProcessed; }
@@ -791,6 +800,14 @@ private:
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;
     bool m_stayOnHomePage = false;
+    QList<QVariantMap> m_macPins;          // from GET /api/v1/pinned
+    QSet<QString> m_unpinnedMacChats;      // Mac pins hidden here
+    void fetchMacPins();
+    quint64 m_macPinsRequestSeq = 0;       // only the newest /pinned reply is applied
+    QSet<QString> m_requestedPinChatGuids; // pinned chats fetched individually (outside the chat page)
+    void fetchUnresolvedPinnedChats();
+    bool isMacPinHidden(const QString &chatGuid) const;
+    void applyMacPinsResponse(const QByteArray &body);
 
     QString m_searchQuery;
     QString m_filterMode = QStringLiteral("all");
