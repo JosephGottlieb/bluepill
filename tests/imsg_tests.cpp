@@ -2360,6 +2360,10 @@ private slots:
             batch.append(QJsonObject{{"guid", QStringLiteral("w-%1").arg(i)}, {"text", QStringLiteral("message number %1").arg(i)},
                                      {"isFromMe", i % 2 == 0}, {"service", "iMessage"}, {"dateCreated", t + i * 1000},
                                      {"chats", QJsonArray{chatObj}}});
+        const QString otherGuid = QStringLiteral("iMessage;-;+15555550101");
+        batch.append(QJsonObject{{"guid", QStringLiteral("w-other")}, {"text", QStringLiteral("other chat")},
+                                 {"isFromMe", false}, {"service", "iMessage"}, {"dateCreated", t},
+                                 {"chats", QJsonArray{QJsonObject{{QStringLiteral("guid"), otherGuid}, {QStringLiteral("style"), 45}}}}});
         backend.ingestMessagesForTest(batch, true);
         backend.selectChat(chatGuid);
         Theme theme; Translator translator;
@@ -2387,10 +2391,9 @@ private slots:
         // The ↑ arrow animates up instead of jumping, then lands at the very top
         const qreal before = lv->property("contentY").toReal();
         QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, false));
-        QTest::qWait(60);
-        const qreal mid = lv->property("contentY").toReal();
-        QVERIFY2(mid < before && mid > lv->property("originY").toReal() - lv->property("topMargin").toReal() + 50,
-                 qPrintable(QStringLiteral("before %1 mid %2").arg(before).arg(mid)));
+        // No synchronous jump: the animation is running and contentY hasn't moved yet
+        QVERIFY(lv->property("smoothScrolling").toBool());
+        QCOMPARE(lv->property("contentY").toReal(), before);
         QTRY_VERIFY_WITH_TIMEOUT(lv->property("atYBeginning").toBool(), 3000);
         // ...and ↓ back to the newest message, sticking there
         QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, true));
@@ -2400,6 +2403,14 @@ private slots:
             return lv->property("stickToBottom").toBool() && qAbs(lv->property("contentY").toReal() - end) <= 2.0;
         };
         QTRY_VERIFY_WITH_TIMEOUT(atBottom(), 3000);
+
+        // Switching conversations mid-animation cancels it, so the new chat stays at its newest message
+        QMetaObject::invokeMethod(lv, "smoothScrollTo", Q_ARG(QVariant, false));
+        QVERIFY(lv->property("smoothScrolling").toBool());
+        backend.selectChat(otherGuid);
+        QVERIFY(!lv->property("smoothScrolling").toBool());
+        QTest::qWait(800);
+        QVERIFY(lv->property("stickToBottom").toBool());
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {

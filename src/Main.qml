@@ -1440,7 +1440,7 @@ ApplicationWindow {
                         width: 24
                         height: 24
                         scale: 0.8
-                        preferredRendererType: Shape.CurveRenderer
+                        antialiasing: true
                         ShapePath {
                             strokeWidth: -1
                             fillColor: composeMouse.containsMouse ? theme.darkerBackground : theme.accent
@@ -2664,8 +2664,13 @@ ApplicationWindow {
                         property: "contentY"
                         easing.type: Easing.OutCubic
                         property bool toEnd: false
-                        onFinished: toEnd ? messageListView.scrollToBottom() : messageListView.scrollToTop()
+                        property string chatGuid: ""
+                        onFinished: {
+                            if (chatGuid !== backend.selectedChatGuid) return
+                            toEnd ? messageListView.scrollToBottom() : messageListView.scrollToTop()
+                        }
                     }
+                    readonly property alias smoothScrolling: smoothScrollAnim.running
                     function smoothScrollTo(toEnd) {
                         smoothScrollAnim.stop()
                         restoringScrollPosition = false
@@ -2681,6 +2686,7 @@ ApplicationWindow {
                             return
                         }
                         smoothScrollAnim.toEnd = toEnd
+                        smoothScrollAnim.chatGuid = backend.selectedChatGuid
                         smoothScrollAnim.from = contentY
                         smoothScrollAnim.to = goal
                         smoothScrollAnim.duration = Math.min(700, 220 + dist / 12)
@@ -2983,6 +2989,7 @@ ApplicationWindow {
 
                     onMovementStarted: {
                         notePointerActivity()
+                        smoothScrollAnim.stop()
                         root.hoveredActionMessageGuid = ""
                         restoringScrollPosition = false
                         scrollRestoreTimer.stop()
@@ -2999,6 +3006,7 @@ ApplicationWindow {
                         target: backend
                         function onSelectedChatChanged() {
                             if (backend.selectedChatGuid !== messageListView.lastSelectedChatGuid) {
+                                smoothScrollAnim.stop()
                                 messageListView.lastSelectedChatGuid = backend.selectedChatGuid
                                 messageListView.scrollToBottom()
                             }
@@ -8565,8 +8573,15 @@ ApplicationWindow {
                                 radius: 6
                                 implicitWidth: toolLbl.implicitWidth + 18
                                 color: toolMouse.containsMouse ? theme.selection : theme.lighterBackground
-                                border.width: 1
-                                border.color: toolMouse.containsMouse ? theme.accent : theme.muted
+                                border.width: activeFocus ? 2 : 1
+                                border.color: (toolMouse.containsMouse || activeFocus) ? theme.accent : theme.muted
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: modelData.label
+                                Accessible.onPressAction: modelData.run()
+                                Keys.onReturnPressed: modelData.run()
+                                Keys.onEnterPressed: modelData.run()
+                                Keys.onSpacePressed: modelData.run()
                                 Text {
                                     id: toolLbl
                                     anchors.centerIn: parent
@@ -8591,15 +8606,28 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         spacing: 6
                         Repeater {
+                            id: syncDayRepeater
                             model: [7, 14, 30, 60, 90, 180, 365]
                             delegate: Rectangle {
                                 required property int modelData
+                                required property int index
                                 height: 28
                                 width: dayLbl.implicitWidth + 22
                                 radius: 6
                                 color: backend.historySyncDays === modelData ? theme.accent : (dayMouse.containsMouse ? theme.selection : theme.lighterBackground)
-                                border.width: 1
-                                border.color: backend.historySyncDays === modelData ? theme.accent : theme.muted
+                                border.width: activeFocus ? 2 : 1
+                                border.color: (backend.historySyncDays === modelData || activeFocus) ? theme.accent : theme.muted
+                                activeFocusOnTab: true
+                                Accessible.role: Accessible.Button
+                                Accessible.name: i18n.tr("Sync %1 days").arg(modelData)
+                                Accessible.checkable: true
+                                Accessible.checked: backend.historySyncDays === modelData
+                                Accessible.onPressAction: backend.setHistorySyncDays(modelData)
+                                Keys.onReturnPressed: backend.setHistorySyncDays(modelData)
+                                Keys.onEnterPressed: backend.setHistorySyncDays(modelData)
+                                Keys.onSpacePressed: backend.setHistorySyncDays(modelData)
+                                Keys.onLeftPressed: if (index > 0) backend.setHistorySyncDays(syncDayRepeater.model[index - 1])
+                                Keys.onRightPressed: if (index < syncDayRepeater.count - 1) backend.setHistorySyncDays(syncDayRepeater.model[index + 1])
                                 Text {
                                     id: dayLbl
                                     anchors.centerIn: parent

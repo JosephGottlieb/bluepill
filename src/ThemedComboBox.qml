@@ -39,8 +39,9 @@ ComboBox {
         required property int index
         width: ListView.view ? ListView.view.width : control.width
         highlighted: control.highlightedIndex === index
+        text: control.textRole ? (row.modelData[control.textRole] ?? "") : String(row.modelData)
         contentItem: Text {
-            text: control.textRole ? (row.modelData[control.textRole] ?? "") : String(row.modelData)
+            text: row.text
             font: control.font
             color: row.highlighted || control.currentIndex === row.index ? theme.accent : theme.foreground
             elide: Text.ElideRight
