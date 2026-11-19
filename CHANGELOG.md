@@ -8,6 +8,8 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
 
+- **Service evidence is ordered by date:** a chat's service from `lastMessage` in chat metadata or from a message keeps its date, and newer evidence wins in either direction. Participant-only metadata never overrides message evidence. Chats created from a message use the embedded chat's `serviceName`, `lastMessage` and participants. A change to the selected chat's service notifies the header, and merged sibling chats keep the refined service.
+
 ### Documentation
 - `docs/ARCHITECTURE.md` explains how the client resolves a chat's service for macOS 26 `any;` GUIDs.
 

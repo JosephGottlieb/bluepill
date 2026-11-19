@@ -2577,7 +2577,8 @@ static QString serviceFromMessageJson(const QJsonObject &m) {
     return svc;
 }
 
-QString Backend::resolveChatService(const QJsonObject &chat, const QJsonObject &message) {
+QString Backend::resolveChatService(const QJsonObject &chat, const QJsonObject &message, qint64 *evidenceDate) {
+    if (evidenceDate) *evidenceDate = 0;
     // 1. Legacy GUID prefixes ("iMessage;-;", "SMS;+;", "RCS;-;") are authoritative.
     const QString guid = chat.value(QStringLiteral("guid")).toString().trimmed();
     const QString prefix = guid.section(QLatin1Char(';'), 0, 0);
@@ -2591,9 +2592,13 @@ QString Backend::resolveChatService(const QJsonObject &chat, const QJsonObject &
         if (!svc.isEmpty()) return svc;
     }
     // 3. The newest message we know of (most reliable for "any;" chats).
-    QString svc = serviceFromMessageJson(message);
-    if (svc.isEmpty()) svc = serviceFromMessageJson(chat.value(QStringLiteral("lastMessage")).toObject());
-    if (!svc.isEmpty()) return svc;
+    const QJsonObject lastMessage = chat.value(QStringLiteral("lastMessage")).toObject();
+    for (const QJsonObject *m : {&message, &lastMessage}) {
+        const QString svc = serviceFromMessageJson(*m);
+        if (svc.isEmpty()) continue;
+        if (evidenceDate) *evidenceDate = m->value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+        return svc;
+    }
     // 4. Participant handles: one SMS member makes the thread SMS/MMS.
     bool sawIMessage = false, sawRcs = false, sawSms = false;
     for (const QJsonValue &pv : chat.value(QStringLiteral("participants")).toArray()) {
@@ -2608,17 +2613,28 @@ QString Backend::resolveChatService(const QJsonObject &chat, const QJsonObject &
     return QString();
 }
 
+bool Backend::applyChatServiceEvidence(ChatEntry &entry, const QString &svc, qint64 evidenceDate) {
+    if (svc.isEmpty()) return false;
+    const bool hasDated = m_chatServiceDates.contains(entry.guid);
+    if (evidenceDate > 0) {
+        if (hasDated && evidenceDate < m_chatServiceDates.value(entry.guid)) return false;
+        m_chatServiceDates.insert(entry.guid, evidenceDate);
+    } else if (hasDated) {
+        return false;  // participants/prefix never override message evidence
+    }
+    if (entry.service == svc) return false;
+    entry.service = svc;
+    return true;
+}
+
 void Backend::refineChatServiceFromMessage(const QString &chatGuid, const QJsonObject &msg) {
     const QString svc = serviceFromMessageJson(msg);
     if (svc.isEmpty() || chatGuid.isEmpty()) return;
     // Tapbacks and other associated messages carry the parent's service; fine to use.
     const qint64 dc = msg.value(QStringLiteral("dateCreated")).toVariant().toLongLong();
-    if (dc < m_chatServiceDates.value(chatGuid, 0)) return;
-    m_chatServiceDates.insert(chatGuid, dc);
     for (ChatEntry &entry : m_chats) {
         if (entry.guid != chatGuid) continue;
-        if (entry.service == svc) return;
-        entry.service = svc;
+        if (!applyChatServiceEvidence(entry, svc, qMax<qint64>(dc, 1))) return;
         if (!m_chatServiceEmitPending) {
             m_chatServiceEmitPending = true;
             QTimer::singleShot(0, this, [this]() {
@@ -2636,7 +2652,8 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
     bool watermarksChanged = false;
     const QString prevSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
                                     selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
-                                    QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
+                                    QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(',')) +
+                                    QLatin1Char('|') + selectedChatService();
 
     for (const QJsonValue &v : arr) {
         const QJsonObject c = v.toObject();
@@ -2708,14 +2725,12 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
         if (existingIdx >= 0) {
             ChatEntry &entry = m_chats[existingIdx];
             if (!handles.isEmpty()) entry.participantHandles = handles;
-            if (!m_chatServiceDates.contains(entry.guid)) {
+            {
                 QJsonObject svcChat = c;
                 svcChat.insert(QStringLiteral("guid"), rawGuid);
-                const QString svc = resolveChatService(svcChat);
-                if (!svc.isEmpty() && svc != entry.service) {
-                    entry.service = svc;
-                    chatsAddedOrModified = true;
-                }
+                qint64 svcDate = 0;
+                const QString svc = resolveChatService(svcChat, QJsonObject(), &svcDate);
+                if (applyChatServiceEvidence(entry, svc, svcDate)) chatsAddedOrModified = true;
             }
             if (!disp.isEmpty()) entry.displayName = disp;
             if (!origGrpId.isEmpty()) entry.originalGroupId = origGrpId;
@@ -2777,7 +2792,9 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
             {
                 QJsonObject svcChat = c;
                 svcChat.insert(QStringLiteral("guid"), rawGuid);
-                entry.service = resolveChatService(svcChat);
+                qint64 svcDate = 0;
+                const QString svc = resolveChatService(svcChat, QJsonObject(), &svcDate);
+                applyChatServiceEvidence(entry, svc, svcDate);
             }
             entry.lastMessageDate = 1;
             entry.lastMessagePreview = QStringLiteral("Tap to view conversation history");
@@ -2804,7 +2821,8 @@ void Backend::processChatsMetadata(const QJsonArray &arr) {
         emit chatsChanged();
         const QString nextSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
                                         selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
-                                        QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
+                                        QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(',')) +
+                                    QLatin1Char('|') + selectedChatService();
         if (selectedMigrated || nextSelectedSig != prevSelectedSig) {
             emit selectedChatChanged();
         }
@@ -3024,7 +3042,15 @@ void Backend::reconcileServerUnreadMessages(const QJsonArray &unreadMessages) {
                 if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                     entry.participantHandles.append(entry.chatIdentifier);
                 }
-                entry.service = resolveChatService(QJsonObject{{QStringLiteral("guid"), cg}}, m);
+                {
+                    // Use everything the embedded chat carries (serviceName,
+                    // lastMessage, participants), not just its GUID.
+                    QJsonObject svcChat = cObj;
+                    svcChat.insert(QStringLiteral("guid"), cg);
+                    qint64 svcDate = 0;
+                    const QString svc = resolveChatService(svcChat, m, &svcDate);
+                    applyChatServiceEvidence(entry, svc, svcDate);
+                }
                 entry.lastMessageDate = dateCreated;
                 QString preview = extractMessageText(m);
                 entry.lastMessagePreview = preview.replace(QLatin1Char('\n'), QLatin1Char(' '));
@@ -3701,6 +3727,10 @@ void Backend::unifySiblingChats(bool *selectedMigrated, bool *chatsMerged) {
             }
         }
 
+        // Moving sibling messages through cacheMessageForChat() refined the
+        // service on the m_chats entry, not on this copy; carry it over.
+        winner.service = m_chats[bestPos].service;
+
         if (anyCacheMoved || idxs.size() > 1) {
             qint64 bestDate = winner.lastMessageDate;
             QString bestPreview = winner.lastMessagePreview;
@@ -3790,7 +3820,8 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
     QList<QJsonObject> newIncomingMessages;
     const QString prevSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
                                     selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
-                                    QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
+                                    QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(',')) +
+                                    QLatin1Char('|') + selectedChatService();
 
     for (const QJsonValue &v : messagesArray) {
         QJsonObject m = v.toObject();
@@ -4038,7 +4069,13 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
             if (entry.participantHandles.isEmpty() && !entry.isGroup && !entry.chatIdentifier.isEmpty()) {
                 entry.participantHandles.append(entry.chatIdentifier);
             }
-            entry.service = resolveChatService(QJsonObject{{QStringLiteral("guid"), chatGuid}}, m);
+            {
+                QJsonObject svcChat = chatObj;
+                svcChat.insert(QStringLiteral("guid"), chatGuid);
+                qint64 svcDate = 0;
+                const QString svc = resolveChatService(svcChat, m, &svcDate);
+                applyChatServiceEvidence(entry, svc, svcDate);
+            }
             entry.lastMessageDate = dateCreated;
             entry.lastMessagePreview = preview.replace(QLatin1Char('\n'), QLatin1Char(' '));
             entry.relativeTime = formatRelativeTime(dateCreated);
@@ -4153,7 +4190,8 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
         emit chatsChanged();
         const QString nextSelectedSig = m_selectedChatGuid + QLatin1Char('|') + selectedChatTitle() + QLatin1Char('|') +
                                         selectedChatSubtitle() + QLatin1Char('|') + QString::number(selectedChatUnreadCount()) +
-                                        QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(','));
+                                        QLatin1Char('|') + selectedChatParticipants().join(QLatin1Char(',')) +
+                                    QLatin1Char('|') + selectedChatService();
         if (selectedMigrated || nextSelectedSig != prevSelectedSig) {
             emit selectedChatChanged();
         }

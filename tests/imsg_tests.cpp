@@ -9,6 +9,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QQmlApplicationEngine>
+#include <QSignalSpy>
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -2972,6 +2973,99 @@ private slots:
         QCOMPARE(failItem.value(QStringLiteral("isFailed")).toBool(), true);
         QCOMPARE(failItem.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
         QVERIFY(failItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("⚠ Not Delivered")));
+    }
+
+    void testChatServiceEvidenceOrderingAndNotifications() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_svc2.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("cfg_svc2.json")));
+        const QString g = QStringLiteral("any;-;+15555550111");
+        auto serviceOf = [&b](const QString &guid) {
+            for (const QVariant &v : b.chats()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("guid")).toString() == guid) return m.value(QStringLiteral("service")).toString();
+            }
+            return QStringLiteral("<missing>");
+        };
+        auto meta = [&](const QJsonObject &extra) {
+            QJsonObject c{{QStringLiteral("guid"), g}, {QStringLiteral("style"), 45},
+                          {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550111")},
+                          {QStringLiteral("lastMessageDate"), 1794270000000LL}};
+            for (auto it = extra.begin(); it != extra.end(); ++it) c.insert(it.key(), it.value());
+            b.ingestChatsMetadataForTest(QJsonArray{c});
+        };
+        auto msg = [&](const char *id, const char *svc, qint64 date) {
+            QJsonObject m{{QStringLiteral("guid"), QString::fromUtf8(id)}, {QStringLiteral("text"), QStringLiteral("x")},
+                          {QStringLiteral("isFromMe"), false}, {QStringLiteral("dateCreated"), date},
+                          {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550111")}}},
+                          {QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), g}}}}};
+            if (svc) m.insert(QStringLiteral("service"), QString::fromUtf8(svc));
+            b.ingestMessagesForTest(QJsonArray{m}, false);
+        };
+        const qint64 t = 1794270000000LL;
+
+        // lastMessage evidence is dated: an older SMS message can't override it
+        meta(QJsonObject{{QStringLiteral("lastMessage"), QJsonObject{{QStringLiteral("service"), QStringLiteral("iMessage")},
+                                                                     {QStringLiteral("dateCreated"), t + 2000}}}});
+        QCOMPARE(serviceOf(g), QStringLiteral("iMessage"));
+        msg("MSG-EV-OLD", "SMS", t + 1000);
+        QCOMPARE(serviceOf(g), QStringLiteral("iMessage"));
+
+        // ...but newer lastMessage evidence in later metadata does win
+        meta(QJsonObject{{QStringLiteral("lastMessage"), QJsonObject{{QStringLiteral("service"), QStringLiteral("SMS")},
+                                                                     {QStringLiteral("dateCreated"), t + 3000}}}});
+        QCOMPARE(serviceOf(g), QStringLiteral("SMS"));
+
+        // Participant-only metadata never overrides message evidence
+        meta(QJsonObject{{QStringLiteral("participants"), QJsonArray{QJsonObject{
+            {QStringLiteral("address"), QStringLiteral("+15555550111")}, {QStringLiteral("service"), QStringLiteral("iMessage")}}}}});
+        QCOMPARE(serviceOf(g), QStringLiteral("SMS"));
+
+        // A newer message still refines it, and the selected chat is notified
+        b.selectChat(g);
+        QSignalSpy spy(&b, &Backend::selectedChatChanged);
+        msg("MSG-EV-NEW", "RCS", t + 4000);
+        QTRY_VERIFY(spy.count() > 0);
+        QCOMPARE(b.selectedChatService(), QStringLiteral("RCS"));
+
+        // Metadata-only change of the selected chat's service also notifies
+        const QString g2 = QStringLiteral("any;-;user2@example.com");
+        b.ingestChatsMetadataForTest(QJsonArray{QJsonObject{{QStringLiteral("guid"), g2}, {QStringLiteral("style"), 45},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("user2@example.com")}, {QStringLiteral("lastMessageDate"), t}}});
+        b.selectChat(g2);
+        QCOMPARE(b.selectedChatService(), QString());
+        spy.clear();
+        b.ingestChatsMetadataForTest(QJsonArray{QJsonObject{{QStringLiteral("guid"), g2}, {QStringLiteral("style"), 45},
+            {QStringLiteral("chatIdentifier"), QStringLiteral("user2@example.com")}, {QStringLiteral("lastMessageDate"), t},
+            {QStringLiteral("serviceName"), QStringLiteral("RCS")}}});
+        QCOMPARE(b.selectedChatService(), QStringLiteral("RCS"));
+        QVERIFY(spy.count() > 0);
+    }
+
+    void testMessageCreatedChatUsesEmbeddedChatService() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_svc3.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("cfg_svc3.json")));
+        const QString g = QStringLiteral("any;-;+15555550122");
+        // Message without a service creates the chat before metadata arrives;
+        // the embedded chat's serviceName must still be used.
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{
+            {QStringLiteral("guid"), QStringLiteral("MSG-EMB-1")}, {QStringLiteral("text"), QStringLiteral("hey")},
+            {QStringLiteral("isFromMe"), false}, {QStringLiteral("dateCreated"), 1794270000000LL},
+            {QStringLiteral("handle"), QJsonObject{{QStringLiteral("address"), QStringLiteral("+15555550122")}}},
+            {QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), g},
+                                                             {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550122")},
+                                                             {QStringLiteral("serviceName"), QStringLiteral("RCS")}}}}}}, true);
+        QString svc = QStringLiteral("<missing>");
+        for (const QVariant &v : b.chats()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("guid")).toString() == g) svc = m.value(QStringLiteral("service")).toString();
+        }
+        QCOMPARE(svc, QStringLiteral("RCS"));
     }
 
     void testResolveChatServiceForAnyPrefixedGuids() {
