@@ -226,8 +226,11 @@ mkdir -p "${CLIENT_CONFIG_DIR}"
 chmod 700 "${CLIENT_CONFIG_DIR}"
 
 CLIENT_CONFIG="${CLIENT_CONFIG_DIR}/config.json"
-# Point at the relay's port (the "port" from its server.json; older installs may still
-# use 1234, Homebrew uses 1235) on an address this machine can reach: the Mac's bind
+# Point at the port the relay actually listens on, i.e. the --port its service passes
+# (the Phase 2 LaunchAgent uses server.json's "port"; the Homebrew service uses 1235;
+# bluepill-server itself never reads "port" from server.json; check with
+# `lsof -iTCP -sTCP:LISTEN -P | grep -i python` on the Mac),
+# on an address this machine can reach: the Mac's bind
 # address, or, if it binds 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
 # Or ssh://user@mac-host / https://relay.example.com:443
 RELAY_URL="http://127.0.0.1:1235"
@@ -296,7 +299,8 @@ RELAY_URL="http://127.0.0.1:1235" # Same value as RELAY_URL in Step 3.2 (scheme 
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 RELAY_ADDR="${RELAY_URL%/}"
 # These HTTP checks can't test an ssh:// relay: for SSH mode, run them on the Mac
-# against http://127.0.0.1:1235 instead (e.g. via `ssh user@mac-host`).
+# (e.g. via `ssh user@mac-host`) against the relay's bound address and port:
+# http://<BIND_HOST>:<port>, or http://127.0.0.1:<port> if it binds 127.0.0.1 or 0.0.0.0.
 
 echo "=== BluePill End-to-End Validation ==="
 

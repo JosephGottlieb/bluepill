@@ -73,6 +73,8 @@ class Backend : public QObject {
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY statusChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl NOTIFY configChanged)
+    // The configured primary (serverUrl may be the failover after a rotation).
+    Q_PROPERTY(QString configuredServerUrl READ configuredServerUrl NOTIFY configChanged)
     Q_PROPERTY(QString secondaryServerUrl READ secondaryServerUrl NOTIFY configChanged)
     Q_PROPERTY(QString serverPassword READ serverPassword NOTIFY configChanged)
     Q_PROPERTY(bool hasPasswordConfigured READ hasPasswordConfigured NOTIFY configChanged)
@@ -158,6 +160,7 @@ public:
     bool loading() const { return m_loading; }
     QString serverStatus() const { return m_serverStatus; }
     QString serverUrl() const { return m_serverUrl; }
+    QString configuredServerUrl() const { return m_lastConfiguredBaseUrl.isEmpty() ? m_serverUrl : m_lastConfiguredBaseUrl; }
     QString secondaryServerUrl() const { return m_secondaryServerUrl; }
     QString serverPassword() const { return m_password; }
     bool hasPasswordConfigured() const { return !m_password.isEmpty(); }
@@ -286,6 +289,10 @@ public:
     // Parses `tailscale status --json` into online macOS peers:
     // [{name, host, ip, url}] (url = http://<MagicDNS name>:1235).
     static QVariantList parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState = nullptr);
+    // True only for a bluepill-server/BlueBubbles-style JSON answer to /api/v1/ping.
+    static bool looksLikeRelayResponse(int httpStatus, const QByteArray &body);
+    // ssh://... or scheme-less user@host (no path).
+    Q_INVOKABLE static bool isSshStyleServerUrl(const QString &url);
     // Every Tailscale IP of this node and its peers in `tailscale status --json`.
     static QSet<QString> parseTailscaleNodeIps(const QByteArray &statusJson);
     // True when every address is a Tailscale address that belongs to a tailnet node.

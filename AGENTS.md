@@ -192,8 +192,11 @@ mkdir -p "${CLIENT_DIR}"
 chmod 700 "${CLIENT_DIR}"
 
 CLIENT_CFG="${CLIENT_DIR}/config.json"
-# Point at the relay's port (the "port" from its server.json; older installs may still
-# use 1234, Homebrew uses 1235) on an address this machine can reach: the Mac's BIND_HOST,
+# Point at the port the relay actually listens on, i.e. the --port its service passes
+# (the LaunchAgent above uses server.json's "port"; the Homebrew service uses 1235;
+# bluepill-server itself never reads "port" from server.json; check with
+# `lsof -iTCP -sTCP:LISTEN -P | grep -i python` on the Mac),
+# on an address this machine can reach: the Mac's BIND_HOST,
 # or, if BIND_HOST is 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
 RELAY_URL="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"
 RELAY_TOKEN="${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}"

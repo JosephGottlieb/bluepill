@@ -3000,6 +3000,10 @@ private slots:
         QVERIFY(same("HTTPS://RELAY.example.com/bb", "https://relay.example.com/bb"));
         QVERIFY(!same("https://relay.example.com/Relay", "https://relay.example.com/relay"));
         QVERIFY(!same("https://Alex@relay.example.com", "https://alex@relay.example.com"));
+        // Encoded paths and user-info passwords are part of the endpoint
+        QVERIFY(!same("https://relay.example.com/team%2Frelay", "https://relay.example.com/team/relay"));
+        QVERIFY(!same("https://alex:old@relay.example.com", "https://alex:new@relay.example.com"));
+        QVERIFY(same("https://alex:pw@relay.example.com", "https://alex:pw@relay.example.com:443"));
     }
 
     void testCleartextPasswordTransportAllowsTailscaleAndPrivateLan() {
@@ -3173,6 +3177,12 @@ private slots:
         QCOMPARE(split("ssh://user@mac.local:2222"), QStringLiteral("ssh://user@mac.local:2222|"));
         QCOMPARE(split("https://alex@relay.example.com:8080/bb"), QStringLiteral("https://alex@relay.example.com/bb|8080"));
         QCOMPARE(split("https://alex@relay.example.com"), QStringLiteral("https://alex@relay.example.com|"));
+        // "@" in an HTTP path is not SSH user info
+        QVERIFY(Backend::isSshStyleServerUrl(QStringLiteral("alex@mac")));
+        QVERIFY(Backend::isSshStyleServerUrl(QStringLiteral("ssh://alex@mac:2222")));
+        QVERIFY(!Backend::isSshStyleServerUrl(QStringLiteral("relay.example.com/team@bluepill")));
+        QVERIFY(!Backend::isSshStyleServerUrl(QStringLiteral("https://alex@relay.example.com")));
+        QCOMPARE(split("relay.example.com:8080/team@bluepill"), QStringLiteral("relay.example.com/team@bluepill|8080"));
         QCOMPARE(split("my-mac:99999"), QStringLiteral("my-mac:99999|"));
 
         auto compose = [](const char *u, const char *p) {
@@ -3187,6 +3197,7 @@ private slots:
         QCOMPARE(compose("user@mac.local", "4000"), QStringLiteral("ssh://user@mac.local"));
         QCOMPARE(compose("https://alex@relay.example.com", "443"), QStringLiteral("https://alex@relay.example.com:443"));
         QCOMPARE(compose("https://alex@relay.example.com", ""), QStringLiteral("https://alex@relay.example.com:1235"));
+        QCOMPARE(compose("relay.example.com/team@bluepill", "8080"), QStringLiteral("http://relay.example.com:8080/team@bluepill"));
         QCOMPARE(compose("", "4000"), QString());
         // Round trip: what the dialog loads composes back to the saved URL
         const QVariantMap loaded = Backend::splitServerUrl(QStringLiteral("http://mac-relay.example.com:1235"), true);
@@ -3248,6 +3259,23 @@ private slots:
         root->setProperty("showServerConfigModal", true);
         QCoreApplication::processEvents();
 
+        // An invalid non-empty port is rejected (no silent fallback to 1235), Settings stays open
+        urlIn->setProperty("text", QStringLiteral("https://proxy.example.com"));
+        portIn->setProperty("text", QStringLiteral("65536"));
+        QCOMPARE(call("savePrimaryServerSettings").toBool(), false);
+        QCOMPARE(b.serverUrl(), QStringLiteral("http://my-mac.local:1235"));
+        QVERIFY(root->property("serverPortInvalid").toBool());
+        QVERIFY(root->property("showServerConfigModal").toBool());
+        portIn->setProperty("text", QString());
+
+        // A configured user who clears the URL field never gets it auto-filled by discovery
+        urlIn->setProperty("text", QString());
+        b.setTailscaleRelaysForTest(QVariantList{
+            QVariantMap{{"name", "Solo"}, {"host", "solo.tailnet-example.ts.net"}, {"ip", "100.100.1.4"},
+                        {"url", "http://solo.tailnet-example.ts.net:1235"}, {"key", "solo"}, {"probeState", "relay"}}});
+        QCoreApplication::processEvents();
+        QCOMPARE(urlIn->property("text").toString(), QString());
+
         // Cleartext warning: shown for a public http:// host, hidden for LAN/Tailscale
         QObject *warn = root->findChild<QObject *>(QStringLiteral("serverUrlCleartextWarning"));
         QVERIFY(warn);
@@ -3282,6 +3310,7 @@ private slots:
         findRow(window->contentItem());
         QVERIFY(studioRow);
         QVERIFY(studioRow->activeFocusOnTab());
+        QVERIFY(studioRow->property("isSelectable").toBool());
         studioRow->forceActiveFocus();
         QVERIFY(studioRow->hasActiveFocus());
         QTest::keyClick(studioRow->window(), Qt::Key_Return);
@@ -3323,6 +3352,22 @@ private slots:
         QVERIFY(Backend::parseTailscaleMacPeers(R"({"BackendState":"Stopped","Peer":{}})", &stopped).isEmpty());
         QCOMPARE(stopped, QStringLiteral("Stopped"));
         QVERIFY(Backend::parseTailscaleMacPeers("not json").isEmpty());
+
+        // IPv6-only peer without MagicDNS: keep its IPv6 address, bracketed in the URL
+        const QVariantList v6 = Backend::parseTailscaleMacPeers(R"({"BackendState":"Running","Peer":{
+            "k":{"OS":"macOS","HostName":"Mini","DNSName":"","TailscaleIPs":["fd7a:115c:a1e0::9"],"Online":true}}})");
+        QCOMPARE(v6.size(), 1);
+        QCOMPARE(v6[0].toMap().value("ip").toString(), QStringLiteral("fd7a:115c:a1e0::9"));
+        QCOMPARE(v6[0].toMap().value("url").toString(), QStringLiteral("http://[fd7a:115c:a1e0::9]:1235"));
+
+        // Only a relay-shaped JSON answer counts as a relay, never a bare status code
+        QVERIFY(Backend::looksLikeRelayResponse(401, R"({"status":401,"message":"Unauthorized","data":null})"));
+        QVERIFY(Backend::looksLikeRelayResponse(200, R"({"status":200,"message":"Success","data":"pong"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(401, "<html>401 Authorization Required</html>"));
+        QVERIFY(!Backend::looksLikeRelayResponse(200, R"({"status":200,"message":"ok","data":"hello"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(403, R"({"status":403,"message":"Forbidden"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(401, R"({"status":200,"message":"Unauthorized"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(401, QByteArray()));
     }
 
     void testChatServiceEvidenceOrderingAndNotifications() {

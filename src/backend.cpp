@@ -1313,7 +1313,7 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool fromUser
     const bool hasHttps = url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive);
     if (!hasHttp && !hasHttps) {
         if (url.contains(QStringLiteral("://"))) return url;  // unknown scheme: leave as typed
-        if (url.contains(QLatin1Char('@')) && !url.contains(QLatin1Char('/'))) {
+        if (isSshStyleServerUrl(url)) {
             return QStringLiteral("ssh://") + url;
         }
         // Settings: the BluePill relay serves plain HTTP unless started with
@@ -1334,10 +1334,13 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool fromUser
     return url;
 }
 
-// "ssh://..." or a scheme-less "user@host"; http(s)://user@host is a URL with userinfo.
-static bool isSshStyleServerUrl(const QString &trimmed) {
+// "ssh://..." or a scheme-less "user@host" (no path). http(s)://user@host is a
+// URL with user info, and "host/path@x" is an HTTP base with "@" in its path.
+bool Backend::isSshStyleServerUrl(const QString &url) {
+    const QString trimmed = url.trimmed();
     if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) return true;
-    return !trimmed.contains(QStringLiteral("://")) && trimmed.contains(QLatin1Char('@'));
+    return !trimmed.contains(QStringLiteral("://")) && trimmed.contains(QLatin1Char('@')) &&
+           !trimmed.contains(QLatin1Char('/'));
 }
 
 static const QRegularExpression &serverUrlPortRegex() {
@@ -1405,6 +1408,27 @@ void Backend::openWebUi() {
     emit toastMessage(QStringLiteral("🌐 Opening BluePill Web UI (%1)").arg(urlStr));
 }
 
+// http://host[:port] with IPv6 literals bracketed.
+static QString relayHttpUrl(const QString &host, int port = -1) {
+    QUrl u;
+    u.setScheme(QStringLiteral("http"));
+    u.setHost(host);
+    if (port > 0) u.setPort(port);
+    return u.toString();
+}
+
+bool Backend::looksLikeRelayResponse(int httpStatus, const QByteArray &body) {
+    // bluepill-server (and BlueBubbles) answer with {"status": <code>, "message": ...};
+    // an authorized ping returns data "pong". A bare status code proves nothing.
+    const QJsonObject o = QJsonDocument::fromJson(body).object();
+    if (o.isEmpty() || o.value(QStringLiteral("status")).toInt(-1) != httpStatus ||
+        !o.value(QStringLiteral("message")).isString()) {
+        return false;
+    }
+    if (httpStatus == 401) return true;
+    return httpStatus == 200 && o.value(QStringLiteral("data")).toString() == QStringLiteral("pong");
+}
+
 QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState) {
     QVariantList out;
     const QJsonObject root = QJsonDocument::fromJson(statusJson).object();
@@ -1417,11 +1441,16 @@ QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QStri
 
         QString dnsName = peer.value(QStringLiteral("DNSName")).toString().trimmed();
         while (dnsName.endsWith(QLatin1Char('.'))) dnsName.chop(1);
+        // Prefer IPv4; keep IPv6 for IPv6-only tailnets.
         QString ip;
+        QString ip6;
         for (const QJsonValue &v : peer.value(QStringLiteral("TailscaleIPs")).toArray()) {
-            const QString candidate = v.toString();
-            if (!candidate.contains(QLatin1Char(':'))) { ip = candidate; break; }
+            const QHostAddress a(v.toString());
+            if (a.isNull()) continue;
+            if (a.protocol() == QAbstractSocket::IPv4Protocol) { ip = a.toString(); break; }
+            if (ip6.isEmpty()) ip6 = a.toString();
         }
+        if (ip.isEmpty()) ip = ip6;
         const QString host = !dnsName.isEmpty() ? dnsName : ip;
         if (host.isEmpty()) continue;
 
@@ -1432,8 +1461,8 @@ QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QStri
         entry.insert(QStringLiteral("name"), name);
         entry.insert(QStringLiteral("host"), host);
         entry.insert(QStringLiteral("ip"), ip);
-        entry.insert(QStringLiteral("url"), QStringLiteral("http://%1:%2").arg(host).arg(kDefaultRelayPort));
-        entry.insert(QStringLiteral("baseUrl"), QStringLiteral("http://%1").arg(host));
+        entry.insert(QStringLiteral("url"), relayHttpUrl(host, kDefaultRelayPort));
+        entry.insert(QStringLiteral("baseUrl"), relayHttpUrl(host));
         entry.insert(QStringLiteral("key"), host);
         entry.insert(QStringLiteral("probeState"), QStringLiteral("pending"));
         out.append(entry);
@@ -1587,6 +1616,8 @@ void Backend::setTailscaleScanState(const QVariantList &relays, const QString &s
 void Backend::probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback) {
     QNetworkRequest req(QUrl(baseUrl + QStringLiteral("/api/v1/ping")));
     req.setTransferTimeout(3000);
+    // Never follow a redirect: the peer itself must answer like a relay.
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
     QSslConfiguration ssl = req.sslConfiguration();
     ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
     req.setSslConfiguration(ssl);
@@ -1598,12 +1629,18 @@ void Backend::probeTailscaleRelay(const QString &key, const QString &baseUrl, bo
     connect(reply, &QNetworkReply::readyRead, reply, [reply]() {
         if (reply->bytesAvailable() >= kProbeMaxBody) reply->abort();
     });
+    // The transfer timeout only catches inactivity; also cap total time so a
+    // slow trickle can't keep the scan running.
+    QTimer::singleShot(5000, reply, [reply]() {
+        if (reply->isRunning()) reply->abort();
+    });
     connect(reply, &QNetworkReply::finished, this, [this, reply, key, baseUrl, allowIpFallback]() {
         reply->deleteLater();
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->read(kProbeMaxBody);
         QString state;
-        if (httpStatus == 200 || httpStatus == 401 || httpStatus == 403) state = QStringLiteral("relay");
-        else if (httpStatus > 0) state = QStringLiteral("other");
+        if (httpStatus > 0 && looksLikeRelayResponse(httpStatus, body)) state = QStringLiteral("relay");
+        else if (httpStatus > 0) state = QStringLiteral("other");  // something answers, but not a relay
         else state = QStringLiteral("unreachable");
 
         QVariantList updated = m_tailscaleRelays;
@@ -1615,13 +1652,13 @@ void Backend::probeTailscaleRelay(const QString &key, const QString &baseUrl, bo
             // --accept-dns=false; retry the peer's Tailscale IP before giving up.
             if (state == QStringLiteral("unreachable") && allowIpFallback && !ip.isEmpty() &&
                 m.value(QStringLiteral("host")).toString() != ip) {
-                probeTailscaleRelay(key, QStringLiteral("http://%1:%2").arg(ip).arg(kDefaultRelayPort), false);
+                probeTailscaleRelay(key, relayHttpUrl(ip, kDefaultRelayPort), false);
                 return;  // still pending; the IP probe settles this peer
             }
             if (state == QStringLiteral("relay") && !allowIpFallback) {
                 m.insert(QStringLiteral("host"), ip);
                 m.insert(QStringLiteral("url"), baseUrl);
-                m.insert(QStringLiteral("baseUrl"), QStringLiteral("http://%1").arg(ip));
+                m.insert(QStringLiteral("baseUrl"), relayHttpUrl(ip));
             }
             m.insert(QStringLiteral("probeState"), state);
             v = m;
@@ -1702,14 +1739,14 @@ bool Backend::isSameServerEndpoint(const QString &a, const QString &b) {
         return u.port(scheme == QStringLiteral("https") ? 443 : scheme == QStringLiteral("http") ? 80 : -1);
     };
     auto path = [](const QUrl &u) {
-        QString p = u.path();
+        QString p = u.path(QUrl::FullyEncoded);  // "/a%2Fb" and "/a/b" can route differently
         while (p.endsWith(QLatin1Char('/'))) p.chop(1);
         return p;
     };
     return ua.scheme().compare(ub.scheme(), Qt::CaseInsensitive) == 0 &&
            ua.host().compare(ub.host(), Qt::CaseInsensitive) == 0 &&
            effectivePort(ua) == effectivePort(ub) && path(ua) == path(ub) &&
-           ua.userName() == ub.userName();
+           ua.userInfo(QUrl::FullyEncoded) == ub.userInfo(QUrl::FullyEncoded);  // user and password
 }
 
 // A field the user didn't change keeps the saved URL verbatim, so re-saving

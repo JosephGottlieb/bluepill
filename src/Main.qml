@@ -374,16 +374,40 @@ ApplicationWindow {
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
             root.reconcileAudioDeviceSelections()
-            root.loadPrimaryServerFields(backend.serverUrl)
+            root.loadPrimaryServerFields(backend.configuredServerUrl)
             secondaryServerUrlInput.text = backend.secondaryServerUrl
             serverPasswordInput.text = backend.serverPassword
             root.showServerPassword = false
         }
     }
 
+    // True once the user types in the primary URL/Port fields (blocks discovery auto-fill).
+    property bool primaryServerFieldsEdited: false
+    property bool serverPortInvalid: false
+
+    // One save path for every Save/Return action: an invalid non-empty port keeps
+    // Settings open instead of silently falling back to 1235.
+    function savePrimaryServerSettings() {
+        var portText = serverPortInput.text.trim()
+        if (portText.length > 0 && !primaryServerFields.isSshUrl) {
+            var p = Number(portText)
+            if (!/^\d+$/.test(portText) || p < 1 || p > 65535) {
+                root.serverPortInvalid = true
+                serverPortInput.forceActiveFocus()
+                return false
+            }
+        }
+        root.serverPortInvalid = false
+        backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
+        root.showServerConfigModal = false
+        return true
+    }
+
     // Primary server URL is edited as two fields: URL (no port) + Port.
     function loadPrimaryServerFields(url) {
         var raw = url || ""
+        root.primaryServerFieldsEdited = false
+        root.serverPortInvalid = false
         backend.verifyTailnetHostForUrl(raw)
         var parts = backend.splitServerUrl(raw, true)
         var explicit = backend.splitServerUrl(raw, false).port
@@ -415,7 +439,7 @@ ApplicationWindow {
         root.showNewChatModal = false
         root.showEmojiPicker = false
         root.reconcileAudioDeviceSelections()
-        root.loadPrimaryServerFields(backend.serverUrl)
+        root.loadPrimaryServerFields(backend.configuredServerUrl)
         secondaryServerUrlInput.text = backend.secondaryServerUrl
         serverPasswordInput.text = backend.serverPassword
         root.showServerPassword = false
@@ -8824,8 +8848,14 @@ ApplicationWindow {
                             radius: 6
                             color: theme.lighterBackground
                             border.width: 1
-                            border.color: theme.muted
                             opacity: backend.tailscaleScanning ? 0.5 : 1.0
+                            activeFocusOnTab: true
+                            border.color: activeFocus ? theme.accent : theme.muted
+                            Accessible.role: Accessible.Button
+                            Accessible.name: rescanTxt.text
+                            Keys.onReturnPressed: if (!backend.tailscaleScanning) backend.discoverTailscaleRelays()
+                            Keys.onEnterPressed: if (!backend.tailscaleScanning) backend.discoverTailscaleRelays()
+                            Keys.onSpacePressed: if (!backend.tailscaleScanning) backend.discoverTailscaleRelays()
                             Text {
                                 id: rescanTxt
                                 anchors.centerIn: parent
@@ -8864,7 +8894,9 @@ ApplicationWindow {
                         function onTailscaleRelaysChanged() {
                             // First run: a single responding relay on the tailnet is
                             // almost certainly the one to use, so pre-fill it.
-                            if (backend.tailscaleScanning || serverUrlInput.text.trim().length > 0) return
+                            if (backend.tailscaleScanning || !root.showServerConfigModal) return
+                            if (backend.configuredServerUrl.length > 0 || root.primaryServerFieldsEdited) return
+                            if (serverUrlInput.text.trim().length > 0) return
                             var found = backend.tailscaleRelays.filter(function(r) { return r.probeState === "relay" })
                             if (found.length === 1) {
                                 root.loadPrimaryServerFields(found[0].url)
@@ -8889,7 +8921,11 @@ ApplicationWindow {
                             activeFocusOnTab: true
                             Accessible.role: Accessible.Button
                             Accessible.name: modelData.name + " " + modelData.url
+                            // A pending row's URL may still change (IP fallback), so wait for its result.
+                            readonly property bool isSelectable: modelData.probeState !== "pending"
+                            opacity: isSelectable ? 1.0 : 0.6
                             function selectRelay() {
+                                if (!isSelectable) return
                                 root.loadPrimaryServerFields(modelData.url)
                                 serverPasswordInput.forceActiveFocus()
                             }
@@ -8909,6 +8945,7 @@ ApplicationWindow {
                                     Text {
                                         Layout.fillWidth: true
                                         text: modelData.name
+                                        textFormat: Text.PlainText  // peer HostName is untrusted
                                         font.pixelSize: theme.fontSize - 1
                                         font.bold: true
                                         color: theme.brightForeground
@@ -8917,7 +8954,7 @@ ApplicationWindow {
                                     Text {
                                         text: modelData.probeState === "relay" ? i18n.tr("● Relay found")
                                               : modelData.probeState === "pending" ? i18n.tr("Checking…")
-                                              : modelData.probeState === "other" ? i18n.tr("Port 1235 in use (not BluePill?)")
+                                              : modelData.probeState === "other" ? i18n.tr("Port 1235 answers, but not as a BluePill relay")
                                               : i18n.tr("No relay on :1235")
                                         font.pixelSize: theme.fontSize - 3
                                         color: modelData.probeState === "relay" ? theme.green : theme.darkForeground
@@ -8926,6 +8963,7 @@ ApplicationWindow {
                                 Text {
                                     Layout.fillWidth: true
                                     text: modelData.url
+                                    textFormat: Text.PlainText
                                     font.pixelSize: theme.fontSize - 3
                                     color: theme.darkForeground
                                     elide: Text.ElideMiddle
@@ -8941,7 +8979,7 @@ ApplicationWindow {
                             }
                             MouseArea {
                                 anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
+                                cursorShape: parent.isSelectable ? Qt.PointingHandCursor : Qt.ArrowCursor
                                 onClicked: parent.selectRelay()
                             }
                         }
@@ -8952,8 +8990,8 @@ ApplicationWindow {
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
-                    // ssh://... or scheme-less user@host; http(s)://user@host is a normal URL
-                    readonly property bool isSshUrl: /^ssh:\/\//i.test(serverUrlInput.text.trim()) || (serverUrlInput.text.indexOf("://") < 0 && serverUrlInput.text.indexOf("@") >= 0)
+                    // ssh://... or scheme-less user@host (same rule as the backend)
+                    readonly property bool isSshUrl: backend.isSshStyleServerUrl(serverUrlInput.text)
                     id: primaryServerFields
                     RowLayout {
                         Layout.fillWidth: true
@@ -9000,13 +9038,13 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize
                                 selectByMouse: true
                                 KeyNavigation.tab: serverPortInput
+                                onTextEdited: root.primaryServerFieldsEdited = true
                                 onEditingFinished: {
                                     root.carryOverPrimaryServerPort()
                                     backend.verifyTailnetHostForUrl(root.composedPrimaryServerUrl())
                                 }
                                 Keys.onReturnPressed: {
-                                    backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
-                                    root.showServerConfigModal = false
+                                    root.savePrimaryServerSettings()
                                 }
                                 Text {
                                     text: "mac-relay.example.com  (or https://relay.example.com)"
@@ -9028,7 +9066,7 @@ ApplicationWindow {
                             clip: true
                             color: theme.lighterBackground
                             border.width: 1
-                            border.color: serverPortInput.activeFocus ? theme.accent : theme.muted
+                            border.color: root.serverPortInvalid ? theme.red : (serverPortInput.activeFocus ? theme.accent : theme.muted)
                             opacity: primaryServerFields.isSshUrl ? 0.4 : 1.0
 
                             TextInput {
@@ -9046,11 +9084,11 @@ ApplicationWindow {
                                 inputMethodHints: Qt.ImhDigitsOnly
                                 maximumLength: 5
                                 validator: IntValidator { bottom: 1; top: 65535 }
+                                onTextEdited: { root.primaryServerFieldsEdited = true; root.serverPortInvalid = false }
                                 KeyNavigation.tab: secondaryServerUrlInput
                                 KeyNavigation.backtab: serverUrlInput
                                 Keys.onReturnPressed: {
-                                    backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
-                                    root.showServerConfigModal = false
+                                    root.savePrimaryServerSettings()
                                 }
                                 Text {
                                     // Greyed default shown whenever the field is empty.
@@ -9062,6 +9100,15 @@ ApplicationWindow {
                                 }
                             }
                         }
+                    }
+                    Text {
+                        objectName: "serverPortInvalidText"
+                        Layout.fillWidth: true
+                        visible: root.serverPortInvalid
+                        text: i18n.tr("Port must be a number from 1 to 65535, or empty for 1235.")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.red
+                        wrapMode: Text.WordWrap
                     }
                     Text {
                         objectName: "serverUrlCleartextWarning"
@@ -9113,8 +9160,7 @@ ApplicationWindow {
                             selectByMouse: true
                             KeyNavigation.tab: serverPasswordInput
                             Keys.onReturnPressed: {
-                                backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
-                                root.showServerConfigModal = false
+                                root.savePrimaryServerSettings()
                             }
                             Text {
                                 text: "https://backup-relay.example.com"
@@ -9168,8 +9214,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize
                                 selectByMouse: true
                                 Keys.onReturnPressed: {
-                                    backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
-                                    root.showServerConfigModal = false
+                                    root.savePrimaryServerSettings()
                                 }
                                 Text {
                                     text: backend.hasPasswordConfigured
@@ -9666,8 +9711,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
-                                root.showServerConfigModal = false
+                                root.savePrimaryServerSettings()
                             }
                         }
                     }
