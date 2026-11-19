@@ -408,6 +408,13 @@ ApplicationWindow {
         }
     }
     property bool showPhotoViewer: false
+    // MultiEffect mask for rounded image corners. Loaded from its own file so a
+    // missing QtQuick.Effects module (packaged separately on some distros) only
+    // means square corners, not a broken window.
+    readonly property Component roundedCornerMaskComponent: {
+        var c = Qt.createComponent("qrc:/RoundedCornerMask.qml")
+        return c.status === Component.Ready ? c : null
+    }
     property bool photoViewerFullScreen: false
     property var photoViewerItems: []
     property int photoViewerIndex: 0
@@ -3692,6 +3699,8 @@ ApplicationWindow {
                         id: msgDelegate
                         required property var modelData
                         required property int index
+                        objectName: "messageDelegate"
+                        readonly property string messageGuid: modelData.guid || ""
                         property bool invisibleInkRevealed: false
                         readonly property bool isGreenService: Boolean(modelData.isGreenBubble || modelData.service === "RCS" || modelData.service === "SMS" || (!modelData.service && root.selectedChatIsGreen))
                         readonly property bool isInvisibleInkMsg: (modelData.expressiveEffect === "🕵️ Invisible Ink") || ((modelData.sendEffectLabel || "").toLowerCase().indexOf("invisible ink") !== -1)
@@ -3745,6 +3754,21 @@ ApplicationWindow {
                         readonly property string liveAttachmentUrl: (downloadedAttachmentUrl.length > 0) ? downloadedAttachmentUrl : (modelData.attachmentLocalUrl || "")
                         property var liveLinkPreview: modelData.linkPreview || null
                         property bool liveHasPreview: modelData.hasLinkPreview || (liveLinkPreview !== null && liveLinkPreview !== undefined && (liveLinkPreview.url || "").length > 0)
+
+                        // Like iOS Messages: photos and up to three emoji sent without
+                        // text are shown on their own, without a bubble.
+                        readonly property bool hasCaptionText: {
+                            var t = modelData.text || ""
+                            if (t.length === 0) return false
+                            return !(modelData.hasImageAttachment && (t === "📷 Photo" || /^📷 \d+ Photos$/.test(t)))
+                        }
+                        readonly property bool hasNonImageContent: Boolean(modelData.hasFileAttachment || liveHasPreview || isInvisibleInkMsg
+                                                                         || (modelData.verificationCode || "").length > 0
+                                                                         || (modelData.attachments || []).some(function(a) { return a.isAudio === true }))
+                        readonly property bool isBubblelessMedia: Boolean(modelData.hasImageAttachment) && !hasCaptionText && !hasNonImageContent
+                        readonly property int jumboEmojiCount: (!modelData.hasImageAttachment && !hasNonImageContent)
+                                                               ? backend.jumboEmojiCount(modelData.text || "") : 0
+                        readonly property bool isBubbleless: isBubblelessMedia || jumboEmojiCount > 0
 
                         function resolveAttachmentUrl(attGuid, initialUrl) {
                             if (attGuid && downloadedAttachmentUrls && downloadedAttachmentUrls[attGuid]) {
@@ -4192,18 +4216,20 @@ ApplicationWindow {
                                 Rectangle {
                                     id: bubbleRect
                                     anchors.fill: parent
+                                    objectName: "messageBubbleRect"
                                     radius: theme.radius + 2
-                                    color: modelData.isFromMe
-                                           ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
-                                           : "#1e2430"
-                                    border.width: 1
+                                    color: msgDelegate.isBubbleless ? "transparent"
+                                           : (modelData.isFromMe
+                                              ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
+                                              : "#1e2430")
+                                    border.width: msgDelegate.isBubbleless ? (root.activeActionMessageGuid === modelData.guid ? 1 : 0) : 1
                                     border.color: (root.activeActionMessageGuid === modelData.guid)
                                                   ? theme.brightForeground
                                                   : (modelData.isFromMe
                                                      ? (msgDelegate.isGreenService ? "#268C48" : "#0066CC")
                                                      : "#2c3545")
-                                    implicitWidth: Math.max(bubbleContent.width + 28, 96)
-                                    implicitHeight: bubbleContent.height + 20
+                                    implicitWidth: msgDelegate.isBubbleless ? bubbleContent.width : Math.max(bubbleContent.width + 28, 96)
+                                    implicitHeight: msgDelegate.isBubbleless ? bubbleContent.height : bubbleContent.height + 20
 
                                     transformOrigin: Item.Center
 
@@ -4265,9 +4291,9 @@ ApplicationWindow {
 
                                     Column {
                                         id: bubbleContent
-                                        x: 14
-                                        y: 10
-                                        spacing: 6
+                                        x: msgDelegate.isBubbleless ? 0 : 14
+                                        y: msgDelegate.isBubbleless ? 0 : 10
+                                        spacing: msgDelegate.isBubbleless ? 2 : 6
                                         readonly property real maxTextW: Math.max(180, Math.floor(messageListView.width * 0.62) - 28)
 
                                         // Inline Image Attachment Previews (supports 1..N photos per message)
@@ -4281,29 +4307,55 @@ ApplicationWindow {
                                             delegate: Rectangle {
                                                 required property var modelData
                                                 required property int index
+                                                id: inlineImageCard
                                                 objectName: "inlineImageAttachmentCard"
-                                                readonly property bool isPortraitImage: inlineImg.status === Image.Ready && inlineImg.implicitHeight > inlineImg.implicitWidth && inlineImg.implicitWidth > 0
-                                                width: isPortraitImage
-                                                           ? Math.min(240, bubbleContent.maxTextW + 28)
-                                                           : Math.min(320, bubbleContent.maxTextW + 28)
-                                                height: (inlineImg.status === Image.Ready && inlineImg.implicitWidth > 0 && inlineImg.implicitHeight > 0)
-                                                            ? Math.round(Math.max(150, Math.min(isPortraitImage ? 320 : 240, width * (inlineImg.implicitHeight / inlineImg.implicitWidth))))
-                                                            : 170
-                                                radius: 8
-                                                color: theme.darkBackground
-                                                clip: true
-
                                                 readonly property string resolvedImgUrl: msgDelegate.resolveAttachmentUrl(modelData.guid || "", modelData.localUrl || "")
+                                                readonly property bool isAnimated: backend.isAnimatedImageAttachment(modelData.mimeType || "", modelData.name || resolvedImgUrl)
+                                                readonly property var media: isAnimated ? inlineGif : inlineImg
+                                                readonly property bool mediaReady: media.status === Image.Ready && media.implicitWidth > 0 && media.implicitHeight > 0
+                                                // Keep the image's own aspect ratio: scale it down to fit the
+                                                // message column (never up), so nothing is cropped.
+                                                readonly property real maxImageW: Math.min(msgDelegate.isBubblelessMedia ? 360 : 320, bubbleContent.maxTextW + (msgDelegate.isBubblelessMedia ? 0 : 28))
+                                                readonly property real maxImageH: 360
+                                                readonly property real fitScale: mediaReady ? Math.min(1, maxImageW / media.implicitWidth, maxImageH / media.implicitHeight) : 1
+                                                width: mediaReady ? Math.max(48, Math.round(media.implicitWidth * fitScale)) : Math.min(240, maxImageW)
+                                                height: mediaReady ? Math.max(48, Math.round(media.implicitHeight * fitScale)) : 170
+                                                radius: msgDelegate.isBubblelessMedia ? 16 : 8
+                                                color: mediaReady ? "transparent" : theme.darkBackground
+                                                clip: true
+                                                // Rounded corners need QtQuick.Effects and a GPU scene graph
+                                                // (shader effects draw nothing with the software renderer);
+                                                // otherwise the image is shown with square corners.
+                                                readonly property Component cornerMask: root.roundedCornerMaskComponent
+                                                layer.enabled: mediaReady && cornerMask !== null && GraphicsInfo.api !== GraphicsInfo.Software
+                                                layer.effect: cornerMask
 
                                                 Image {
                                                     id: inlineImg
+                                                    objectName: "inlineStillImage"
                                                     anchors.fill: parent
-                                                    source: parent.resolvedImgUrl
+                                                    source: parent.isAnimated ? "" : parent.resolvedImgUrl
                                                     asynchronous: true
                                                     cache: true
                                                     autoTransform: true
-                                                    fillMode: Image.PreserveAspectCrop
-                                                    visible: status === Image.Ready
+                                                    smooth: true
+                                                    mipmap: true
+                                                    fillMode: Image.PreserveAspectFit
+                                                    visible: !parent.isAnimated && status === Image.Ready
+                                                }
+
+                                                AnimatedImage {
+                                                    id: inlineGif
+                                                    objectName: "inlineAnimatedImage"
+                                                    anchors.fill: parent
+                                                    source: parent.isAnimated ? parent.resolvedImgUrl : ""
+                                                    asynchronous: true
+                                                    cache: true
+                                                    smooth: true
+                                                    fillMode: Image.PreserveAspectFit
+                                                    // Plays while on screen; delegates scrolled away are destroyed.
+                                                    playing: visible
+                                                    visible: parent.isAnimated && status === Image.Ready
                                                 }
 
                                                 // Subtle photo index badge when message has multiple photos (e.g. 1/3, 2/3, 3/3)
@@ -4328,7 +4380,7 @@ ApplicationWindow {
 
                                                 Text {
                                                     anchors.centerIn: parent
-                                                    visible: inlineImg.status !== Image.Ready
+                                                    visible: !parent.mediaReady
                                                     text: "📷 " + (modelData.name || "Loading image...")
                                                     font.pixelSize: theme.fontSize - 2
                                                     color: theme.foreground
@@ -4659,8 +4711,10 @@ ApplicationWindow {
                                                 selectByKeyboard: true
                                                 selectedTextColor: "#ffffff"
                                                 selectionColor: modelData.isFromMe ? (msgDelegate.isGreenService ? "#0F4221" : "#004080") : theme.accent
-                                                font.pixelSize: theme.fontSize
-                                                color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
+                                                objectName: "messageTextEdit"
+                                                font.pixelSize: msgDelegate.jumboEmojiCount === 1 ? Math.round(theme.fontSize * 3.2)
+                                                                : (msgDelegate.jumboEmojiCount > 1 ? Math.round(theme.fontSize * 2.5) : theme.fontSize)
+                                                color: msgDelegate.isBubbleless ? theme.brightForeground : (modelData.isFromMe ? "#ffffff" : theme.brightForeground)
                                                 wrapMode: TextEdit.Wrap
                                                 onLinkActivated: (link) => backend.openUrl(link)
 
@@ -4835,7 +4889,7 @@ ApplicationWindow {
                                                 font.underline: metaBadgeMouse.containsMouse && (msgDelegate.isInvisibleInkMsg || (modelData.sendEffectLabel || "").length > 0 || (modelData.expressiveEffect || "").length > 0)
                                                 color: (modelData.isFailed || false)
                                                        ? theme.red
-                                                       : (modelData.isFromMe
+                                                       : ((modelData.isFromMe && !msgDelegate.isBubbleless)
                                                           ? (msgDelegate.isGreenService ? "#CBEFD8" : "#d0dff7")
                                                           : theme.darkForeground)
                                             }
@@ -10237,6 +10291,26 @@ ApplicationWindow {
                 }
             }
 
+            readonly property string fullPhotoSource: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || photoViewerModal.currentPhoto.sourceUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
+            readonly property bool fullPhotoIsAnimated: backend.isAnimatedImageAttachment(photoViewerModal.currentPhoto.mimeType || "", photoViewerModal.currentPhoto.name || photoViewerModal.currentPhoto.localUrl || "")
+            readonly property bool fullPhotoReady: fullPhotoIsAnimated ? fullPhotoAnimated.status === Image.Ready : fullPhotoImage.status === Image.Ready
+
+            // GIF / WebP: same geometry as fullPhotoImage, but animated
+            AnimatedImage {
+                id: fullPhotoAnimated
+                objectName: "fullPhotoAnimated"
+                anchors.fill: fullPhotoImage
+                anchors.centerIn: undefined
+                source: parent.fullPhotoIsAnimated ? parent.fullPhotoSource : ""
+                asynchronous: true
+                cache: true
+                smooth: true
+                fillMode: Image.PreserveAspectFit
+                scale: root.photoViewerZoom
+                playing: visible
+                visible: parent.fullPhotoIsAnimated && status === Image.Ready
+            }
+
             Image {
                 id: fullPhotoImage
                 objectName: "fullPhotoImage"
@@ -10245,7 +10319,7 @@ ApplicationWindow {
                 anchors.verticalCenterOffset: root.photoViewerPanY
                 width: Math.max(80, parent.width - (root.photoViewerItems.length > 1 ? 116 : 16))
                 height: Math.max(80, parent.height - 8)
-                source: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || photoViewerModal.currentPhoto.sourceUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
+                source: parent.fullPhotoIsAnimated ? "" : parent.fullPhotoSource
                 asynchronous: true
                 cache: true
                 autoTransform: true
@@ -10258,7 +10332,7 @@ ApplicationWindow {
 
             // Loading / Downloading fallback state
             Rectangle {
-                visible: fullPhotoImage.status !== Image.Ready
+                visible: !parent.fullPhotoReady
                 anchors.centerIn: parent
                 width: 280
                 height: 84

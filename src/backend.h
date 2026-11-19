@@ -314,6 +314,10 @@ public:
     Q_INVOKABLE void sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption = QString());
     // Audio, Voice, Effects & Scheduling
     Q_INVOKABLE static bool isAudioAttachment(const QString &mimeType, const QString &fileName);
+    // GIF / WebP attachments play inline with AnimatedImage.
+    Q_INVOKABLE static bool isAnimatedImageAttachment(const QString &mimeType, const QString &fileName);
+    // 1-3 when the text is only emoji (shown large without a bubble), else 0.
+    Q_INVOKABLE static int jumboEmojiCount(const QString &text);
     Q_INVOKABLE static QVariantList computeWaveformBars(const QString &seed, int count = 28);
     Q_INVOKABLE void toggleAudioPlayback(const QString &attachmentGuid, const QString &sourceUrl = QString());
     Q_INVOKABLE void seekAudioPlayback(const QString &attachmentGuid, double ratio);

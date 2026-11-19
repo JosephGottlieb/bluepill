@@ -4,6 +4,13 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+### Added
+- **GIFs play inline:** GIF and WebP attachments animate in the conversation and in the photo viewer (`AnimatedImage`). Animated WebP needs Qt's WebP image plugin (`qt6-imageformats`).
+- **Photos and emoji without text are shown without a bubble**, like iOS Messages. A photo sent on its own shows with rounded corners and no bubble behind it; a message of one to three emoji is shown large, with no bubble. Photos with a caption, and text that contains emoji, keep their bubble.
+
+### Changed
+- **Inline photos keep their aspect ratio:** Photos are no longer cropped to a fixed box. Each is scaled down to fit the message column (at most 360×360 without a bubble, 320 wide inside one) and never scaled up. Rounded corners use `QtQuick.Effects`; with the software renderer, or where that module isn't installed, photos show with square corners.
+
 ### Fixed
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
