@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QImage>
+#include <QBuffer>
 #include <QImageReader>
 #include <QImageWriter>
 #include <cmath>
@@ -136,6 +137,7 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
+#include <QHostInfo>
 #include <QThreadPool>
 #include <QUrl>
 #include <QUrlQuery>
@@ -143,6 +145,8 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <algorithm>
 #include <iostream>
 #include <limits>
+#include <memory>
+#include <utility>
 
 static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObject &obj,
                                       bool simulatePrePermFail = false, bool simulatePostPermFail = false) {
@@ -1298,7 +1302,7 @@ void Backend::checkServerAndLoad() {
     }
 }
 
-static QString normalizeServerEndpointUrl(const QString &rawUrl) {
+QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool fromUserInput) {
     QString url = rawUrl.trimmed();
     while (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
@@ -1307,21 +1311,92 @@ static QString normalizeServerEndpointUrl(const QString &rawUrl) {
     if (url.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) {
         return QStringLiteral("ssh://") + url.mid(6);
     }
-    if (!url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) &&
-        !url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive)) {
-        if (url.contains(QLatin1Char('@')) && !url.contains(QLatin1Char('/'))) {
-            url = QStringLiteral("ssh://") + url;
-        } else {
-            url = QStringLiteral("https://") + url;
+    const bool hasHttp = url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive);
+    const bool hasHttps = url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive);
+    if (!hasHttp && !hasHttps) {
+        if (url.contains(QStringLiteral("://"))) return url;  // unknown scheme: leave as typed
+        if (isSshStyleServerUrl(url)) {
+            return QStringLiteral("ssh://") + url;
         }
+        // Settings: the BluePill relay serves plain HTTP unless started with
+        // --tls-cert/--tls-key, so a bare host means http://. Saved config and
+        // env vars keep the historical https:// so existing setups don't move.
+        url = (fromUserInput ? QStringLiteral("http://") : QStringLiteral("https://")) + url;
+    }
+    // Settings only: no explicit port -> the relay's default port (1235), for
+    // http:// and https:// alike. Reverse proxies on 443 need ":443".
+    if (!fromUserInput) return url;
+    QUrl parsed(url, QUrl::StrictMode);
+    if (parsed.isValid() && !parsed.host().isEmpty() && parsed.port() == -1) {
+        parsed.setPort(kDefaultRelayPort);
+        QString out = parsed.toString();
+        while (out.endsWith(QLatin1Char('/'))) out.chop(1);
+        return out;
     }
     return url;
+}
+
+// "ssh://..." or a scheme-less "user@host" (no path). http(s)://user@host is a
+// URL with user info, and "host/path@x" is an HTTP base with "@" in its path.
+bool Backend::isSshStyleServerUrl(const QString &url) {
+    const QString trimmed = url.trimmed();
+    if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) return true;
+    return !trimmed.contains(QStringLiteral("://")) && trimmed.contains(QLatin1Char('@')) &&
+           !trimmed.contains(QLatin1Char('/'));
+}
+
+static const QRegularExpression &serverUrlPortRegex() {
+    // [scheme://] host-or-[ipv6] :port [rest]
+    static const QRegularExpression re(
+        QStringLiteral(R"(^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^/?#@\s]+@)?(?:\[[^\]]+\]|[^/:?#@\s]+)):(\d{1,5})(?=[/?#]|\s*$)(.*)$)"),
+        QRegularExpression::DotMatchesEverythingOption);
+    return re;
+}
+
+QVariantMap Backend::splitServerUrl(const QString &rawUrl, bool hideDefaultPort) {
+    QVariantMap out;
+    out.insert(QStringLiteral("url"), rawUrl);
+    out.insert(QStringLiteral("port"), QString());
+    const QString trimmed = rawUrl.trimmed();
+    if (isSshStyleServerUrl(trimmed)) {
+        return out;
+    }
+    const QRegularExpressionMatch m = serverUrlPortRegex().match(trimmed);
+    if (!m.hasMatch()) return out;
+    const int port = m.captured(2).toInt();
+    if (port < 1 || port > 65535) return out;
+    QString rest = m.captured(3);
+    while (rest.endsWith(QLatin1Char('/'))) rest.chop(1);
+    out.insert(QStringLiteral("url"), m.captured(1).trimmed() + rest);
+    out.insert(QStringLiteral("port"), (hideDefaultPort && port == kDefaultRelayPort) ? QString() : QString::number(port));
+    return out;
+}
+
+QString Backend::composeServerUrl(const QString &rawUrl, const QString &port) {
+    const QString trimmed = rawUrl.trimmed();
+    if (trimmed.isEmpty()) return QString();
+    if (isSshStyleServerUrl(trimmed)) {
+        return normalizeServerEndpointUrl(trimmed);
+    }
+    const QVariantMap split = splitServerUrl(trimmed);
+    if (!split.value(QStringLiteral("port")).toString().isEmpty()) {
+        return normalizeServerEndpointUrl(trimmed);  // inline port wins
+    }
+    const int p = port.trimmed().toInt();
+    if (p < 1 || p > 65535) return normalizeServerEndpointUrl(trimmed);
+    // Insert ":port" after the host, before any path.
+    QString withScheme = trimmed;
+    if (!withScheme.contains(QStringLiteral("://"))) withScheme.prepend(QStringLiteral("http://"));
+    QUrl u(withScheme, QUrl::TolerantMode);
+    if (!u.isValid() || u.host().isEmpty()) return normalizeServerEndpointUrl(trimmed);
+    u.setPort(p);
+    return normalizeServerEndpointUrl(u.toString());
 }
 
 QString Backend::webUiUrl() const {
     QString base = m_serverUrl.trimmed();
     if (base.isEmpty() || base.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) {
-        base = QStringLiteral("http://127.0.0.1:1235");
+        base = QStringLiteral("http://127.0.0.1:%1").arg(kDefaultRelayPort);
     }
     while (base.endsWith(QLatin1Char('/'))) {
         base.chop(1);
@@ -1335,9 +1410,398 @@ void Backend::openWebUi() {
     emit toastMessage(QStringLiteral("🌐 Opening BluePill Web UI (%1)").arg(urlStr));
 }
 
+// http://host[:port] with IPv6 literals bracketed.
+static QString relayHttpUrl(const QString &host, int port = -1) {
+    QUrl u;
+    u.setScheme(QStringLiteral("http"));
+    u.setHost(host);
+    if (port > 0) u.setPort(port);
+    return u.toString();
+}
+
+bool Backend::looksLikeRelayResponse(int httpStatus, const QByteArray &body) {
+    // bluepill-server (and BlueBubbles) answer with {"status": <code>, "message": ...};
+    // an authorized ping returns data "pong". A bare status code proves nothing.
+    const QJsonObject o = QJsonDocument::fromJson(body).object();
+    if (o.isEmpty() || o.value(QStringLiteral("status")).toInt(-1) != httpStatus ||
+        !o.value(QStringLiteral("message")).isString()) {
+        return false;
+    }
+    if (httpStatus == 401) return true;
+    return httpStatus == 200 && o.value(QStringLiteral("data")).toString() == QStringLiteral("pong");
+}
+
+QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState) {
+    QVariantList out;
+    const QJsonObject root = QJsonDocument::fromJson(statusJson).object();
+    if (backendState) *backendState = root.value(QStringLiteral("BackendState")).toString();
+    const QJsonObject peers = root.value(QStringLiteral("Peer")).toObject();
+    for (auto it = peers.constBegin(); it != peers.constEnd(); ++it) {
+        const QJsonObject peer = it.value().toObject();
+        if (peer.value(QStringLiteral("OS")).toString().compare(QStringLiteral("macOS"), Qt::CaseInsensitive) != 0) continue;
+        if (!peer.value(QStringLiteral("Online")).toBool()) continue;
+
+        QString dnsName = peer.value(QStringLiteral("DNSName")).toString().trimmed();
+        while (dnsName.endsWith(QLatin1Char('.'))) dnsName.chop(1);
+        // Prefer IPv4; keep IPv6 for IPv6-only tailnets.
+        QString ip;
+        QString ip6;
+        for (const QJsonValue &v : peer.value(QStringLiteral("TailscaleIPs")).toArray()) {
+            const QHostAddress a(v.toString());
+            if (a.isNull()) continue;
+            if (a.protocol() == QAbstractSocket::IPv4Protocol) { ip = a.toString(); break; }
+            if (ip6.isEmpty()) ip6 = a.toString();
+        }
+        if (ip.isEmpty()) ip = ip6;
+        const QString host = !dnsName.isEmpty() ? dnsName : ip;
+        if (host.isEmpty()) continue;
+
+        QString name = peer.value(QStringLiteral("HostName")).toString().trimmed();
+        if (name.isEmpty()) name = host.section(QLatin1Char('.'), 0, 0);
+
+        QVariantMap entry;
+        entry.insert(QStringLiteral("name"), name);
+        entry.insert(QStringLiteral("host"), host);
+        entry.insert(QStringLiteral("ip"), ip);
+        entry.insert(QStringLiteral("url"), relayHttpUrl(host, kDefaultRelayPort));
+        entry.insert(QStringLiteral("baseUrl"), relayHttpUrl(host));
+        entry.insert(QStringLiteral("key"), host);
+        entry.insert(QStringLiteral("probeState"), QStringLiteral("pending"));
+        out.append(entry);
+    }
+    std::sort(out.begin(), out.end(), [](const QVariant &a, const QVariant &b) {
+        return a.toMap().value(QStringLiteral("name")).toString().compare(
+                   b.toMap().value(QStringLiteral("name")).toString(), Qt::CaseInsensitive) < 0;
+    });
+    return out;
+}
+
+static QSet<QString> &verifiedTailnetHostSet() {
+    static QSet<QString> hosts;
+    return hosts;
+}
+
+// ::ffff:a.b.c.d -> a.b.c.d, so mapped answers compare like plain IPv4.
+static QHostAddress unmapIPv4(const QHostAddress &raw) {
+    if (raw.protocol() == QAbstractSocket::IPv6Protocol) {
+        bool isV4 = false;
+        const QHostAddress v4(raw.toIPv4Address(&isV4));
+        if (isV4) return v4;
+    }
+    return raw;
+}
+
+static bool isTailscaleAddress(const QHostAddress &raw) {
+    const QHostAddress addr = unmapIPv4(raw);
+    static const auto kCgnat = QHostAddress::parseSubnet(QStringLiteral("100.64.0.0/10"));
+    static const auto kTsV6 = QHostAddress::parseSubnet(QStringLiteral("fd7a:115c:a1e0::/48"));
+    return addr.isInSubnet(kCgnat) || addr.isInSubnet(kTsV6);
+}
+
+QSet<QString> Backend::parseTailscaleNodeIps(const QByteArray &statusJson) {
+    QSet<QString> out;
+    const QJsonObject root = QJsonDocument::fromJson(statusJson).object();
+    auto addNode = [&out](const QJsonObject &node) {
+        for (const QJsonValue &v : node.value(QStringLiteral("TailscaleIPs")).toArray()) {
+            const QHostAddress a(v.toString());
+            if (!a.isNull()) out.insert(unmapIPv4(a).toString());
+        }
+    };
+    addNode(root.value(QStringLiteral("Self")).toObject());
+    const QJsonObject peers = root.value(QStringLiteral("Peer")).toObject();
+    for (auto it = peers.constBegin(); it != peers.constEnd(); ++it) addNode(it.value().toObject());
+    return out;
+}
+
+bool Backend::addressesAreTailnetNodes(const QList<QHostAddress> &addresses, const QSet<QString> &nodeIps) {
+    if (addresses.isEmpty()) return false;
+    for (const QHostAddress &raw : addresses) {
+        // 100.64.0.0/10 is also carrier-grade NAT space, so the range alone isn't
+        // enough: the address must belong to a node that tailscale reports.
+        const QHostAddress a = unmapIPv4(raw);
+        if (!isTailscaleAddress(a) || !nodeIps.contains(a.toString())) return false;
+    }
+    return true;
+}
+
+bool Backend::isVerifiedTailnetHost(const QString &host) {
+    return verifiedTailnetHostSet().contains(host.trimmed().toLower());
+}
+
+void Backend::markVerifiedTailnetHost(const QString &host) {
+    const QString h = host.trimmed().toLower();
+    if (!h.isEmpty()) verifiedTailnetHostSet().insert(h);
+}
+
+QStringList Backend::hostsNeedingTailnetVerification() const {
+    QStringList hosts;
+    for (const QString &raw : {m_serverUrl, m_secondaryServerUrl}) {
+        const QUrl u(raw.trimmed());
+        if (u.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0) continue;
+        const QString host = u.host().toLower();
+        if (host.isEmpty() || !QHostAddress(host).isNull()) continue;  // IPs are judged directly
+        if (isTrustedPasswordTransportUrl(u)) continue;                // localhost, *.ts.net, *.local, verified
+        if (m_tailnetHostsChecked.contains(host) || hosts.contains(host)) continue;
+        hosts.append(host);
+    }
+    return hosts;
+}
+
+void Backend::verifyTailnetHosts(const QStringList &hosts, std::function<void()> done) {
+    QStringList todo;
+    bool waitForInFlight = false;
+    for (const QString &h : hosts) {
+        const QString host = h.trimmed().toLower();
+        if (host.isEmpty() || isVerifiedTailnetHost(host)) continue;
+        if (m_tailnetHostsInFlight.contains(host)) {
+            waitForInFlight = true;
+            continue;
+        }
+        todo.append(host);
+    }
+    if (todo.isEmpty() && waitForInFlight) {
+        // Another check for this host is running; answer when it finishes.
+        if (done) m_tailnetVerifyWaiters.append(std::move(done));
+        return;
+    }
+    auto finishWithoutCheck = [this, todo, done]() {
+        for (const QString &h : todo) m_tailnetHostsChecked.insert(h);
+        if (done) done();
+        notifyTailnetVerifyWaiters();
+    };
+    if (todo.isEmpty() || qEnvironmentVariableIntValue("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY") == 1) {
+        finishWithoutCheck();
+        return;
+    }
+    const QString exe = QStandardPaths::findExecutable(QStringLiteral("tailscale"));
+    if (exe.isEmpty()) {  // can't confirm tailnet membership without tailscale
+        finishWithoutCheck();
+        return;
+    }
+    for (const QString &h : todo) m_tailnetHostsInFlight.insert(h);
+
+    auto *proc = new QProcess(this);
+    auto *killTimer = new QTimer(proc);
+    killTimer->setSingleShot(true);
+    connect(killTimer, &QTimer::timeout, proc, [proc]() { proc->kill(); });
+    auto finish = [this, todo, done](const QSet<QString> &nodeIps) {
+        auto remaining = std::make_shared<int>(todo.size());
+        for (const QString &host : todo) {
+            QHostInfo::lookupHost(host, this, [this, host, nodeIps, remaining, done](const QHostInfo &info) {
+                m_tailnetHostsInFlight.remove(host);
+                m_tailnetHostsChecked.insert(host);
+                if (info.error() == QHostInfo::NoError && addressesAreTailnetNodes(info.addresses(), nodeIps)) {
+                    markVerifiedTailnetHost(host);
+                    ++m_verifiedTailnetHostsRevision;
+                    emit verifiedTailnetHostsChanged();
+                }
+                if (--(*remaining) == 0) {
+                    if (done) done();
+                    notifyTailnetVerifyWaiters();
+                }
+            });
+        }
+    };
+    connect(proc, &QProcess::errorOccurred, this, [proc, finish](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart) return;
+        proc->deleteLater();
+        finish({});
+    });
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [proc, finish](int, QProcess::ExitStatus status) {
+        proc->deleteLater();
+        finish(status == QProcess::NormalExit ? parseTailscaleNodeIps(proc->readAllStandardOutput()) : QSet<QString>{});
+    });
+    proc->start(exe, {QStringLiteral("status"), QStringLiteral("--json")});
+    killTimer->start(5000);
+}
+
+void Backend::notifyTailnetVerifyWaiters() {
+    if (!m_tailnetHostsInFlight.isEmpty()) return;
+    const QList<std::function<void()>> waiters = std::exchange(m_tailnetVerifyWaiters, {});
+    for (const auto &w : waiters) w();
+    if (m_resumeAfterTailnetCheck) {
+        m_resumeAfterTailnetCheck = false;
+        QTimer::singleShot(0, this, [this]() {
+            fetchMissingGroupParticipants();
+            if (!m_selectedChatGuid.isEmpty()) loadChatMessages(m_selectedChatGuid);
+        });
+    }
+}
+
+bool Backend::tailnetCheckPending() const {
+    return !m_tailnetHostsInFlight.isEmpty() || !hostsNeedingTailnetVerification().isEmpty();
+}
+
+void Backend::verifyTailnetHostForUrl(const QString &url) {
+    const QUrl u(url.trimmed());
+    if (u.scheme().compare(QStringLiteral("http"), Qt::CaseInsensitive) != 0) return;
+    const QString host = u.host().toLower();
+    if (host.isEmpty() || !QHostAddress(host).isNull() || isTrustedPasswordTransportUrl(u)) return;
+    verifyTailnetHosts({host}, nullptr);
+}
+
+void Backend::setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning) {
+    m_tailscaleRelays = relays;
+    m_tailscaleStatus = status;
+    m_tailscaleScanning = scanning;
+    emit tailscaleRelaysChanged();
+}
+
+void Backend::probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback) {
+    QNetworkRequest req(QUrl(baseUrl + QStringLiteral("/api/v1/ping")));
+    req.setTransferTimeout(3000);
+    // Never follow a redirect: the peer itself must answer like a relay.
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::ManualRedirectPolicy);
+    QSslConfiguration ssl = req.sslConfiguration();
+    ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
+    req.setSslConfiguration(ssl);
+    QNetworkReply *reply = m_nam.get(req);
+    // Only the status code matters; never buffer more than a small body, and
+    // stop as soon as a peer sends more than that.
+    constexpr qint64 kProbeMaxBody = 4096;
+    reply->setReadBufferSize(kProbeMaxBody);
+    connect(reply, &QNetworkReply::readyRead, reply, [reply]() {
+        if (reply->bytesAvailable() >= kProbeMaxBody) reply->abort();
+    });
+    // The transfer timeout only catches inactivity; also cap total time so a
+    // slow trickle can't keep the scan running.
+    QTimer::singleShot(5000, reply, [reply]() {
+        if (reply->isRunning()) reply->abort();
+    });
+    connect(reply, &QNetworkReply::finished, this, [this, reply, key, baseUrl, allowIpFallback]() {
+        reply->deleteLater();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QByteArray body = reply->read(kProbeMaxBody);
+        QString state;
+        if (httpStatus > 0 && looksLikeRelayResponse(httpStatus, body)) state = QStringLiteral("relay");
+        else if (httpStatus > 0) state = QStringLiteral("other");  // something answers, but not a relay
+        else state = QStringLiteral("unreachable");
+
+        QVariantList updated = m_tailscaleRelays;
+        for (QVariant &v : updated) {
+            QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("key")).toString() != key) continue;
+            const QString ip = m.value(QStringLiteral("ip")).toString();
+            // MagicDNS names don't resolve when the client runs with
+            // --accept-dns=false; retry the peer's Tailscale IP before giving up.
+            if (state == QStringLiteral("unreachable") && allowIpFallback && !ip.isEmpty() &&
+                m.value(QStringLiteral("host")).toString() != ip) {
+                probeTailscaleRelay(key, relayHttpUrl(ip, kDefaultRelayPort), false);
+                return;  // still pending; the IP probe settles this peer
+            }
+            if (state == QStringLiteral("relay") && !allowIpFallback) {
+                m.insert(QStringLiteral("host"), ip);
+                m.insert(QStringLiteral("url"), baseUrl);
+                m.insert(QStringLiteral("baseUrl"), relayHttpUrl(ip));
+            }
+            m.insert(QStringLiteral("probeState"), state);
+            v = m;
+        }
+        // Relays that answered first, then the rest.
+        std::stable_sort(updated.begin(), updated.end(), [](const QVariant &a, const QVariant &b) {
+            const bool ar = a.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
+            const bool br = b.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
+            return ar && !br;
+        });
+        m_tailscalePendingProbes = qMax(0, m_tailscalePendingProbes - 1);
+        const bool done = m_tailscalePendingProbes == 0;
+        setTailscaleScanState(updated, done ? QStringLiteral("done") : QStringLiteral("probing"), !done);
+    });
+}
+
+void Backend::discoverTailscaleRelays() {
+    if (m_tailscaleScanning) return;
+    // Lets the test suite (and anyone who wants it off) skip running `tailscale`
+    // and probing peers when Settings opens.
+    if (qEnvironmentVariableIntValue("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY") == 1) return;
+    const QString exe = QStandardPaths::findExecutable(QStringLiteral("tailscale"));
+    if (exe.isEmpty()) {
+        setTailscaleScanState({}, QStringLiteral("not-installed"), false);
+        return;
+    }
+    setTailscaleScanState({}, QStringLiteral("scanning"), true);
+
+    auto *proc = new QProcess(this);
+    auto *killTimer = new QTimer(proc);
+    killTimer->setSingleShot(true);
+    connect(killTimer, &QTimer::timeout, proc, [proc]() { proc->kill(); });
+    connect(proc, &QProcess::errorOccurred, this, [this, proc](QProcess::ProcessError err) {
+        if (err != QProcess::FailedToStart) return;
+        setTailscaleScanState({}, QStringLiteral("error"), false);
+        proc->deleteLater();
+    });
+    connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
+            [this, proc](int exitCode, QProcess::ExitStatus exitStatus) {
+        proc->deleteLater();
+        const QByteArray out = proc->readAllStandardOutput();
+        QString backendState;
+        QVariantList relays = parseTailscaleMacPeers(out, &backendState);
+        if (exitStatus != QProcess::NormalExit || (exitCode != 0 && backendState.isEmpty())) {
+            setTailscaleScanState({}, QStringLiteral("error"), false);
+            return;
+        }
+        if (backendState != QStringLiteral("Running")) {
+            setTailscaleScanState({}, QStringLiteral("stopped"), false);
+            return;
+        }
+        if (relays.isEmpty()) {
+            setTailscaleScanState({}, QStringLiteral("no-macs"), false);
+            return;
+        }
+        setTailscaleScanState(relays, QStringLiteral("probing"), true);
+
+        // Probe each Mac's relay port. The relay answers unauthenticated
+        // requests with 401 JSON, which is enough to know it's listening.
+        m_tailscalePendingProbes = relays.size();
+        for (const QVariant &v : relays) {
+            const QVariantMap m = v.toMap();
+            probeTailscaleRelay(m.value(QStringLiteral("key")).toString(), m.value(QStringLiteral("url")).toString(), true);
+        }
+    });
+    proc->start(exe, {QStringLiteral("status"), QStringLiteral("--json")});
+    killTimer->start(5000);
+}
+
+bool Backend::isSameServerEndpoint(const QString &a, const QString &b) {
+    const QString ta = a.trimmed(), tb = b.trimmed();
+    if (ta == tb) return true;  // scheme/host case is handled below; path and user are case-sensitive
+    if (ta.isEmpty() || tb.isEmpty()) return false;
+    const QUrl ua(ta), ub(tb);
+    if (!ua.isValid() || !ub.isValid() || ua.host().isEmpty() || ub.host().isEmpty()) return false;
+    auto effectivePort = [](const QUrl &u) {
+        const QString scheme = u.scheme().toLower();
+        return u.port(scheme == QStringLiteral("https") ? 443 : scheme == QStringLiteral("http") ? 80 : -1);
+    };
+    auto path = [](const QUrl &u) {
+        QString p = u.path(QUrl::FullyEncoded);  // "/a%2Fb" and "/a/b" can route differently
+        while (p.endsWith(QLatin1Char('/'))) p.chop(1);
+        return p;
+    };
+    return ua.scheme().compare(ub.scheme(), Qt::CaseInsensitive) == 0 &&
+           ua.host().compare(ub.host(), Qt::CaseInsensitive) == 0 &&
+           effectivePort(ua) == effectivePort(ub) && path(ua) == path(ub) &&
+           ua.userInfo(QUrl::FullyEncoded) == ub.userInfo(QUrl::FullyEncoded);  // user and password
+}
+
+// A field the user didn't change keeps the saved URL verbatim, so re-saving
+// Settings never moves an existing endpoint (e.g. "https://relay" -> :1235).
+static QString resolveSavedOrNewServerUrl(const QString &input, const QString &saved) {
+    if (!saved.isEmpty()) {
+        if (Backend::isSameServerEndpoint(Backend::normalizeServerEndpointUrl(input, false), saved) ||
+            Backend::isSameServerEndpoint(Backend::normalizeServerEndpointUrl(input, true), saved)) {
+            return saved;
+        }
+    }
+    return Backend::normalizeServerEndpointUrl(input, true);
+}
+
 void Backend::saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password) {
-    const QString normPrimary = normalizeServerEndpointUrl(serverUrl);
-    const QString normSecondary = normalizeServerEndpointUrl(secondaryUrl);
+    // m_serverUrl may point at the failover after a candidate rotation; the
+    // configured primary is tracked in m_lastConfiguredBaseUrl.
+    const QString savedPrimary = m_lastConfiguredBaseUrl.isEmpty() ? m_serverUrl : m_lastConfiguredBaseUrl;
+    const QString normPrimary = resolveSavedOrNewServerUrl(serverUrl, savedPrimary);
+    const QString normSecondary = resolveSavedOrNewServerUrl(secondaryUrl, m_secondaryServerUrl);
     QString resolvedPassword = password.trimmed();
     if (resolvedPassword.isEmpty()) {
         resolvedPassword = m_password;
@@ -1366,7 +1830,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     }
 
     const bool endpointReplaced = !m_lastConfiguredBaseUrl.isEmpty() && !normPrimary.isEmpty() &&
-                                  m_lastConfiguredBaseUrl != normPrimary;
+                                  !isSameServerEndpoint(m_lastConfiguredBaseUrl, normPrimary);
     if (endpointReplaced) {
         const int discardedCount = m_pendingIcloudNoteSaves.size() + m_pendingIcloudNoteDeletes.size() +
                                    m_pendingIcloudEventSaves.size() + m_pendingIcloudEventDeletes.size();
@@ -1398,6 +1862,9 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         }
     }
     m_lastConfiguredBaseUrl = normPrimary;
+    for (const QString &u : {normPrimary, normSecondary}) {
+        m_tailnetHostsChecked.remove(QUrl(u).host().toLower());  // re-check edited hosts
+    }
 
     if (m_serverUrl != normPrimary) {
         bumpServerEndpointGeneration();
@@ -1434,19 +1901,19 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
 
 void Backend::loadCredentials() {
     const QString prevServerUrl = m_serverUrl;
-    m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"));
+    m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"), false);
     if (m_serverUrl.isEmpty()) {
-        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"));
+        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"), false);
     }
     if (m_serverUrl.isEmpty()) {
-        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_URL"));
+        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_URL"), false);
     }
-    m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SECONDARY_URL"));
+    m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SECONDARY_URL"), false);
     if (m_secondaryServerUrl.isEmpty()) {
-        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SECONDARY_URL"));
+        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SECONDARY_URL"), false);
     }
     if (m_secondaryServerUrl.isEmpty()) {
-        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_SECONDARY_URL"));
+        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_SECONDARY_URL"), false);
     }
     m_password = qEnvironmentVariable("BLUEPILL_PASSWORD").trimmed();
     if (m_password.isEmpty()) {
@@ -1465,12 +1932,12 @@ void Backend::loadCredentials() {
             const QJsonObject obj = QJsonDocument::fromJson(cfgFile.readAll()).object();
             cfgFile.close();
             if (m_serverUrl.isEmpty()) {
-                m_serverUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("serverUrl")).toString());
+                m_serverUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("serverUrl")).toString(), false);
             }
             if (m_secondaryServerUrl.isEmpty()) {
-                m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("secondaryServerUrl")).toString());
+                m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("secondaryServerUrl")).toString(), false);
                 if (m_secondaryServerUrl.isEmpty()) {
-                    m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("failoverUrl")).toString());
+                    m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("failoverUrl")).toString(), false);
                 }
             }
             if (m_password.isEmpty()) {
@@ -1497,7 +1964,7 @@ void Backend::loadCredentials() {
                 if (spUrl.isEmpty()) {
                     spUrl = obj.value(QStringLiteral("flutter.serverAddress")).toString().trimmed();
                 }
-                m_serverUrl = normalizeServerEndpointUrl(spUrl);
+                m_serverUrl = normalizeServerEndpointUrl(spUrl, false);
             }
             if (m_password.isEmpty()) {
                 m_password = obj.value(QStringLiteral("guidAuthKey")).toString().trimmed();
@@ -2098,8 +2565,42 @@ bool Backend::isTrustedPasswordTransportUrl(const QUrl &url) {
         if (addr.setAddress(host) && addr.isLoopback()) {
             return true;
         }
+        // Tailscale: WireGuard already encrypts the tunnel end to end.
+        if (host.endsWith(QStringLiteral(".ts.net"))) return true;
+        // A custom-domain name confirmed to resolve only to tailnet nodes.
+        if (isVerifiedTailnetHost(host)) return true;
+        // Private networks (bluepill-server serves plain HTTP on :1235 by
+        // default): RFC 1918, link-local, IPv6 ULA, mDNS names. Public
+        // hosts still need https:// for the password.
+        if (host.endsWith(QStringLiteral(".local"))) return true;
+        if (!addr.isNull()) {
+            if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
+                bool isV4 = false;
+                const QHostAddress v4(addr.toIPv4Address(&isV4));
+                if (isV4) addr = v4;
+            }
+            static const QList<QPair<QHostAddress, int>> kTrustedHttpSubnets = {
+                QHostAddress::parseSubnet(QStringLiteral("100.64.0.0/10")),        // Tailscale CGNAT
+                QHostAddress::parseSubnet(QStringLiteral("fd7a:115c:a1e0::/48")),  // Tailscale IPv6
+                QHostAddress::parseSubnet(QStringLiteral("10.0.0.0/8")),
+                QHostAddress::parseSubnet(QStringLiteral("172.16.0.0/12")),
+                QHostAddress::parseSubnet(QStringLiteral("192.168.0.0/16")),
+                QHostAddress::parseSubnet(QStringLiteral("169.254.0.0/16")),
+                QHostAddress::parseSubnet(QStringLiteral("fc00::/7")),
+                QHostAddress::parseSubnet(QStringLiteral("fe80::/10")),
+            };
+            for (const auto &subnet : kTrustedHttpSubnets) {
+                if (addr.isInSubnet(subnet)) return true;
+            }
+        }
     }
     return false;
+}
+
+bool Backend::isPasswordTransportAllowed(const QString &url) {
+    const QString trimmed = url.trimmed();
+    if (trimmed.isEmpty() || trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) return true;
+    return isTrustedPasswordTransportUrl(QUrl(trimmed));
 }
 
 QUrl Backend::buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems) const {
@@ -2486,6 +2987,19 @@ void Backend::refreshAll() {
             return;
         }
     }
+    // A custom-domain Tailscale name (e.g. relay.tail.example.com) over http://
+    // is only trusted once it's confirmed to resolve to a tailnet node.
+    const QStringList unverifiedHosts = hostsNeedingTailnetVerification();
+    if (!unverifiedHosts.isEmpty()) {
+        m_serverStatus = QStringLiteral("Checking Tailscale address...");
+        emit statusChanged();
+        // Deferred so a check that's already in flight (or finishes at once)
+        // can never re-enter refreshAll() recursively.
+        verifyTailnetHosts(unverifiedHosts, [this]() {
+            QTimer::singleShot(0, this, &Backend::refreshAll);
+        });
+        return;
+    }
     if (!m_connected && m_chats.isEmpty()) {
         m_serverStatus = QStringLiteral("Connecting...");
     }
@@ -2646,6 +3160,10 @@ void Backend::fetchChatsMetadata() {
 
 void Backend::fetchMissingGroupParticipants() {
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    if (tailnetCheckPending()) {
+        m_resumeAfterTailnetCheck = true;
+        return;
+    }
 
     int dispatched = 0;
     for (const ChatEntry &c : m_chats) {
@@ -6514,6 +7032,10 @@ void Backend::rebuildSelectedChatMessages() {
 
 void Backend::loadChatMessages(const QString &chatGuid) {
     if (chatGuid.isEmpty() || m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    if (tailnetCheckPending()) {  // the password can't be sent yet; load once the check ends
+        m_resumeAfterTailnetCheck = true;
+        return;
+    }
 
     const quint64 reqSeq = m_messageRequestSeq;
     QJsonObject enrichBody;
@@ -7109,6 +7631,27 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
     });
 }
 
+bool Backend::isDecodableImageData(const QByteArray &bytes) {
+    // og:image / oEmbed thumbnails sometimes answer with an HTML error or
+    // consent page; saving that as *_thumb.jpg left a blank card and a
+    // "Unsupported image format" warning on every repaint.
+    // Decode fully: a valid header with corrupt pixel data passes canRead().
+    if (bytes.isEmpty()) return false;
+    QBuffer buf;
+    buf.setData(bytes);
+    if (!buf.open(QIODevice::ReadOnly)) return false;
+    QImageReader reader(&buf);
+    if (!reader.canRead()) return false;
+    const QImage img = reader.read();
+    return !img.isNull() && reader.error() == QImageReader::UnknownError;
+}
+
+bool Backend::isDecodableImageFile(const QString &path) {
+    QFile f(path);
+    if (!f.open(QIODevice::ReadOnly)) return false;
+    return isDecodableImageData(f.readAll());
+}
+
 void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
     if (url.isEmpty()) return;
 
@@ -7138,7 +7681,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
             QJsonObject obj = QJsonDocument::fromJson(jf.readAll()).object();
             jf.close();
             QVariantMap previewData = obj.toVariantMap();
-            if (QFileInfo::exists(thumbPath) && QFileInfo(thumbPath).size() > 64 && QImageReader(thumbPath).canRead()) {
+            if (isDecodableImageFile(thumbPath)) {
                 previewData.insert(QStringLiteral("thumbnail"), QUrl::fromLocalFile(thumbPath).toString());
             }
             applyPreview(previewData);
@@ -7183,7 +7726,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
                     thumbReply->deleteLater();
                     if (thumbReply->error() == QNetworkReply::NoError) {
                         const QByteArray tb = thumbReply->readAll();
-                        if (!tb.isEmpty()) {
+                        if (isDecodableImageData(tb)) {
                             QFile tf(thumbPath);
                             if (tf.open(QIODevice::WriteOnly)) {
                                 tf.write(tb);
@@ -7267,7 +7810,7 @@ void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
                     imgReply->deleteLater();
                     if (imgReply->error() == QNetworkReply::NoError) {
                         const QByteArray tb = imgReply->readAll();
-                        if (!tb.isEmpty()) {
+                        if (isDecodableImageData(tb)) {
                             QFile tf(thumbPath);
                             if (tf.open(QIODevice::WriteOnly)) {
                                 tf.write(tb);
