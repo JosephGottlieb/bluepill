@@ -286,6 +286,10 @@ public:
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
+    // A thread: the original message plus every loaded reply to it, in timeline order.
+    Q_INVOKABLE QVariantList threadMessages(const QString &rootGuid) const;
+    // Index of a message in messages(), or -1 when it isn't loaded.
+    Q_INVOKABLE int messageIndexForGuid(const QString &guid) const;
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);

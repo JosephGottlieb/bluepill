@@ -4,6 +4,13 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+### Added
+- **Threads, like Messages on iOS and macOS:**
+  - Clicking a quoted reply opens a thread view with the original message and every reply to it.
+  - Choosing the original (**Show in conversation**) scrolls the timeline to it and briefly outlines it.
+  - Messages that have replies show **N Replies** underneath, which opens the same view.
+  - Esc closes it.
+
 ### Fixed
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.

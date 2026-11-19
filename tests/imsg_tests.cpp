@@ -15,6 +15,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QtTest>
+#include <QScopeGuard>
 
 #include "backend.h"
 #include "theme.h"
@@ -2338,6 +2339,84 @@ private slots:
         dummyWin.setProperty("showPhotoViewer", false);
         QKeyEvent passRight(QEvent::KeyPress, Qt::Key_Right, Qt::NoModifier);
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
+    }
+
+    void testQuotedReplyOpensThreadAndJumpsToOriginal() {
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+        QTemporaryDir tempDir;
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_thread.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_thread.json")));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 600000;
+        auto msg = [&](const char *guid, const char *text, bool fromMe, qint64 ts, const char *replyTo) {
+            QJsonObject m{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                          {QStringLiteral("isFromMe"), fromMe}, {QStringLiteral("service"), QStringLiteral("iMessage")},
+                          {QStringLiteral("dateCreated"), ts}, {QStringLiteral("chats"), QJsonArray{chatObj}}};
+            if (replyTo) m.insert(QStringLiteral("threadOriginatorGuid"), QString::fromLatin1(replyTo));
+            return m;
+        };
+        QJsonArray batch{msg("m-root", "Go to bread", false, t, nullptr)};
+        for (int i = 0; i < 25; ++i) {
+            batch.append(msg(qPrintable(QStringLiteral("m-filler-%1").arg(i)), "filler", i % 2, t + 1000 + i * 1000, nullptr));
+        }
+        batch.append(msg("m-reply-1", "Mmmm, bread", true, t + 60000, "p:0/m-root"));
+        batch.append(msg("m-reply-2", "Sourdough?", false, t + 70000, "m-root"));
+        b.ingestMessagesForTest(batch, true);
+        b.selectChat(chatGuid);
+
+        // Replies quote the original; the original counts its replies
+        QVariantMap root, reply1;
+        for (const QVariant &v : b.messages()) {
+            const QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("guid")) == QStringLiteral("m-root")) root = m;
+            if (m.value(QStringLiteral("guid")) == QStringLiteral("m-reply-1")) reply1 = m;
+        }
+        QCOMPARE(root.value(QStringLiteral("replyCount")).toInt(), 2);
+        QCOMPARE(reply1.value(QStringLiteral("replyToGuid")).toString(), QStringLiteral("m-root"));
+        QCOMPARE(reply1.value(QStringLiteral("replyToText")).toString(), QStringLiteral("Go to bread"));
+        const QVariantList thread = b.threadMessages(QStringLiteral("p:0/m-root"));
+        QCOMPARE(thread.size(), 3);
+        QCOMPARE(thread.first().toMap().value(QStringLiteral("guid")).toString(), QStringLiteral("m-root"));
+        QVERIFY(b.messageIndexForGuid(QStringLiteral("m-root")) >= 0);
+        QCOMPARE(b.messageIndexForGuid(QStringLiteral("m-missing")), -1);
+
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win);
+        win->resize(1200, 800);
+
+        // Clicking the quote opens the thread with the original first
+        QMetaObject::invokeMethod(win, "openThread", Q_ARG(QVariant, QStringLiteral("m-root")));
+        QVERIFY(win->property("showThreadView").toBool());
+        QObject *threadList = win->findChild<QObject *>(QStringLiteral("threadList"));
+        QVERIFY(threadList);
+        QTRY_COMPARE(threadList->property("count").toInt(), 3);
+
+        // Choosing the original closes the thread, scrolls there and flashes it
+        QMetaObject::invokeMethod(win, "jumpToMessage", Q_ARG(QVariant, QStringLiteral("m-root")));
+        QVERIFY(!win->property("showThreadView").toBool());
+        QCOMPARE(win->property("highlightGuid").toString(), QStringLiteral("m-root"));
+        QObject *timeline = win->findChild<QObject *>(QStringLiteral("messageTimelineListView"));
+        QVERIFY(timeline);
+        QVERIFY(!timeline->property("stickToBottom").toBool());
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
