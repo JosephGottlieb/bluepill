@@ -15,6 +15,7 @@
 #include <QQuickItem>
 #include <QQuickWindow>
 #include <QtTest>
+#include <QScopeGuard>
 
 #include "backend.h"
 #include "theme.h"
@@ -6681,6 +6682,73 @@ private slots:
         QCOMPARE(aboutSpy.count(), 0);
         QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("receiptText")).toString(), QString());
         QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+    }
+
+    void testResolvedAttachmentDoesNotResetTimeline() {
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QByteArray savedHome = qgetenv("HOME");
+        qputenv("HOME", home.path().toLocal8Bit());
+        auto restoreHome = qScopeGuard([&]() { qputenv("HOME", savedHome); });
+        // No server: the resolve must come from the disk cache, not a download
+        // that an earlier test's credentials would start.
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        Backend b(false);
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QString attGuid = QStringLiteral("att-resolve-0001-image");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}};
+        const QJsonObject photo{
+            {QStringLiteral("guid"), QStringLiteral("m-resolve-photo")},
+            {QStringLiteral("text"), QString()},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs - 5000},
+            {QStringLiteral("attachments"), QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), attGuid},
+                {QStringLiteral("mimeType"), QStringLiteral("image/png")},
+                {QStringLiteral("transferName"), QStringLiteral("pic.png")}}}},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}};
+        b.ingestMessagesForTest(QJsonArray{photo}, true);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.cachedAttachmentUrl(attGuid), QString());
+
+        // The file is already in the cache (e.g. from an earlier session)
+        const QString cacheDir = home.path() + QStringLiteral("/.cache/imsg/attachments");
+        QVERIFY(QDir().mkpath(cacheDir));
+        const QString file = cacheDir + QLatin1Char('/') + attGuid.left(16) + QStringLiteral("_pic.png");
+        QImage img(64, 32, QImage::Format_RGB32);
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) img.setPixel(x, y, qRgb(x * 4, y * 8, (x * y) & 0xff));
+        QVERIFY(img.save(file));
+        QVERIFY(QFileInfo(file).size() >= 100);  // smaller cache files count as missing
+
+        QSignalSpy changedSpy(&b, &Backend::messagesChanged);
+        QSignalSpy aboutSpy(&b, &Backend::aboutToChangeMessages);
+        QSignalSpy readySpy(&b, &Backend::attachmentReady);
+        b.downloadAttachmentForTest(attGuid, QStringLiteral("pic.png"));
+
+        const QString url = QUrl::fromLocalFile(file).toString();
+        QCOMPARE(readySpy.count(), 1);
+        QCOMPARE(readySpy.at(0).at(1).toString(), url);
+        // No full timeline rebuild for a resolved image...
+        QCOMPARE(changedSpy.count(), 0);
+        QCOMPARE(aboutSpy.count(), 0);
+        // ...but the stored message and the lookup used by new delegates have it
+        const QVariantList imgs = b.messages().at(0).toMap().value(QStringLiteral("imageAttachments")).toList();
+        QVERIFY(!imgs.isEmpty());
+        QCOMPARE(imgs.at(0).toMap().value(QStringLiteral("localUrl")).toString(), url);
+        QCOMPARE(b.cachedAttachmentUrl(attGuid), url);
     }
 
     void testWriteConfigAtomicallyAndMakeRequestSecurity() {

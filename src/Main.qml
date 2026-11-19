@@ -3760,7 +3760,8 @@ ApplicationWindow {
                             if (attGuid === primaryGuid && downloadedAttachmentUrl.length > 0) {
                                 return downloadedAttachmentUrl
                             }
-                            return ""
+                            // Resolved after this delegate's model snapshot was taken
+                            return attGuid ? backend.cachedAttachmentUrl(attGuid) : ""
                         }
 
                         function copyPrimaryImageAttachment() {

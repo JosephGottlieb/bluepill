@@ -5,6 +5,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Fixed
+- **Opening or scrolling a chat with photos no longer rebuilds the whole conversation per photo:** each photo that finished loading from the cache reset the message list, so every message was recreated and the scroll position restored again (14 times while opening one chat with 10 photos). Photos now update in place.
 - **iMessage chats no longer labeled "SMS" on macOS 26:** Chat GUIDs written as `any;-;<handle>` previously fell through to `SMS`. The client now resolves a chat's service from the GUID prefix, then any chat-level `serviceName`, then the newest message's service, then participant handles. It also updates the service as newer messages arrive.
 - **No more green-to-blue flash in iMessage threads:** Bubbles, the header pill, the reply bar, and the composer are green only when the service is known to be SMS or RCS. An unresolved service stays blue and its pill is hidden.
 

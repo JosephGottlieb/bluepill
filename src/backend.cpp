@@ -6833,6 +6833,13 @@ void Backend::pumpAttachmentDownloadQueue() {
     }
 }
 
+QString Backend::cachedAttachmentUrl(const QString &attachmentGuid) const {
+    if (attachmentGuid.isEmpty()) return QString();
+    const QString path = lookupCachedAttachmentPath(m_attachmentPaths, attachmentGuid);
+    if (path.isEmpty() || !QFileInfo::exists(path)) return QString();
+    return QUrl::fromLocalFile(path).toString();
+}
+
 void Backend::downloadAttachment(const QString &attachmentGuid, const QString &transferName, bool highPriority) {
     if (attachmentGuid.isEmpty() ||
         m_downloadingAttachments.contains(attachmentGuid) ||
@@ -6892,16 +6899,14 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
             };
             updateAttList(QStringLiteral("imageAttachments"));
             updateAttList(QStringLiteral("attachments"));
+            // Updated in place without messagesChanged(): the timeline's model is
+            // a plain list, so that signal makes ListView destroy and rebuild every
+            // delegate (one full rebuild per image while a chat opens). Visible
+            // delegates pick the file up from attachmentReady below; delegates
+            // created later ask cachedAttachmentUrl().
             if (msgModified) {
-                if (!anyUpdated) {
-                    emit aboutToChangeMessages();
-                }
                 m_messages[i] = map;
-                anyUpdated = true;
             }
-        }
-        if (anyUpdated) {
-            emit messagesChanged();
         }
         bool photosEvictionResolved = false;
         for (int i = 0; i < m_icloudPhotos.size(); ++i) {
