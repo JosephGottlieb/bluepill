@@ -1,8 +1,10 @@
 #include <atomic>
+#include <functional>
 #pragma once
 
 #include <QFileSystemWatcher>
 #include <QHash>
+#include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QNetworkAccessManager>
@@ -68,13 +70,22 @@ struct MessageModel {
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool connected READ connected NOTIFY statusChanged)
+    // How long after sending a message it can still be edited or unsent.
+    Q_PROPERTY(int messageEditWindowMs READ messageEditWindowMs CONSTANT)
     Q_PROPERTY(bool loading READ loading NOTIFY loadingChanged)
     Q_PROPERTY(QString serverStatus READ serverStatus NOTIFY statusChanged)
     Q_PROPERTY(QString serverUrl READ serverUrl NOTIFY configChanged)
+    // The configured primary (serverUrl may be the failover after a rotation).
+    Q_PROPERTY(QString configuredServerUrl READ configuredServerUrl NOTIFY configChanged)
     Q_PROPERTY(QString secondaryServerUrl READ secondaryServerUrl NOTIFY configChanged)
     Q_PROPERTY(QString serverPassword READ serverPassword NOTIFY configChanged)
     Q_PROPERTY(bool hasPasswordConfigured READ hasPasswordConfigured NOTIFY configChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY configChanged)
+    Q_PROPERTY(QVariantList tailscaleRelays READ tailscaleRelays NOTIFY tailscaleRelaysChanged)
+    Q_PROPERTY(QString tailscaleStatus READ tailscaleStatus NOTIFY tailscaleRelaysChanged)
+    Q_PROPERTY(bool tailscaleScanning READ tailscaleScanning NOTIFY tailscaleRelaysChanged)
+    // Bumped when a host name is confirmed as a tailnet node (see verifyTailnetHosts).
+    Q_PROPERTY(int verifiedTailnetHostsRevision READ verifiedTailnetHostsRevision NOTIFY verifiedTailnetHostsChanged)
     Q_PROPERTY(QString searchQuery READ searchQuery WRITE setSearchQuery NOTIFY filterChanged)
     Q_PROPERTY(QString filterMode READ filterMode WRITE setFilterMode NOTIFY filterChanged)
     Q_PROPERTY(QString selectedChatGuid READ selectedChatGuid NOTIFY selectedChatChanged)
@@ -151,10 +162,14 @@ public:
     bool loading() const { return m_loading; }
     QString serverStatus() const { return m_serverStatus; }
     QString serverUrl() const { return m_serverUrl; }
+    QString configuredServerUrl() const { return m_lastConfiguredBaseUrl.isEmpty() ? m_serverUrl : m_lastConfiguredBaseUrl; }
     QString secondaryServerUrl() const { return m_secondaryServerUrl; }
     QString serverPassword() const { return m_password; }
     bool hasPasswordConfigured() const { return !m_password.isEmpty(); }
     bool needsSetup() const { return !m_demoMode && (m_serverUrl.isEmpty() || (!m_serverUrl.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) && m_password.isEmpty())); }
+    const QVariantList &tailscaleRelays() const { return m_tailscaleRelays; }
+    const QString &tailscaleStatus() const { return m_tailscaleStatus; }
+    bool tailscaleScanning() const { return m_tailscaleScanning; }
     QString searchQuery() const { return m_searchQuery; }
     QString filterMode() const { return m_filterMode; }
     QString selectedChatGuid() const { return m_selectedChatGuid; }
@@ -257,6 +272,40 @@ public:
     void checkServerAndLoad();
     Q_INVOKABLE void saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password);
     Q_INVOKABLE QString webUiUrl() const;
+    // Default relay port used when a scheme-less or http:// URL omits one.
+    static constexpr int kDefaultRelayPort = 1235;
+    // fromUserInput=true (Settings): bare host -> http://, no port -> :1235.
+    // fromUserInput=false (config.json / env vars / keyring): keep the legacy
+    // behaviour exactly (bare host -> https://, no port added) so existing
+    // endpoints are never rewritten.
+    static QString normalizeServerEndpointUrl(const QString &rawUrl, bool fromUserInput = true);
+    // True when two server URLs reach the same endpoint (scheme, host,
+    // effective port, path), e.g. "https://relay" and "https://relay:443".
+    static bool isSameServerEndpoint(const QString &a, const QString &b);
+    // Splits "scheme://host:port/path" into {url: text without ":port", port}.
+    // Keeps the typed text otherwise unchanged (no scheme is added). With
+    // hideDefaultPort, a port equal to kDefaultRelayPort comes back as "".
+    Q_INVOKABLE static QVariantMap splitServerUrl(const QString &rawUrl, bool hideDefaultPort = false);
+    // Joins the URL and Port fields; a port typed inline in the URL wins.
+    Q_INVOKABLE static QString composeServerUrl(const QString &rawUrl, const QString &port);
+    // Parses `tailscale status --json` into online macOS peers:
+    // [{name, host, ip, url}] (url = http://<MagicDNS name>:1235).
+    static QVariantList parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState = nullptr);
+    // True only for a bluepill-server/BlueBubbles-style JSON answer to /api/v1/ping.
+    static bool looksLikeRelayResponse(int httpStatus, const QByteArray &body);
+    // ssh://... or scheme-less user@host (no path).
+    Q_INVOKABLE static bool isSshStyleServerUrl(const QString &url);
+    // Every Tailscale IP of this node and its peers in `tailscale status --json`.
+    static QSet<QString> parseTailscaleNodeIps(const QByteArray &statusJson);
+    // True when every address is a Tailscale address that belongs to a tailnet node.
+    static bool addressesAreTailnetNodes(const QList<QHostAddress> &addresses, const QSet<QString> &nodeIps);
+    // Host names (e.g. a custom-domain Tailscale FQDN) confirmed to resolve only to tailnet nodes.
+    static bool isVerifiedTailnetHost(const QString &host);
+    static void markVerifiedTailnetHost(const QString &host);
+    int verifiedTailnetHostsRevision() const { return m_verifiedTailnetHostsRevision; }
+    // Settings: check a typed http:// host name in the background.
+    Q_INVOKABLE void verifyTailnetHostForUrl(const QString &url);
+    Q_INVOKABLE void discoverTailscaleRelays();
     Q_INVOKABLE void openWebUi();
     Q_INVOKABLE void setHistorySyncDays(int days);
     Q_INVOKABLE void cycleHistorySyncDays();
@@ -272,6 +321,8 @@ public:
     Q_INVOKABLE void setSearchQuery(const QString &query);
     Q_INVOKABLE void setFilterMode(const QString &mode);
     Q_INVOKABLE void refreshAll();
+    // file:// URL of an attachment already on disk, or "".
+    Q_INVOKABLE QString cachedAttachmentUrl(const QString &attachmentGuid) const;
     Q_INVOKABLE void selectChat(const QString &chatGuid);
     Q_INVOKABLE bool isSameConversation(const QString &guidA, const QString &guidB) const;
     Q_INVOKABLE QString resolveCanonicalChatGuid(const QString &chatGuid) const;
@@ -286,6 +337,10 @@ public:
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
+    Q_INVOKABLE void editMessage(const QString &messageGuid, const QString &newText);
+    static constexpr int kMessageEditWindowMs = 2 * 60 * 1000;
+    int editRepliesProcessedForTest() const { return m_editRepliesProcessed; }
+    int messageEditWindowMs() const { return kMessageEditWindowMs; }
     Q_INVOKABLE void deleteChat(const QString &chatGuid = QString());
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
@@ -398,6 +453,8 @@ public:
     void expireContactAvatarsForTest() { for (auto it = m_contactAvatarFetchedAtMs.begin(); it != m_contactAvatarFetchedAtMs.end(); ++it) it.value() -= kAvatarRefreshMs + 1; }
     void fetchContactAvatarsForChatsForTest() { fetchContactAvatarsForChats(); }
     void applyContactAvatarForTest(const QString &apiPath, const QString &file) { applyContactAvatar(apiPath, file); }
+    void downloadAttachmentForTest(const QString &guid, const QString &transferName) { downloadAttachment(guid, transferName, false); }
+    bool tailnetCheckPendingForTest() const { return tailnetCheckPending(); }
 
     // Pure testable helpers
     static QString normalizeHandle(const QString &raw);
@@ -410,6 +467,9 @@ public:
     static QString computeInitials(const QString &title);
     static QString computeAvatarColor(const QString &seed);
     static int computeTextPartIndex(const QJsonObject &msgObj);
+    // True when the bytes are an image Qt can decode (not, say, an HTML error page).
+    static bool isDecodableImageData(const QByteArray &bytes);
+    static bool isDecodableImageFile(const QString &path);
     static QString formatExpressiveEffectLabel(const QString &styleId);
     static QString extractFirstUrl(const QString &text);
     static QString stripTrailingUrlPunctuation(QString url);
@@ -493,7 +553,10 @@ public:
     }
     static bool hasNonEmptyWavDataChunk(const QString &filePath);
     static bool isTrustedPasswordTransportUrl(const QUrl &url);
+    // QML: false when Settings would save an http:// URL the guard above refuses.
+    Q_INVOKABLE static bool isPasswordTransportAllowed(const QString &url);
     QNetworkRequest makeRequestForTest(const QString &pathAndQuery) const { return makeRequest(pathAndQuery); }
+    void setTailscaleRelaysForTest(const QVariantList &relays) { setTailscaleScanState(relays, QStringLiteral("done"), false); }
     quint64 serverEndpointGenerationForTest() const { return m_serverEndpointGeneration; }
     bool supportsBatchMessageGuidInQueryForTest() const { return m_supportsBatchMessageGuidInQuery; }
     bool isExpiredPendingDeliveryForTest(const QString &msgGuid) const { return m_expiredPendingDeliveryGuids.contains(msgGuid); }
@@ -528,6 +591,8 @@ signals:
     void sendingMessageChanged();
     void statusChanged();
     void configChanged();
+    void tailscaleRelaysChanged();
+    void verifiedTailnetHostsChanged();
     void loadingChanged();
     void filterChanged();
     void selectedChatChanged();
@@ -552,6 +617,31 @@ signals:
     void pendingDeliveryCheckFinishedForTest();
 
 private:
+    // Finds a cached message; chatKey gets the m_chatMessagesCache key it's under.
+    QJsonObject findCachedMessage(const QString &messageGuid, QString *chatKey = nullptr) const;
+    // The chat a message actually belongs to on the Mac (not the merged canonical chat).
+    static QString messageOwnChatGuid(const QJsonObject &msgObj, const QString &fallbackChatGuid);
+    void applyLocalUnsend(const QString &messageGuid, const QString &chatGuid);
+    // Edits to one message go to the Mac one at a time, in order: while one is
+    // in flight only the newest further edit waits behind it. A failure rolls
+    // back to the last text the Mac confirmed, unless a sync changed it meanwhile.
+    struct EditSnapshot { QString text; QJsonValue dateEdited; QJsonValue attributed; };
+    struct EditTracking {
+        bool inFlight = false;
+        bool hasQueued = false;
+        QString queuedText;
+        QString shownText;      // what this client last put on screen
+        QString chatKey;
+        QString sendChatGuid;
+        int partIndex = 0;
+        EditSnapshot confirmed;
+    };
+    QHash<QString, EditTracking> m_editTracking;
+    int m_editRepliesProcessed = 0;
+    void sendEditRequest(const QString &msgGuid, const QString &text);
+    void applyEditedText(const QString &chatKey, const QString &msgGuid, const QString &text,
+                         const QJsonValue &dateEdited, const QJsonValue &attributed);
+    static bool parseJsonReplyObject(const QByteArray &bytes, QJsonObject *out);
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
     QNetworkRequest makeSocketIoRequest(const QList<QPair<QString, QString>> &extraQueryItems = {}, int timeoutMs = 85000) const;
     QUrl buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems = {}) const;
@@ -632,6 +722,23 @@ private:
     QNetworkAccessManager m_sendNam;
     QNetworkAccessManager m_mediaNam;
     QNetworkAccessManager m_socketNam;
+    QVariantList m_tailscaleRelays;
+    QString m_tailscaleStatus;
+    bool m_tailscaleScanning = false;
+    int m_tailscalePendingProbes = 0;
+    void setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning);
+    // http:// host names that need a tailnet check before the password may be sent.
+    QStringList hostsNeedingTailnetVerification() const;
+    void verifyTailnetHosts(const QStringList &hosts, std::function<void()> done);
+    void notifyTailnetVerifyWaiters();
+    // True while an http:// host still needs (or is getting) its tailnet check.
+    bool tailnetCheckPending() const;
+    QList<std::function<void()>> m_tailnetVerifyWaiters;
+    bool m_resumeAfterTailnetCheck = false;
+    QSet<QString> m_tailnetHostsChecked;      // checked this session (verified or not)
+    QSet<QString> m_tailnetHostsInFlight;
+    int m_verifiedTailnetHostsRevision = 0;
+    void probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback);
     QHash<QString, qint64> m_chatServiceDates;  // chat guid -> date of message that set entry.service
     bool m_chatServiceEmitPending = false;
     void refineChatServiceFromMessage(const QString &chatGuid, const QJsonObject &msg);

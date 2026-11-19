@@ -21,6 +21,43 @@ ApplicationWindow {
     property string replyTargetGuid: ""
     property string replyTargetSender: ""
     property string replyTargetText: ""
+    // Composer edit mode: the sent message being edited ("" when not editing)
+    property string editTargetGuid: ""
+    // Ticks so Edit/Unsend disappear once a message is older than the edit window
+    property double nowMs: Date.now()
+    Timer {
+        interval: 5000
+        running: true
+        repeat: true
+        onTriggered: root.nowMs = Date.now()
+    }
+    function canEditOrUnsend(m) {
+        if (!m || !m.isFromMe || !(m.isIMessage || m.service === "iMessage")) return false
+        var g = m.guid || ""
+        if (g.length === 0 || g.indexOf("temp-") === 0 || m.isFailed) return false
+        var sent = Number(m.dateCreated || 0)
+        return sent > 0 && root.nowMs - sent < backend.messageEditWindowMs
+    }
+    // The unsent draft that was in the composer when editing started
+    property string preEditDraft: ""
+    function startEditing(guid, text) {
+        root.replyTargetGuid = ""
+        root.replyTargetSender = ""
+        root.replyTargetText = ""
+        if (root.editTargetGuid === "") root.preEditDraft = composerInput.text
+        effectMenuPopup.visible = false
+        scheduleMenuPopup.visible = false
+        root.editTargetGuid = guid
+        composerInput.text = text || ""
+        composerInput.forceActiveFocus()
+        composerInput.cursorPosition = composerInput.text.length
+    }
+    function cancelEditing() {
+        if (root.editTargetGuid === "") return
+        root.editTargetGuid = ""
+        composerInput.text = root.preEditDraft
+        root.preEditDraft = ""
+    }
     property string stagedAttachmentPath: ""
     property string stagedAttachmentName: ""
     property string stagedAttachmentChatGuid: ""
@@ -29,10 +66,15 @@ ApplicationWindow {
     property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
-    readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== "" ? pinnedActionMessageGuid : hoveredActionMessageGuid
+    // The photo that was right-clicked, so Copy Image copies that one
+    property string pinnedActionAttachmentGuid: ""
+    // The tapback / reply / copy / delete bar opens on right-click only (hovering
+    // a message neither outlines it nor shows the bar).
+    readonly property string activeActionMessageGuid: pinnedActionMessageGuid
 
     function clearActionMenu() {
         pinnedActionMessageGuid = ""
+        pinnedActionAttachmentGuid = ""
         hoveredActionMessageGuid = ""
     }
 
@@ -95,6 +137,15 @@ ApplicationWindow {
 
     function sendComposerContent() {
         if (backend.selectedChatGuid.length === 0) return
+        if (root.editTargetGuid !== "") {
+            var editGuid = root.editTargetGuid
+            var edited = composerInput.text.trim()
+            root.editTargetGuid = ""
+            composerInput.text = root.preEditDraft
+            root.preEditDraft = ""
+            if (edited.length > 0) backend.editMessage(editGuid, edited)
+            return
+        }
         if (root.stagedAttachmentPath.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
             root.stagedAttachmentPath = ""
             root.stagedAttachmentName = ""
@@ -374,11 +425,62 @@ ApplicationWindow {
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
             root.reconcileAudioDeviceSelections()
-            serverUrlInput.text = backend.serverUrl
+            root.loadPrimaryServerFields(backend.configuredServerUrl)
             secondaryServerUrlInput.text = backend.secondaryServerUrl
             serverPasswordInput.text = backend.serverPassword
             root.showServerPassword = false
         }
+    }
+
+    // True once the user types in the primary URL/Port fields (blocks discovery auto-fill).
+    property bool primaryServerFieldsEdited: false
+    property bool serverPortInvalid: false
+
+    // One save path for every Save/Return action: an invalid non-empty port keeps
+    // Settings open instead of silently falling back to 1235.
+    function savePrimaryServerSettings() {
+        var portText = serverPortInput.text.trim()
+        if (portText.length > 0 && !primaryServerFields.isSshUrl) {
+            var p = Number(portText)
+            if (!/^\d+$/.test(portText) || p < 1 || p > 65535) {
+                root.serverPortInvalid = true
+                serverPortInput.forceActiveFocus()
+                return false
+            }
+        }
+        root.serverPortInvalid = false
+        backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
+        root.showServerConfigModal = false
+        return true
+    }
+
+    // Primary server URL is edited as two fields: URL (no port) + Port.
+    function loadPrimaryServerFields(url) {
+        var raw = url || ""
+        root.primaryServerFieldsEdited = false
+        root.serverPortInvalid = false
+        backend.verifyTailnetHostForUrl(raw)
+        var parts = backend.splitServerUrl(raw, true)
+        var explicit = backend.splitServerUrl(raw, false).port
+        serverUrlInput.text = parts.url
+        serverPortInput.text = parts.port
+        // A saved URL with no port has been using the scheme's port (older
+        // configs, reverse proxies). Show it so re-saving doesn't move it to 1235.
+        if (!explicit) {
+            if (/^https:\/\//i.test(raw)) serverPortInput.text = "443"
+            else if (/^http:\/\//i.test(raw)) serverPortInput.text = "80"
+        }
+    }
+    // Move a port typed inline ("host:8080") into the Port field.
+    function carryOverPrimaryServerPort() {
+        var parts = backend.splitServerUrl(serverUrlInput.text, false)
+        if (parts.port && parts.port.length > 0) {
+            serverUrlInput.text = parts.url
+            serverPortInput.text = parts.port
+        }
+    }
+    function composedPrimaryServerUrl() {
+        return backend.composeServerUrl(serverUrlInput.text, serverPortInput.text)
     }
 
     function openServerConfigModal() {
@@ -388,12 +490,13 @@ ApplicationWindow {
         root.showNewChatModal = false
         root.showEmojiPicker = false
         root.reconcileAudioDeviceSelections()
-        serverUrlInput.text = backend.serverUrl
+        root.loadPrimaryServerFields(backend.configuredServerUrl)
         secondaryServerUrlInput.text = backend.secondaryServerUrl
         serverPasswordInput.text = backend.serverPassword
         root.showServerPassword = false
         root.showServerConfigModal = true
         serverUrlInput.forceActiveFocus()
+        backend.discoverTailscaleRelays()
     }
 
     Timer {
@@ -813,6 +916,7 @@ ApplicationWindow {
                 if (root.showContactInfo) {
                     if (newGuid.length > 0) root.refreshContactInfo(); else root.closeContactInfo()
                 }
+                root.cancelEditing()
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
                 root.replyTargetText = ""
@@ -1217,7 +1321,10 @@ ApplicationWindow {
         }
     }
     function handleEscapePostVoiceFallback() {
-        if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+        // Editing first: the staged attachment is hidden meanwhile and must survive
+        if (root.editTargetGuid !== "") {
+            root.cancelEditing()
+        } else if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
             root.clearStagedAttachment()
             root.showToast("✕ " + i18n.tr("Attachment cancelled"))
         } else if (root.replyTargetGuid !== "") {
@@ -1255,10 +1362,6 @@ ApplicationWindow {
                 audioInputDeviceCombo.popup.close()
             } else if (audioOutputDeviceCombo.popup.visible) {
                 audioOutputDeviceCombo.popup.close()
-            } else if (root.showContactModal) {
-                root.showContactModal = false
-            } else if (root.showContactInfo) {
-                root.closeContactInfo()
             } else if (root.showServerConfigModal) {
                 root.showServerConfigModal = false
             } else if (root.showDeleteChatModal) {
@@ -1269,6 +1372,8 @@ ApplicationWindow {
                 root.showContactModal = false
             } else if (root.showNewChatModal) {
                 root.showNewChatModal = false
+            } else if (root.showContactInfo) {
+                root.closeContactInfo()
             } else if (root.showEmojiPicker) {
                 root.showEmojiPicker = false
             } else if (root.isEmojiCycling || root.emojiAutocompleteResults.length > 0) {
@@ -1278,6 +1383,8 @@ ApplicationWindow {
                 root.emojiShortcodeStart = -1
             } else if (root.activeActionMessageGuid !== "") {
                 root.clearActionMenu()
+            } else if (root.editTargetGuid !== "") {
+                root.cancelEditing()
             } else if (backend.recordingVoice || backend.hasRecordedVoiceMemo) {
                 if (root.isVoiceMemoForSelectedChat()) {
                     backend.cancelVoiceRecording()
@@ -3756,12 +3863,19 @@ ApplicationWindow {
                             if (attGuid === primaryGuid && downloadedAttachmentUrl.length > 0) {
                                 return downloadedAttachmentUrl
                             }
-                            return ""
+                            // Resolved after this delegate's model snapshot was taken
+                            return attGuid ? backend.cachedAttachmentUrl(attGuid) : ""
                         }
 
                         function copyPrimaryImageAttachment() {
                             var imgList = modelData.imageAttachments || []
                             var firstImg = imgList.length > 0 ? imgList[0] : null
+                            // Prefer the photo that was right-clicked
+                            if (root.pinnedActionMessageGuid === modelData.guid && root.pinnedActionAttachmentGuid !== "") {
+                                for (var ci = 0; ci < imgList.length; ++ci) {
+                                    if (imgList[ci] && imgList[ci].guid === root.pinnedActionAttachmentGuid) { firstImg = imgList[ci]; break }
+                                }
+                            }
                             var guid = (firstImg && firstImg.guid) ? firstImg.guid : (modelData.attachmentGuid || "")
                             var rawUrl = (firstImg && firstImg.localUrl) ? firstImg.localUrl : (msgDelegate.liveAttachmentUrl || modelData.attachmentLocalUrl || "")
                             var resolvedUrl = msgDelegate.resolveAttachmentUrl(guid, rawUrl)
@@ -4009,11 +4123,54 @@ ApplicationWindow {
                                                 hoverEnabled: true
                                                 cursorShape: Qt.PointingHandCursor
                                                 onClicked: {
+                                                    root.cancelEditing()
                                                     root.replyTargetGuid = msgDelegate.modelData.guid
                                                     root.replyTargetSender = msgDelegate.modelData.senderName
                                                     root.replyTargetText = msgDelegate.modelData.text
                                                     root.clearActionMenu()
                                                     composerInput.forceActiveFocus()
+                                                }
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            id: editMsgBtn
+                                            objectName: "editMsgBtn"
+                                            visible: root.canEditOrUnsend(msgDelegate.modelData) && (msgDelegate.modelData.text || "").trim().length > 0
+                                            height: 30
+                                            implicitWidth: editBtnRow.implicitWidth + 14
+                                            radius: 15
+                                            color: editBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                            border.width: 1
+                                            border.color: editBtnMouse.containsMouse ? theme.accent : theme.muted
+
+                                            RowLayout {
+                                                id: editBtnRow
+                                                anchors.centerIn: parent
+                                                spacing: 4
+                                                Text {
+                                                    text: "✎"
+                                                    font.pixelSize: theme.fontSize - 1
+                                                    color: theme.accent
+                                                }
+                                                Text {
+                                                    text: i18n.tr("Edit")
+                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.bold: true
+                                                    color: theme.brightForeground
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                id: editBtnMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: {
+                                                    var mGuid = msgDelegate.modelData.guid
+                                                    var mText = msgDelegate.modelData.text || ""
+                                                    root.clearActionMenu()
+                                                    root.startEditing(mGuid, mText)
                                                 }
                                             }
                                         }
@@ -4105,7 +4262,9 @@ ApplicationWindow {
 
                                         Rectangle {
                                             id: unsendMsgBtn
-                                            visible: Boolean(msgDelegate.modelData.isFromMe && (msgDelegate.modelData.isIMessage || msgDelegate.modelData.service === "iMessage"))
+                                            objectName: "unsendMsgBtn"
+                                            // iMessage allows unsending for 2 minutes after sending
+                                            visible: root.canEditOrUnsend(msgDelegate.modelData)
                                             height: 30
                                             implicitWidth: unsendBtnRow.implicitWidth + 14
                                             radius: 15
@@ -4233,23 +4392,15 @@ ApplicationWindow {
                                         id: bubbleClickArea
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        cursorShape: Qt.PointingHandCursor
                                         onClicked: (mouse) => {
                                             if (mouse.button === Qt.RightButton) {
-                                                if (msgText.selectedText && msgText.selectedText.length > 0) {
-                                                    backend.copyToClipboard(msgText.selectedText, "selection")
-                                                } else if (modelData.hasImageAttachment) {
-                                                    msgDelegate.copyPrimaryImageAttachment()
-                                                } else if ((modelData.text || "").length > 0) {
-                                                    backend.copyToClipboard(modelData.text, "message")
-                                                }
+                                                // Right-click opens (or closes) this message's actions
+                                                root.pinnedActionMessageGuid = (root.pinnedActionMessageGuid === modelData.guid) ? "" : modelData.guid
+                                                root.pinnedActionAttachmentGuid = ""
                                                 return
                                             }
-                                            if (root.pinnedActionMessageGuid === modelData.guid) {
-                                                root.pinnedActionMessageGuid = ""
-                                            } else {
-                                                root.pinnedActionMessageGuid = modelData.guid
-                                            }
+                                            // Left-click just dismisses an open action bar
+                                            if (root.pinnedActionMessageGuid !== "") root.clearActionMenu()
                                         }
                                         onDoubleClicked: (mouse) => {
                                             var cGuid = backend.selectedChatGuid
@@ -4336,7 +4487,11 @@ ApplicationWindow {
                                                     cursorShape: Qt.PointingHandCursor
                                                     onClicked: (mouse) => {
                                                         if (mouse.button === Qt.RightButton) {
-                                                            backend.copyImageToClipboard(parent.resolvedImgUrl, modelData.guid || "")
+                                                            // Same as the bubble: right-click opens the message's actions (Copy is there)
+                                                            var mg = msgDelegate.modelData.guid
+                                                            const reopen = root.pinnedActionMessageGuid !== mg || root.pinnedActionAttachmentGuid !== (modelData.guid || "")
+                                                            root.pinnedActionMessageGuid = reopen ? mg : ""
+                                                            root.pinnedActionAttachmentGuid = reopen ? (modelData.guid || "") : ""
                                                             return
                                                         }
                                                         var rawList = imageAttachmentRepeater.model || []
@@ -4668,6 +4823,8 @@ ApplicationWindow {
                                                 TapHandler {
                                                     acceptedButtons: Qt.LeftButton
                                                     onTapped: (eventPoint) => {
+                                                        // A left tap in the text closes an open action bar (a drag-select isn't a tap)
+                                                        if (root.pinnedActionMessageGuid !== "") root.clearActionMenu()
                                                         var lnk = msgText.linkAt(eventPoint.position.x, eventPoint.position.y)
                                                         if (!lnk || lnk.length === 0) {
                                                             lnk = msgText.hoveredLink
@@ -4986,6 +5143,54 @@ ApplicationWindow {
                     }
                 }
 
+                // Editing banner above Composer
+                Rectangle {
+                    objectName: "editingBanner"
+                    visible: backend.selectedChatGuid.length > 0 && root.editTargetGuid !== ""
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    color: theme.selection
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.top: parent.top
+                        anchors.bottom: parent.bottom
+                        width: 3
+                        color: theme.accent
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 16
+                        anchors.rightMargin: 16
+                        spacing: 8
+
+                        Text {
+                            text: "✎"
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.accent
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Editing message") + " · " + i18n.tr("Enter to save, Esc to cancel")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.accent
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            text: "✕"
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.foreground
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.cancelEditing()
+                            }
+                        }
+                    }
+                }
+
                 // Active Reply Context Banner above Composer
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0 && root.replyTargetGuid !== ""
@@ -5267,7 +5472,8 @@ ApplicationWindow {
                 Rectangle {
                     id: stagedAttachmentBar
                     objectName: "stagedAttachmentBar"
-                    visible: backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
+                    // Hidden while editing: its Send must never touch the message being edited
+                    visible: root.editTargetGuid === "" && backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
                     Layout.fillWidth: true
                     Layout.preferredHeight: 64
                     color: theme.darkBackground
@@ -5828,6 +6034,8 @@ ApplicationWindow {
                         // Expressive Send Effect Menu Button (✨)
                         Rectangle {
                             id: effectBtn
+                            objectName: "composerEffectBtn"
+                            visible: root.editTargetGuid === ""
                             Layout.preferredWidth: 42
                             Layout.preferredHeight: 42
                             Layout.alignment: Qt.AlignVCenter
@@ -5861,6 +6069,8 @@ ApplicationWindow {
                         // Send Later Schedule Button (🕒)
                         Rectangle {
                             id: scheduleBtn
+                            objectName: "composerScheduleBtn"
+                            visible: root.editTargetGuid === ""
                             Layout.preferredWidth: 42
                             Layout.preferredHeight: 42
                             Layout.alignment: Qt.AlignVCenter
@@ -5939,7 +6149,7 @@ ApplicationWindow {
 
                             Text {
                                 anchors.centerIn: parent
-                                text: i18n.tr("Send") + " ↑"
+                                text: root.editTargetGuid !== "" ? i18n.tr("Save") : (i18n.tr("Send") + " ↑")
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
                                 color: parent.canSendNow ? "#ffffff" : theme.darkForeground
@@ -9184,61 +9394,312 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
+                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap
                 }
 
-                // Primary Server URL
+                // Tailscale relay discovery
+                ColumnLayout {
+                    id: tailscaleDiscoverySection
+                    objectName: "tailscaleDiscoverySection"
+                    Layout.fillWidth: true
+                    spacing: 6
+                    visible: backend.tailscaleStatus !== "" && backend.tailscaleStatus !== "not-installed"
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Macs on your Tailscale network")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
+                        Rectangle {
+                            id: tailscaleRescanBtn
+                            objectName: "tailscaleRescanBtn"
+                            height: 24
+                            implicitWidth: rescanTxt.implicitWidth + 16
+                            radius: 6
+                            color: theme.lighterBackground
+                            border.width: 1
+                            opacity: backend.tailscaleScanning ? 0.5 : 1.0
+                            activeFocusOnTab: true
+                            border.color: activeFocus ? theme.accent : theme.muted
+                            Accessible.role: Accessible.Button
+                            Accessible.name: rescanTxt.text
+                            Keys.onReturnPressed: if (!backend.tailscaleScanning) backend.discoverTailscaleRelays()
+                            Keys.onEnterPressed: if (!backend.tailscaleScanning) backend.discoverTailscaleRelays()
+                            Keys.onSpacePressed: if (!backend.tailscaleScanning) backend.discoverTailscaleRelays()
+                            Text {
+                                id: rescanTxt
+                                anchors.centerIn: parent
+                                text: backend.tailscaleScanning ? i18n.tr("Scanning…") : i18n.tr("Rescan")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                enabled: !backend.tailscaleScanning
+                                onClicked: backend.discoverTailscaleRelays()
+                            }
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        visible: text.length > 0
+                        text: backend.tailscaleStatus === "stopped"
+                              ? i18n.tr("Tailscale is installed but not connected. Run `tailscale up`, then Rescan.")
+                              : backend.tailscaleStatus === "no-macs"
+                                ? i18n.tr("No online Macs found on your tailnet. Make sure the relay Mac is signed in to Tailscale.")
+                                : backend.tailscaleStatus === "error"
+                                  ? i18n.tr("Couldn't read Tailscale status.")
+                                  : backend.tailscaleStatus === "scanning"
+                                    ? i18n.tr("Looking for Macs…")
+                                    : ""
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.darkForeground
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Connections {
+                        target: backend
+                        function onTailscaleRelaysChanged() {
+                            // First run: a single responding relay on the tailnet is
+                            // almost certainly the one to use, so pre-fill it.
+                            if (backend.tailscaleScanning || !root.showServerConfigModal) return
+                            if (backend.configuredServerUrl.length > 0 || root.primaryServerFieldsEdited) return
+                            if (serverUrlInput.text.trim().length > 0) return
+                            var found = backend.tailscaleRelays.filter(function(r) { return r.probeState === "relay" })
+                            if (found.length === 1) {
+                                root.loadPrimaryServerFields(found[0].url)
+                                serverPasswordInput.forceActiveFocus()
+                            }
+                        }
+                    }
+
+                    Repeater {
+                        model: backend.tailscaleRelays
+                        delegate: Rectangle {
+                            readonly property bool isRelay: modelData.probeState === "relay"
+                            readonly property string relayName: modelData.name
+                            readonly property bool isSelected: root.composedPrimaryServerUrl() === modelData.url
+                            objectName: "tailscaleRelayRow"
+                            Layout.fillWidth: true
+                            implicitHeight: relayRowCol.implicitHeight + 14
+                            radius: 6
+                            color: isSelected ? theme.selection : theme.lighterBackground
+                            border.width: activeFocus ? 2 : 1
+                            border.color: (isSelected || activeFocus) ? theme.accent : theme.muted
+                            activeFocusOnTab: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: modelData.name + " " + modelData.url
+                            // A pending row's URL may still change (IP fallback), so wait for its result.
+                            readonly property bool isSelectable: modelData.probeState !== "pending"
+                            opacity: isSelectable ? 1.0 : 0.6
+                            function selectRelay() {
+                                if (!isSelectable) return
+                                root.loadPrimaryServerFields(modelData.url)
+                                serverPasswordInput.forceActiveFocus()
+                            }
+                            Keys.onReturnPressed: selectRelay()
+                            Keys.onEnterPressed: selectRelay()
+                            Keys.onSpacePressed: selectRelay()
+                            ColumnLayout {
+                                id: relayRowCol
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                spacing: 2
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.name
+                                        textFormat: Text.PlainText  // peer HostName is untrusted
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        text: modelData.probeState === "relay" ? i18n.tr("● Relay found")
+                                              : modelData.probeState === "pending" ? i18n.tr("Checking…")
+                                              : modelData.probeState === "other" ? i18n.tr("Port 1235 answers, but not as a BluePill relay")
+                                              : i18n.tr("No relay on :1235")
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: modelData.probeState === "relay" ? theme.green : theme.darkForeground
+                                    }
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: modelData.url
+                                    textFormat: Text.PlainText
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                    elide: Text.ElideMiddle
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    visible: modelData.probeState === "unreachable"
+                                    text: i18n.tr("Is bluepill-server running with --host 0.0.0.0 (or this Mac's Tailscale IP)? By default it only listens on 127.0.0.1.")
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                    wrapMode: Text.WordWrap
+                                }
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: parent.isSelectable ? Qt.PointingHandCursor : Qt.ArrowCursor
+                                onClicked: parent.selectRelay()
+                            }
+                        }
+                    }
+                }
+
+                // Primary Server URL + Port
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
-                    Text {
+                    // ssh://... or scheme-less user@host (same rule as the backend)
+                    readonly property bool isSshUrl: backend.isSshStyleServerUrl(serverUrlInput.text)
+                    id: primaryServerFields
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: i18n.tr("Primary Server URL")
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.foreground
-                        elide: Text.ElideRight
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Primary Server URL")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            Layout.preferredWidth: serverPortBox.width
+                            text: i18n.tr("Port")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
                     }
-                    Rectangle {
+                    RowLayout {
                         Layout.fillWidth: true
-                        height: Math.max(40, theme.fontSize + 20)
-                        Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
-                        radius: 6
-                        clip: true
-                        color: theme.lighterBackground
-                        border.width: 1
-                        border.color: serverUrlInput.activeFocus ? theme.accent : theme.muted
-
-                        TextInput {
-                            id: serverUrlInput
-                            objectName: "serverUrlInput"
-                            anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 10
+                        spacing: 8
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: Math.max(40, theme.fontSize + 20)
+                            Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
+                            radius: 6
                             clip: true
-                            verticalAlignment: TextInput.AlignVCenter
-                            text: backend.serverUrl
-                            color: theme.brightForeground
-                            font.pixelSize: theme.fontSize
-                            selectByMouse: true
-                            KeyNavigation.tab: secondaryServerUrlInput
-                            Keys.onReturnPressed: {
-                                backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
-                                root.showServerConfigModal = false
-                            }
-                            Text {
-                                text: "https://bluebubbles.example.com"
-                                color: theme.darkForeground
-                                visible: !serverUrlInput.text && !serverUrlInput.activeFocus
-                                anchors.verticalCenter: parent.verticalCenter
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: serverUrlInput.activeFocus ? theme.accent : theme.muted
+
+                            TextInput {
+                                id: serverUrlInput
+                                objectName: "serverUrlInput"
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                clip: true
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: theme.brightForeground
                                 font.pixelSize: theme.fontSize
-                                elide: Text.ElideRight
-                                width: parent.width
+                                selectByMouse: true
+                                KeyNavigation.tab: serverPortInput
+                                onTextEdited: root.primaryServerFieldsEdited = true
+                                onEditingFinished: {
+                                    root.carryOverPrimaryServerPort()
+                                    backend.verifyTailnetHostForUrl(root.composedPrimaryServerUrl())
+                                }
+                                Keys.onReturnPressed: {
+                                    root.savePrimaryServerSettings()
+                                }
+                                Text {
+                                    text: "mac-relay.example.com  (or https://relay.example.com)"
+                                    color: theme.darkForeground
+                                    visible: !serverUrlInput.text && !serverUrlInput.activeFocus
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    font.pixelSize: theme.fontSize
+                                    elide: Text.ElideRight
+                                    width: parent.width
+                                }
                             }
                         }
+                        Rectangle {
+                            id: serverPortBox
+                            Layout.preferredWidth: Math.max(84, theme.fontSize * 6)
+                            height: Math.max(40, theme.fontSize + 20)
+                            Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
+                            radius: 6
+                            clip: true
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: root.serverPortInvalid ? theme.red : (serverPortInput.activeFocus ? theme.accent : theme.muted)
+                            opacity: primaryServerFields.isSshUrl ? 0.4 : 1.0
+
+                            TextInput {
+                                id: serverPortInput
+                                objectName: "serverPortInput"
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                clip: true
+                                enabled: !primaryServerFields.isSshUrl
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: theme.brightForeground
+                                font.pixelSize: theme.fontSize
+                                selectByMouse: true
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                maximumLength: 5
+                                validator: IntValidator { bottom: 1; top: 65535 }
+                                onTextEdited: { root.primaryServerFieldsEdited = true; root.serverPortInvalid = false }
+                                KeyNavigation.tab: secondaryServerUrlInput
+                                KeyNavigation.backtab: serverUrlInput
+                                Keys.onReturnPressed: {
+                                    root.savePrimaryServerSettings()
+                                }
+                                Text {
+                                    // Greyed default shown whenever the field is empty.
+                                    text: String(1235)
+                                    color: theme.darkForeground
+                                    visible: !serverPortInput.text
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    font.pixelSize: theme.fontSize
+                                }
+                            }
+                        }
+                    }
+                    Text {
+                        objectName: "serverPortInvalidText"
+                        Layout.fillWidth: true
+                        visible: root.serverPortInvalid
+                        text: i18n.tr("Port must be a number from 1 to 65535, or empty for 1235.")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.red
+                        wrapMode: Text.WordWrap
+                    }
+                    Text {
+                        objectName: "serverUrlCleartextWarning"
+                        Layout.fillWidth: true
+                        // Re-evaluated when a custom-domain Tailscale name is confirmed.
+                        visible: serverUrlInput.text.trim().length > 0 && !primaryServerFields.isSshUrl
+                                 && backend.verifiedTailnetHostsRevision >= 0
+                                 && !backend.isPasswordTransportAllowed(root.composedPrimaryServerUrl())
+                        text: i18n.tr("Plain http:// only works on localhost, Tailscale (a *.ts.net name, a Tailscale IP, or a name that resolves to a device on your tailnet), or a private LAN address. For a public host, use https:// (a TLS reverse proxy).")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.red
+                        wrapMode: Text.WordWrap
                     }
                 }
 
@@ -9278,8 +9739,7 @@ ApplicationWindow {
                             selectByMouse: true
                             KeyNavigation.tab: serverPasswordInput
                             Keys.onReturnPressed: {
-                                backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
-                                root.showServerConfigModal = false
+                                root.savePrimaryServerSettings()
                             }
                             Text {
                                 text: "https://backup-relay.example.com"
@@ -9333,8 +9793,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize
                                 selectByMouse: true
                                 Keys.onReturnPressed: {
-                                    backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
-                                    root.showServerConfigModal = false
+                                    root.savePrimaryServerSettings()
                                 }
                                 Text {
                                     text: backend.hasPasswordConfigured
@@ -9831,8 +10290,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
-                                root.showServerConfigModal = false
+                                root.savePrimaryServerSettings()
                             }
                         }
                     }
@@ -10947,6 +11405,7 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             effectMenuPopup.visible = false;
+                            if (root.editTargetGuid !== "") return;
                             var txt = composerInput.text.trim();
                             if (txt.length === 0) {
                                 root.showToast("Type a message to send with effect");
@@ -11021,6 +11480,7 @@ ApplicationWindow {
                         cursorShape: Qt.PointingHandCursor
                         onClicked: {
                             scheduleMenuPopup.visible = false;
+                            if (root.editTargetGuid !== "") return;
                             var txt = composerInput.text.trim();
                             if (txt.length === 0) {
                                 root.showToast("Type a message to schedule");

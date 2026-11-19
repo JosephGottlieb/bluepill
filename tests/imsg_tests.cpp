@@ -10,11 +10,14 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QQmlApplicationEngine>
+#include <QScopeGuard>
 #include <QSignalSpy>
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <functional>
 #include <QtTest>
+#include <QScopeGuard>
 
 #include "backend.h"
 #include "theme.h"
@@ -24,6 +27,12 @@ class ImsgTests : public QObject {
     Q_OBJECT
 
 private slots:
+    void initTestCase() {
+        // Keep the suite hermetic: Settings opens on first run in QML tests and
+        // would otherwise run `tailscale status` and probe real tailnet peers.
+        qputenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY", "1");
+    }
+
     void testThemeParsing() {
         Theme theme;
         theme.loadFromTomlString(QStringLiteral(R"(
@@ -245,8 +254,8 @@ private slots:
             QStringLiteral("test-api-key"));
         const QStringList candidates = backend.candidateUrls();
         QCOMPARE(candidates.size(), 2);
-        QCOMPARE(candidates.at(0), QStringLiteral("https://relay.example.com"));
-        QCOMPARE(candidates.at(1), QStringLiteral("https://failover-relay.example.com"));
+        QCOMPARE(candidates.at(0), QStringLiteral("https://relay.example.com:1235"));
+        QCOMPARE(candidates.at(1), QStringLiteral("https://failover-relay.example.com:1235"));
         QCOMPARE(backend.consecutiveFailures(), 0);
     }
 
@@ -1129,8 +1138,20 @@ private slots:
         const QString stateFile = tempDir.filePath(QStringLiteral("state.json"));
         const QString deletedFile = tempDir.filePath(QStringLiteral("deleted_messages.json"));
 
+        // Offline: unsend applies locally at once (with a server it waits for the Mac).
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
         Backend b(false);
         b.setStateFilePath(stateFile);
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config.json")));  // never the real config
 
         const qint64 baseTs = QDateTime::currentMSecsSinceEpoch() - 3600000LL;
         auto makeMsg = [&](const QString &guid, const QString &chatGuid, const QString &text, bool fromMe, qint64 ts) {
@@ -2340,6 +2361,293 @@ private slots:
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
     }
 
+    void testEditMessageAndTwoMinuteEditUnsendWindow() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_edit.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_edit.json")));
+        QCOMPARE(b.messageEditWindowMs(), 120000);
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto msg = [&](const char *guid, const char *text, bool fromMe, qint64 ts) {
+            return QJsonObject{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                               {QStringLiteral("isFromMe"), fromMe}, {QStringLiteral("isSent"), fromMe},
+                               {QStringLiteral("service"), QStringLiteral("iMessage")}, {QStringLiteral("dateCreated"), ts},
+                               {QStringLiteral("chats"), QJsonArray{chatObj}}};
+        };
+        b.ingestMessagesForTest(QJsonArray{msg("m-theirs", "Hi", false, now - 60000),
+                                           msg("m-old", "Old one", true, now - 10 * 60000),
+                                           msg("m-new", "Teh typo", true, now - 30000)}, true);
+        b.selectChat(chatGuid);
+        auto byGuid = [&](const QString &g) {
+            for (const QVariant &v : b.messages()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("guid")).toString() == g) return m;
+            }
+            return QVariantMap();
+        };
+
+        b.editMessage(QStringLiteral("m-new"), QStringLiteral("The typo, fixed"));
+        QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("The typo, fixed"));
+        QVERIFY(byGuid(QStringLiteral("m-new")).value(QStringLiteral("isEdited")).toBool());
+
+        b.editMessage(QStringLiteral("m-old"), QStringLiteral("Too late"));      // past the window
+        QCOMPARE(byGuid(QStringLiteral("m-old")).value(QStringLiteral("text")).toString(), QStringLiteral("Old one"));
+        b.editMessage(QStringLiteral("m-theirs"), QStringLiteral("Not mine"));   // not from me
+        QCOMPARE(byGuid(QStringLiteral("m-theirs")).value(QStringLiteral("text")).toString(), QStringLiteral("Hi"));
+
+        // QML shows Edit/Unsend only for my iMessages inside the window
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *win = engine.rootObjects().first();
+        auto allowed = [&](const QVariantMap &m) {
+            QVariant r;
+            QMetaObject::invokeMethod(win, "canEditOrUnsend", Q_RETURN_ARG(QVariant, r), Q_ARG(QVariant, QVariant(m)));
+            return r.toBool();
+        };
+        QVERIFY(allowed(byGuid(QStringLiteral("m-new"))));
+        QVERIFY(!allowed(byGuid(QStringLiteral("m-old"))));
+        QVERIFY(!allowed(byGuid(QStringLiteral("m-theirs"))));
+        QVariantMap sms = byGuid(QStringLiteral("m-new"));
+        sms.insert(QStringLiteral("isIMessage"), false);
+        sms.insert(QStringLiteral("service"), QStringLiteral("SMS"));
+        QVERIFY(!allowed(sms));
+        QVariantMap pending = byGuid(QStringLiteral("m-new"));
+        pending.insert(QStringLiteral("guid"), QStringLiteral("temp-123"));
+        QVERIFY(!allowed(pending));
+
+        // Hovering doesn't open the action bar; right-click does
+        win->setProperty("hoveredActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
+        QMetaObject::invokeMethod(win, "clearActionMenu");
+
+        // Edit mode: Save edits the message instead of sending a new one
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("The typo, fixed")));
+        QCOMPARE(win->property("editTargetGuid").toString(), QStringLiteral("m-new"));
+        QObject *composer = win->findChild<QObject *>(QStringLiteral("composerInput"));
+        QVERIFY(composer);
+        composer->setProperty("text", QStringLiteral("Final wording"));
+        const int before = b.messages().size();
+        QMetaObject::invokeMethod(win, "sendComposerContent");
+        QCOMPARE(win->property("editTargetGuid").toString(), QString());
+        QCOMPARE(b.messages().size(), before);
+        QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("Final wording"));
+
+        // An unsent draft survives editing (saved and cancelled), and effect/schedule are hidden meanwhile
+        QObject *effectBtn = win->findChild<QObject *>(QStringLiteral("composerEffectBtn"));
+        QObject *scheduleBtn = win->findChild<QObject *>(QStringLiteral("composerScheduleBtn"));
+        QVERIFY(effectBtn && scheduleBtn);
+        QVERIFY(effectBtn->property("visible").toBool());
+        composer->setProperty("text", QStringLiteral("half-written draft"));
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("Final wording"));
+        QVERIFY(!effectBtn->property("visible").toBool());
+        QVERIFY(!scheduleBtn->property("visible").toBool());
+        // Esc cancels the edit first; a staged attachment (hidden meanwhile) survives it
+        QMetaObject::invokeMethod(win, "stageAttachment", Q_ARG(QVariant, QStringLiteral("/tmp/example.png")),
+                                  Q_ARG(QVariant, QStringLiteral("example.png")), Q_ARG(QVariant, chatGuid));
+        QMetaObject::invokeMethod(win, "handleEscapePostVoiceFallback");
+        QCOMPARE(win->property("editTargetGuid").toString(), QString());
+        QCOMPARE(win->property("stagedAttachmentPath").toString(), QStringLiteral("/tmp/example.png"));
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
+        QVERIFY(effectBtn->property("visible").toBool());
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
+        composer->setProperty("text", QStringLiteral("Final wording!"));
+        QMetaObject::invokeMethod(win, "sendComposerContent");
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
+    }
+
+    void testOverlappingEditsAndNonJsonRepliesDontClobber() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        // Fake relay: edit requests wait until the test answers them, keyed by the edited text
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QString, QTcpSocket *> pendingEdits;
+        QHash<QTcpSocket *, QByteArray> buffers;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &buf = buffers[sock];
+                    buf += sock->readAll();
+                    const int headerEnd = buf.indexOf("\r\n\r\n");
+                    if (headerEnd < 0) return;
+                    const QByteArray head = buf.left(headerEnd).toLower();
+                    int len = 0;
+                    const int cl = head.indexOf("content-length:");
+                    if (cl >= 0) len = head.mid(cl + 15, head.indexOf('\r', cl) - cl - 15).trimmed().toInt();
+                    if (buf.size() < headerEnd + 4 + len) return;
+                    const QByteArray body = buf.mid(headerEnd + 4, len);
+                    const QByteArray reqLine = buf.left(buf.indexOf('\r'));
+                    buf.clear();
+                    if (reqLine.contains("/edit")) {
+                        pendingEdits.insert(QJsonDocument::fromJson(body).object().value(QStringLiteral("editedMessage")).toString(), sock);
+                        return;
+                    }
+                    const QByteArray ok = R"({"status":200,"data":[]})";
+                    sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
+                                QByteArray::number(ok.size()) + "\r\n\r\n" + ok);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        auto answer = [&](const QString &editedText, int status, const QByteArray &body) {
+            QTcpSocket *sock = pendingEdits.take(editedText);
+            QVERIFY(sock);
+            sock->write("HTTP/1.1 " + QByteArray::number(status) + " X\r\nConnection: close\r\nContent-Length: " +
+                        QByteArray::number(body.size()) + "\r\n\r\n" + body);
+            sock->disconnectFromHost();
+        };
+        qputenv("BLUEPILL_SERVER_URL", QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()).toUtf8());
+        qputenv("BLUEPILL_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_edits.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_edits.json")));
+        b.loadCredentials();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto mine = [&](const char *guid, const char *text) {
+            return QJsonObject{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                               {QStringLiteral("isFromMe"), true}, {QStringLiteral("isSent"), true},
+                               {QStringLiteral("service"), QStringLiteral("iMessage")}, {QStringLiteral("dateCreated"), now - 10000},
+                               {QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}}}}};
+        };
+        b.ingestMessagesForTest(QJsonArray{mine("m-1", "Original"), mine("m-2", "Second original")}, true);
+        b.selectChat(chatGuid);
+        auto textOf = [&](const QString &g) {
+            for (const QVariant &v : b.messages())
+                if (v.toMap().value(QStringLiteral("guid")).toString() == g) return v.toMap().value(QStringLiteral("text")).toString();
+            return QString();
+        };
+        const QByteArray okJson = R"({"status":200,"data":{}})";
+
+        // Edits to one message go out one at a time, in order; only the newest waiting one is kept
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit A"));
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit B"));
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit C"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QVERIFY(pendingEdits.contains(QStringLiteral("Edit A")));
+        QTest::qWait(150);
+        QCOMPARE(pendingEdits.size(), 1);  // B was superseded by C, and C waits for A
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit C"));
+        int processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit A"), 200, okJson);
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QVERIFY(pendingEdits.contains(QStringLiteral("Edit C")));
+        // C fails: back to A, the last text the Mac confirmed
+        processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit C"), 502, R"({"status":502,"message":"refused"})");
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit A"));
+
+        // A failure doesn't overwrite text a sync brought in meanwhile
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit D"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QJsonObject synced = mine("m-1", "From another device");
+        b.ingestMessagesForTest(QJsonArray{synced}, false);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("From another device"));
+        processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit D"), 502, R"({"status":502,"message":"refused"})");
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("From another device"));
+
+        // A 200 that isn't JSON (proxy login page) is not a confirmation
+        b.editMessage(QStringLiteral("m-2"), QStringLiteral("Proxy edit"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Proxy edit"), 200, "<html><body>Sign in to continue</body></html>");
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-2")), QStringLiteral("Second original"));
+    }
+
+    void testLinkPreviewThumbnailMustBeAnImage() {
+        QImage img(80, 40, QImage::Format_RGB32);
+        img.fill(QColor(30, 90, 160));
+        QByteArray png;
+        QBuffer buf(&png);
+        QVERIFY(buf.open(QIODevice::WriteOnly));
+        QVERIFY(img.save(&buf, "PNG"));
+        QVERIFY(Backend::isDecodableImageData(png));
+        // An HTML error/consent page served from an og:image URL is rejected
+        QVERIFY(!Backend::isDecodableImageData(QByteArray("<!DOCTYPE html><html><head><title>Access denied</title></head>"
+                                                          "<body>Please enable cookies to continue to this site.</body></html>")));
+        QVERIFY(!Backend::isDecodableImageData(QByteArray()));
+        QVERIFY(!Backend::isDecodableImageData(png.left(20)));  // truncated
+
+        // Tiny but valid images are accepted (a 1x1 BMP is 58 bytes)
+        QImage dot(1, 1, QImage::Format_RGB888);
+        dot.fill(Qt::red);
+        QByteArray bmp;
+        QBuffer bmpBuf(&bmp);
+        QVERIFY(bmpBuf.open(QIODevice::WriteOnly));
+        QVERIFY(dot.save(&bmpBuf, "BMP"));
+        QVERIFY2(bmp.size() < 64, qPrintable(QString::number(bmp.size())));
+        QVERIFY(Backend::isDecodableImageData(bmp));
+
+        // Intact header, corrupt or missing pixel data: rejected because the image is decoded
+        QImage noisy(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < noisy.height(); ++y)
+            for (int x = 0; x < noisy.width(); ++x)
+                noisy.setPixel(x, y, qRgb((x * 37 + y * 11) % 256, (x * y) % 256, (x ^ y) % 256));
+        QByteArray noisyPng;
+        QBuffer noisyBuf(&noisyPng);
+        QVERIFY(noisyBuf.open(QIODevice::WriteOnly));
+        QVERIFY(noisy.save(&noisyBuf, "PNG"));
+        QVERIFY(Backend::isDecodableImageData(noisyPng));
+        QVERIFY(!Backend::isDecodableImageData(noisyPng.left(noisyPng.size() * 2 / 3)));
+        QByteArray corrupt = noisyPng;
+        for (int i = corrupt.size() / 3; i < corrupt.size() * 2 / 3; ++i) corrupt[i] = char(0xA5);
+        QVERIFY(!Backend::isDecodableImageData(corrupt));
+
+        // Cached thumbnails go through the same check
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString good = dir.filePath(QStringLiteral("good_thumb.jpg"));
+        const QString bad = dir.filePath(QStringLiteral("bad_thumb.jpg"));
+        { QFile f(good); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(bmp); }
+        { QFile f(bad); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(corrupt); }
+        QVERIFY(Backend::isDecodableImageFile(good));
+        QVERIFY(!Backend::isDecodableImageFile(bad));
+        QVERIFY(!Backend::isDecodableImageFile(dir.filePath(QStringLiteral("missing.jpg"))));
+    }
+
     void testContactDetailsShowEveryMacField() {
         Backend backend(false);
         backend.parseContactsJson(QByteArray(R"([{
@@ -2441,10 +2749,13 @@ private slots:
         int avatarRequests = 0;
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QTcpSocket *, QByteArray> sockBuffers;
         QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
             while (QTcpSocket *sock = server.nextPendingConnection()) {
                 QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
-                    const QByteArray req = sock->readAll();
+                    QByteArray &req = sockBuffers[sock];
+                    req += sock->readAll();
+                    if (!req.contains("\r\n\r\n")) return;
                     QByteArray status = "200 OK", type = "application/json", body = R"({"status":200,"data":[]})";
                     if (req.startsWith("GET /api/v1/contact/uid-9/avatar")) {
                         ++avatarRequests;
@@ -3163,13 +3474,13 @@ private slots:
             QStringLiteral("https://backup.example.com///"),
             QStringLiteral("super-secret-token"));
 
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://relay.example.com"));
-        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.example.com"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("http://relay.example.com:1235"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.example.com:1235"));
         QCOMPARE(b.hasPasswordConfigured(), true);
         QCOMPARE(b.needsSetup(), false);
         QCOMPARE(b.candidateUrls(), (QStringList{
-            QStringLiteral("https://relay.example.com"),
-            QStringLiteral("https://backup.example.com")
+            QStringLiteral("http://relay.example.com:1235"),
+            QStringLiteral("https://backup.example.com:1235")
         }));
 
         // Verify 0600 permissions on config.json
@@ -3184,16 +3495,16 @@ private slots:
             QStringLiteral("https://new-relay.example.com"),
             QStringLiteral("https://new-backup.example.com"),
             QString());
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://new-relay.example.com"));
-        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://new-relay.example.com:1235"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com:1235"));
         QCOMPARE(b.hasPasswordConfigured(), true);
         QCOMPARE(b.needsSetup(), false);
 
         // Reload into a fresh Backend instance and verify persistence
         Backend b2(false);
         b2.setConfigFilePath(cfgPath);
-        QCOMPARE(b2.serverUrl(), QStringLiteral("https://new-relay.example.com"));
-        QCOMPARE(b2.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com"));
+        QCOMPARE(b2.serverUrl(), QStringLiteral("https://new-relay.example.com:1235"));
+        QCOMPARE(b2.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com:1235"));
         QCOMPARE(b2.hasPasswordConfigured(), true);
         QCOMPARE(b2.needsSetup(), false);
 
@@ -3276,6 +3587,437 @@ private slots:
         QCOMPARE(failItem.value(QStringLiteral("isFailed")).toBool(), true);
         QCOMPARE(failItem.value(QStringLiteral("receiptText")).toString(), QStringLiteral("⚠ Not Delivered"));
         QVERIFY(failItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("⚠ Not Delivered")));
+    }
+
+    void testServerEndpointEquivalence() {
+        auto same = [](const char *a, const char *b) {
+            return Backend::isSameServerEndpoint(QString::fromUtf8(a), QString::fromUtf8(b));
+        };
+        QVERIFY(same("https://relay.example.com", "https://relay.example.com:443"));
+        QVERIFY(same("http://relay.example.com", "HTTP://Relay.Example.com:80/"));
+        QVERIFY(same("ssh://user@mac.local", "ssh://user@mac.local"));
+        QVERIFY(!same("https://relay.example.com", "https://relay.example.com:1235"));
+        QVERIFY(!same("http://relay.example.com:1235", "https://relay.example.com:1235"));
+        QVERIFY(!same("https://relay.example.com", "https://other.example.com"));
+        QVERIFY(!same("https://relay.example.com/bb", "https://relay.example.com"));
+        QVERIFY(!same("", "https://relay.example.com"));
+        // Path and user name are case-sensitive; only scheme and host are not.
+        QVERIFY(same("HTTPS://RELAY.example.com/bb", "https://relay.example.com/bb"));
+        QVERIFY(!same("https://relay.example.com/Relay", "https://relay.example.com/relay"));
+        QVERIFY(!same("https://Alex@relay.example.com", "https://alex@relay.example.com"));
+        // Encoded paths and user-info passwords are part of the endpoint
+        QVERIFY(!same("https://relay.example.com/team%2Frelay", "https://relay.example.com/team/relay"));
+        QVERIFY(!same("https://alex:old@relay.example.com", "https://alex:new@relay.example.com"));
+        QVERIFY(same("https://alex:pw@relay.example.com", "https://alex:pw@relay.example.com:443"));
+    }
+
+    void testCleartextPasswordTransportAllowsTailscaleAndPrivateLan() {
+        auto ok = [](const char *u) { return Backend::isTrustedPasswordTransportUrl(QUrl(QString::fromUtf8(u))); };
+        // Tailscale (WireGuard-encrypted)
+        QVERIFY(ok("http://100.100.1.2:1235/api/v1/ping"));
+        QVERIFY(ok("http://[fd7a:115c:a1e0::1]:1235/api/v1/ping"));
+        QVERIFY(ok("http://studio.tailnet-example.ts.net:1235/api/v1/ping"));
+        QVERIFY(ok("ws://studio.tailnet-example.ts.net:1235/socket.io/"));
+        // Private LAN
+        QVERIFY(ok("http://10.0.0.5:1235"));
+        QVERIFY(ok("http://172.16.4.2:1235"));
+        QVERIFY(ok("http://192.168.1.50:1235"));
+        QVERIFY(ok("http://169.254.10.1:1235"));
+        QVERIFY(ok("http://[fd00::5]:1235"));
+        QVERIFY(ok("http://[fe80::1]:1235"));
+        QVERIFY(ok("http://[::ffff:192.168.1.50]:1235"));
+        QVERIFY(ok("http://mac-relay.local:1235"));
+        // Public / unknown hosts still need TLS
+        QVERIFY(!ok("http://relay.example.com:1235"));
+        QVERIFY(!ok("http://203.0.113.5:1235"));
+        QVERIFY(!ok("http://172.32.0.1:1235"));
+        QVERIFY(!ok("http://100.128.0.1:1235"));
+        QVERIFY(!ok("http://evil.ts.net.example.com:1235"));
+        QVERIFY(!ok("http://my-mac:1235"));
+        QVERIFY(ok("https://relay.example.com"));
+        // Custom-domain Tailscale FQDNs: trusted only once confirmed as a tailnet node
+        const QByteArray status = R"({
+          "BackendState": "Running",
+          "Self": {"TailscaleIPs": ["100.100.1.1", "fd7a:115c:a1e0::1"]},
+          "Peer": {"k1": {"TailscaleIPs": ["100.100.1.2", "fd7a:115c:a1e0::2"]},
+                   "k2": {"TailscaleIPs": ["100.100.1.3"]}}})";
+        const QSet<QString> nodeIps = Backend::parseTailscaleNodeIps(status);
+        QCOMPARE(nodeIps.size(), 5);
+        QVERIFY(nodeIps.contains(QStringLiteral("100.100.1.2")) && nodeIps.contains(QStringLiteral("fd7a:115c:a1e0::2")));
+        auto nodes = [&nodeIps](std::initializer_list<const char *> ips) {
+            QList<QHostAddress> list;
+            for (const char *ip : ips) list.append(QHostAddress(QString::fromLatin1(ip)));
+            return Backend::addressesAreTailnetNodes(list, nodeIps);
+        };
+        QVERIFY(nodes({"100.100.1.2"}));
+        QVERIFY(nodes({"100.100.1.2", "fd7a:115c:a1e0::2"}));
+        QVERIFY(nodes({"::ffff:100.100.1.3"}));
+        QVERIFY(!nodes({"100.100.9.9"}));                 // CGNAT range but not a tailnet node
+        QVERIFY(!nodes({"100.100.1.2", "203.0.113.5"}));  // any non-tailnet answer fails
+        QVERIFY(!nodes({}));
+        QVERIFY(Backend::parseTailscaleNodeIps("not json").isEmpty());
+
+        QVERIFY(!ok("http://relay.tail.example.com:1235/api/v1/ping"));
+        Backend::markVerifiedTailnetHost(QStringLiteral("Relay.Tail.Example.com"));
+        QVERIFY(ok("http://relay.tail.example.com:1235/api/v1/ping"));
+        QVERIFY(ok("ws://RELAY.tail.example.com:1235/socket.io/"));
+        QVERIFY(!ok("http://other.tail.example.com:1235"));
+
+        // QML helper: SSH and empty fields never warn
+        QVERIFY(Backend::isPasswordTransportAllowed(QStringLiteral("ssh://user@mac.local")));
+        QVERIFY(Backend::isPasswordTransportAllowed(QString()));
+        QVERIFY(!Backend::isPasswordTransportAllowed(QStringLiteral("http://relay.example.com:1235")));
+    }
+
+    void testTailnetCheckInFlightDefersRequestsWithoutRecursing() {
+        // (Another test marks relay.tail.example.com verified for the process.)
+        // A slow fake `tailscale status` keeps the custom-domain check in flight.
+        QTemporaryDir binDir;
+        QVERIFY(binDir.isValid());
+        QFile fake(binDir.filePath(QStringLiteral("tailscale")));
+        QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write("#!/bin/sh\nsleep 0.4\necho '{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"100.100.1.1\"]},\"Peer\":{}}'\n");
+        fake.close();
+        fake.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+
+        const QByteArray savedPath = qgetenv("PATH");
+        const QByteArray savedUrl = qgetenv("BLUEPILL_SERVER_URL");
+        const QByteArray savedPwd = qgetenv("BLUEPILL_PASSWORD");
+        qputenv("PATH", binDir.path().toLocal8Bit() + ":" + savedPath);
+        qputenv("BLUEPILL_SERVER_URL", "http://studio.tail.example.com:1235");
+        qputenv("BLUEPILL_PASSWORD", "CHANGE_ME_TO_A_SECURE_TOKEN");
+        qunsetenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY");
+        auto restore = qScopeGuard([&]() {
+            qputenv("PATH", savedPath);
+            if (savedUrl.isEmpty()) qunsetenv("BLUEPILL_SERVER_URL"); else qputenv("BLUEPILL_SERVER_URL", savedUrl);
+            if (savedPwd.isEmpty()) qunsetenv("BLUEPILL_PASSWORD"); else qputenv("BLUEPILL_PASSWORD", savedPwd);
+            qputenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY", "1");
+        });
+
+        static QStringList refusals;
+        refusals.clear();
+        const QtMessageHandler prev = qInstallMessageHandler([](QtMsgType, const QMessageLogContext &, const QString &msg) {
+            if (msg.contains(QStringLiteral("refusing untrusted/cleartext"))) refusals.append(msg);
+        });
+        auto restoreHandler = qScopeGuard([prev]() { qInstallMessageHandler(prev); });
+
+        Backend backend(false);
+        backend.verifyTailnetHostForUrl(QStringLiteral("http://studio.tail.example.com:1235"));
+        QVERIFY(backend.tailnetCheckPendingForTest());
+        // Sync / Ctrl+R / Save while the check runs used to recurse until the stack overflowed.
+        backend.refreshAll();
+        backend.refreshAll();
+        QCOMPARE(backend.serverStatus(), QStringLiteral("Checking Tailscale address..."));
+        // Opening a chat mid-check waits instead of sending a refused request.
+        backend.selectChat(QStringLiteral("iMessage;-;+15555550100"));
+        QVERIFY(refusals.isEmpty());
+        QTRY_VERIFY_WITH_TIMEOUT(!backend.tailnetCheckPendingForTest(), 10000);
+    }
+
+    void testResavingUnchangedSettingsKeepsEndpointsAndPendingEdits() {
+        // Env vars override config.json; isolate from earlier tests.
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL", "BLUEBUBBLES_SECONDARY_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&savedEnv]() {
+            for (auto it = savedEnv.constBegin(); it != savedEnv.constEnd(); ++it) qputenv(it.key().constData(), it.value());
+        });
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("cfg_resave.json"));
+        {
+            QFile f(cfgPath);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(QJsonDocument(QJsonObject{
+                {QStringLiteral("serverUrl"), QStringLiteral("https://relay.invalid")},
+                {QStringLiteral("secondaryServerUrl"), QStringLiteral("https://backup.invalid")},
+                {QStringLiteral("password"), QStringLiteral("pw")}}).toJson());
+        }
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_resave.json")));
+        b.setConfigFilePath(cfgPath);
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://relay.invalid"));
+
+        const QString noteId = b.saveIcloudNote(QStringLiteral("note_resave_1"), QStringLiteral("Draft"), QStringLiteral("Body"), QStringLiteral("Notes"));
+        QVERIFY(b.hasPendingIcloudNoteSaveForTest(noteId));
+
+        // Settings shows the effective port (443) for the portless primary and
+        // submits the failover text unchanged: nothing may move or be discarded.
+        b.saveServerConfig(Backend::composeServerUrl(QStringLiteral("https://relay.invalid"), QStringLiteral("443")),
+                           QStringLiteral("https://backup.invalid"), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://relay.invalid"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.invalid"));
+        QVERIFY(b.hasPendingIcloudNoteSaveForTest(noteId));
+
+        // A real endpoint change still applies the new defaults and invalidates pending edits
+        b.saveServerConfig(QStringLiteral("https://other.invalid"), QStringLiteral("backup2.invalid"), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://other.invalid:1235"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("http://backup2.invalid:1235"));
+        QVERIFY(!b.hasPendingIcloudNoteSaveForTest(noteId));
+
+        // A path that differs only in case is a real edit and must be saved
+        b.saveServerConfig(QStringLiteral("https://other.invalid:1235/Relay"), QString(), QString());
+        b.saveServerConfig(QStringLiteral("https://other.invalid:1235/relay"), QString(), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://other.invalid:1235/relay"));
+
+        // http(s)://user@host is a URL, not SSH: unchanged re-saves keep the
+        // saved endpoint (implicit 443 and explicit port) and pending edits.
+        for (const QString &saved : {QStringLiteral("https://alex@relay.invalid"), QStringLiteral("https://alex@relay.invalid:8080")}) {
+            {
+                QFile f(cfgPath);
+                QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+                f.write(QJsonDocument(QJsonObject{{QStringLiteral("serverUrl"), saved},
+                                                  {QStringLiteral("password"), QStringLiteral("pw")}}).toJson());
+            }
+            b.setConfigFilePath(cfgPath);
+            QCOMPARE(b.serverUrl(), saved);
+            const QString id = b.saveIcloudNote(QStringLiteral("note_userinfo"), QStringLiteral("Draft"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            QVERIFY(b.hasPendingIcloudNoteSaveForTest(id));
+            const QVariantMap fields = Backend::splitServerUrl(saved, true);
+            const QString port = fields.value(QStringLiteral("port")).toString().isEmpty() ? QStringLiteral("443") : fields.value(QStringLiteral("port")).toString();
+            b.saveServerConfig(Backend::composeServerUrl(fields.value(QStringLiteral("url")).toString(), port), QString(), QString());
+            QCOMPARE(b.serverUrl(), saved);
+            QVERIFY(b.hasPendingIcloudNoteSaveForTest(id));
+        }
+    }
+
+    void testServerUrlDefaultsToHttpAndRelayPort() {
+        auto n = [](const char *s) { return Backend::normalizeServerEndpointUrl(QString::fromUtf8(s)); };
+        // Bare host -> http:// + default relay port
+        QCOMPARE(n("mac-relay.example.com"), QStringLiteral("http://mac-relay.example.com:1235"));
+        QCOMPARE(n("  192.0.2.7/ "), QStringLiteral("http://192.0.2.7:1235"));
+        QCOMPARE(n("my-mac"), QStringLiteral("http://my-mac:1235"));
+        // Explicit port is kept
+        QCOMPARE(n("my-mac:1234"), QStringLiteral("http://my-mac:1234"));
+        QCOMPARE(n("http://my-mac:8080"), QStringLiteral("http://my-mac:8080"));
+        // Explicit http:// without port -> default relay port
+        QCOMPARE(n("http://my-mac"), QStringLiteral("http://my-mac:1235"));
+        // https:// without a port also gets the default relay port
+        QCOMPARE(n("https://relay.example.com"), QStringLiteral("https://relay.example.com:1235"));
+        QCOMPARE(n("HTTPS://relay.example.com:8443/"), QStringLiteral("HTTPS://relay.example.com:8443"));
+        QCOMPARE(n("https://relay.example.com:443"), QStringLiteral("https://relay.example.com:443"));
+        // Loading saved config never adds a port
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("https://relay.example.com"), false), QStringLiteral("https://relay.example.com"));
+        // ...and keeps the historical https:// for scheme-less saved/env values
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("my-mac"), false), QStringLiteral("https://my-mac"));
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("relay.example.com:443"), false), QStringLiteral("https://relay.example.com:443"));
+        // SSH forms unchanged
+        QCOMPARE(n("user@mac.local"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(n("ssh://user@mac.local"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(n(""), QString());
+    }
+
+    void testSplitAndComposeServerUrlPortField() {
+        auto split = [](const char *u, bool hide = false) {
+            const QVariantMap m = Backend::splitServerUrl(QString::fromUtf8(u), hide);
+            return m.value("url").toString() + QStringLiteral("|") + m.value("port").toString();
+        };
+        QCOMPARE(split("my-mac:8080"), QStringLiteral("my-mac|8080"));
+        QCOMPARE(split("https://relay.example.com:8443/bb/"), QStringLiteral("https://relay.example.com/bb|8443"));
+        QCOMPARE(split("http://192.0.2.7:1235", true), QStringLiteral("http://192.0.2.7|"));
+        QCOMPARE(split("http://192.0.2.7:1235", false), QStringLiteral("http://192.0.2.7|1235"));
+        QCOMPARE(split("http://[2001:db8::2]:9000"), QStringLiteral("http://[2001:db8::2]|9000"));
+        QCOMPARE(split("my-mac"), QStringLiteral("my-mac|"));
+        QCOMPARE(split("user@mac.local"), QStringLiteral("user@mac.local|"));
+        QCOMPARE(split("ssh://user@mac.local:2222"), QStringLiteral("ssh://user@mac.local:2222|"));
+        QCOMPARE(split("https://alex@relay.example.com:8080/bb"), QStringLiteral("https://alex@relay.example.com/bb|8080"));
+        QCOMPARE(split("https://alex@relay.example.com"), QStringLiteral("https://alex@relay.example.com|"));
+        // "@" in an HTTP path is not SSH user info
+        QVERIFY(Backend::isSshStyleServerUrl(QStringLiteral("alex@mac")));
+        QVERIFY(Backend::isSshStyleServerUrl(QStringLiteral("ssh://alex@mac:2222")));
+        QVERIFY(!Backend::isSshStyleServerUrl(QStringLiteral("relay.example.com/team@bluepill")));
+        QVERIFY(!Backend::isSshStyleServerUrl(QStringLiteral("https://alex@relay.example.com")));
+        QCOMPARE(split("relay.example.com:8080/team@bluepill"), QStringLiteral("relay.example.com/team@bluepill|8080"));
+        QCOMPARE(split("my-mac:99999"), QStringLiteral("my-mac:99999|"));
+
+        auto compose = [](const char *u, const char *p) {
+            return Backend::composeServerUrl(QString::fromUtf8(u), QString::fromUtf8(p));
+        };
+        QCOMPARE(compose("my-mac", ""), QStringLiteral("http://my-mac:1235"));
+        QCOMPARE(compose("my-mac", "4000"), QStringLiteral("http://my-mac:4000"));
+        QCOMPARE(compose("https://relay.example.com", ""), QStringLiteral("https://relay.example.com:1235"));
+        QCOMPARE(compose("https://relay.example.com", "443"), QStringLiteral("https://relay.example.com:443"));
+        QCOMPARE(compose("https://relay.example.com/bb", "8443"), QStringLiteral("https://relay.example.com:8443/bb"));
+        QCOMPARE(compose("my-mac:5000", "4000"), QStringLiteral("http://my-mac:5000"));  // inline wins
+        QCOMPARE(compose("user@mac.local", "4000"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(compose("https://alex@relay.example.com", "443"), QStringLiteral("https://alex@relay.example.com:443"));
+        QCOMPARE(compose("https://alex@relay.example.com", ""), QStringLiteral("https://alex@relay.example.com:1235"));
+        QCOMPARE(compose("relay.example.com/team@bluepill", "8080"), QStringLiteral("http://relay.example.com:8080/team@bluepill"));
+        QCOMPARE(compose("", "4000"), QString());
+        // Round trip: what the dialog loads composes back to the saved URL
+        const QVariantMap loaded = Backend::splitServerUrl(QStringLiteral("http://mac-relay.example.com:1235"), true);
+        QCOMPARE(Backend::composeServerUrl(loaded.value("url").toString(), loaded.value("port").toString()),
+                 QStringLiteral("http://mac-relay.example.com:1235"));
+    }
+
+    void testSettingsDialogPortFieldCarryOverAndSave() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("cfg_port.json"));
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_port.json")));
+        b.setConfigFilePath(cfgPath);
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *root = engine.rootObjects().first();
+        QObject *urlIn = root->findChild<QObject *>(QStringLiteral("serverUrlInput"));
+        QObject *portIn = root->findChild<QObject *>(QStringLiteral("serverPortInput"));
+        QVERIFY(urlIn && portIn);
+        auto call = [root](const char *fn, const QVariant &arg = QVariant()) {
+            QVariant ret;
+            if (arg.isValid()) QMetaObject::invokeMethod(root, fn, Q_RETURN_ARG(QVariant, ret), Q_ARG(QVariant, arg));
+            else QMetaObject::invokeMethod(root, fn, Q_RETURN_ARG(QVariant, ret));
+            return ret;
+        };
+
+        // Saved default-port URL loads as host + greyed (empty) port
+        call("loadPrimaryServerFields", QStringLiteral("http://mac-relay.example.com:1235"));
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("http://mac-relay.example.com"));
+        QCOMPARE(portIn->property("text").toString(), QString());
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("http://mac-relay.example.com:1235"));
+
+        // Legacy portless https config keeps 443 when re-saved
+        call("loadPrimaryServerFields", QStringLiteral("https://relay.example.com"));
+        QCOMPARE(portIn->property("text").toString(), QStringLiteral("443"));
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("https://relay.example.com:443"));
+
+        // Typing host:port in the URL field carries the port over
+        urlIn->setProperty("text", QStringLiteral("https://relay.example.com:8443"));
+        portIn->setProperty("text", QString());
+        call("carryOverPrimaryServerPort");
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("https://relay.example.com"));
+        QCOMPARE(portIn->property("text").toString(), QStringLiteral("8443"));
+
+        // Bare host + empty port saves with the default port
+        urlIn->setProperty("text", QStringLiteral("my-mac.local"));
+        portIn->setProperty("text", QString());
+        b.saveServerConfig(call("composedPrimaryServerUrl").toString(), QString(), QStringLiteral("pw"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("http://my-mac.local:1235"));
+
+        // Show the dialog so visibility below is the effective on-screen state
+        root->setProperty("showServerConfigModal", true);
+        QCoreApplication::processEvents();
+
+        // An invalid non-empty port is rejected (no silent fallback to 1235), Settings stays open
+        urlIn->setProperty("text", QStringLiteral("https://proxy.example.com"));
+        portIn->setProperty("text", QStringLiteral("65536"));
+        QCOMPARE(call("savePrimaryServerSettings").toBool(), false);
+        QCOMPARE(b.serverUrl(), QStringLiteral("http://my-mac.local:1235"));
+        QVERIFY(root->property("serverPortInvalid").toBool());
+        QVERIFY(root->property("showServerConfigModal").toBool());
+        portIn->setProperty("text", QString());
+
+        // A configured user who clears the URL field never gets it auto-filled by discovery
+        urlIn->setProperty("text", QString());
+        b.setTailscaleRelaysForTest(QVariantList{
+            QVariantMap{{"name", "Solo"}, {"host", "solo.tailnet-example.ts.net"}, {"ip", "100.100.1.4"},
+                        {"url", "http://solo.tailnet-example.ts.net:1235"}, {"key", "solo"}, {"probeState", "relay"}}});
+        QCoreApplication::processEvents();
+        QCOMPARE(urlIn->property("text").toString(), QString());
+
+        // Cleartext warning: shown for a public http:// host, hidden for LAN/Tailscale
+        QObject *warn = root->findChild<QObject *>(QStringLiteral("serverUrlCleartextWarning"));
+        QVERIFY(warn);
+        urlIn->setProperty("text", QStringLiteral("http://relay.example.com"));
+        portIn->setProperty("text", QString());
+        QVERIFY(warn->property("visible").toBool());
+        urlIn->setProperty("text", QStringLiteral("192.168.1.50"));
+        QVERIFY(!warn->property("visible").toBool());
+
+        // Discovered relay rows are keyboard-focusable and Return selects one
+        urlIn->setProperty("text", QString());
+        portIn->setProperty("text", QString());
+        b.setTailscaleRelaysForTest(QVariantList{
+            QVariantMap{{"name", "Air"}, {"host", "air.tailnet-example.ts.net"}, {"ip", "100.100.1.3"},
+                        {"url", "http://air.tailnet-example.ts.net:1235"}, {"key", "air"}, {"probeState", "relay"}},
+            QVariantMap{{"name", "Studio"}, {"host", "studio.tailnet-example.ts.net"}, {"ip", "100.100.1.2"},
+                        {"url", "http://studio.tailnet-example.ts.net:1235"}, {"key", "studio"}, {"probeState", "relay"}}});
+        QCoreApplication::processEvents();
+        QQuickItem *studioRow = nullptr;
+        // Repeater delegates have no QObject parent, so walk the visual tree.
+        std::function<void(QQuickItem *)> findRow = [&](QQuickItem *item) {
+            if (!item || studioRow) return;
+            if (item->objectName() == QStringLiteral("tailscaleRelayRow") &&
+                item->property("relayName").toString() == QStringLiteral("Studio")) {
+                studioRow = item;
+                return;
+            }
+            for (QQuickItem *child : item->childItems()) findRow(child);
+        };
+        auto *window = qobject_cast<QQuickWindow *>(root);
+        QVERIFY(window);
+        findRow(window->contentItem());
+        QVERIFY(studioRow);
+        QVERIFY(studioRow->activeFocusOnTab());
+        QVERIFY(studioRow->property("isSelectable").toBool());
+        studioRow->forceActiveFocus();
+        QVERIFY(studioRow->hasActiveFocus());
+        QTest::keyClick(studioRow->window(), Qt::Key_Return);
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("http://studio.tailnet-example.ts.net"));
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("http://studio.tailnet-example.ts.net:1235"));
+    }
+
+    void testParseTailscaleMacPeers() {
+        const QByteArray json = R"({
+          "BackendState": "Running",
+          "Self": {"OS": "linux", "HostName": "laptop", "DNSName": "laptop.tailnet.example.com.", "Online": true},
+          "Peer": {
+            "k1": {"OS": "macOS", "HostName": "Studio", "DNSName": "studio.tailnet.example.com.",
+                   "TailscaleIPs": ["2001:db8::1", "192.0.2.9"], "Online": true},
+            "k2": {"OS": "macOS", "HostName": "Old Mac", "DNSName": "old-mac.tailnet.example.com.",
+                   "TailscaleIPs": ["192.0.2.10"], "Online": false},
+            "k3": {"OS": "linux", "HostName": "nas", "DNSName": "nas.tailnet.example.com.",
+                   "TailscaleIPs": ["192.0.2.11"], "Online": true},
+            "k4": {"OS": "macOS", "HostName": "Air", "DNSName": "",
+                   "TailscaleIPs": ["192.0.2.12"], "Online": true}
+          }
+        })";
+        QString state;
+        const QVariantList peers = Backend::parseTailscaleMacPeers(json, &state);
+        QCOMPARE(state, QStringLiteral("Running"));
+        QCOMPARE(peers.size(), 2);
+        // Sorted by name: Air, Studio
+        const QVariantMap air = peers[0].toMap();
+        QCOMPARE(air.value("name").toString(), QStringLiteral("Air"));
+        QCOMPARE(air.value("url").toString(), QStringLiteral("http://192.0.2.12:1235"));
+        const QVariantMap studio = peers[1].toMap();
+        QCOMPARE(studio.value("host").toString(), QStringLiteral("studio.tailnet.example.com"));
+        QCOMPARE(studio.value("ip").toString(), QStringLiteral("192.0.2.9"));
+        QCOMPARE(studio.value("url").toString(), QStringLiteral("http://studio.tailnet.example.com:1235"));
+        QCOMPARE(studio.value("probeState").toString(), QStringLiteral("pending"));
+        QCOMPARE(studio.value("key").toString(), QStringLiteral("studio.tailnet.example.com"));
+
+        QString stopped;
+        QVERIFY(Backend::parseTailscaleMacPeers(R"({"BackendState":"Stopped","Peer":{}})", &stopped).isEmpty());
+        QCOMPARE(stopped, QStringLiteral("Stopped"));
+        QVERIFY(Backend::parseTailscaleMacPeers("not json").isEmpty());
+
+        // IPv6-only peer without MagicDNS: keep its IPv6 address, bracketed in the URL
+        const QVariantList v6 = Backend::parseTailscaleMacPeers(R"({"BackendState":"Running","Peer":{
+            "k":{"OS":"macOS","HostName":"Mini","DNSName":"","TailscaleIPs":["fd7a:115c:a1e0::9"],"Online":true}}})");
+        QCOMPARE(v6.size(), 1);
+        QCOMPARE(v6[0].toMap().value("ip").toString(), QStringLiteral("fd7a:115c:a1e0::9"));
+        QCOMPARE(v6[0].toMap().value("url").toString(), QStringLiteral("http://[fd7a:115c:a1e0::9]:1235"));
+
+        // Only a relay-shaped JSON answer counts as a relay, never a bare status code
+        QVERIFY(Backend::looksLikeRelayResponse(401, R"({"status":401,"message":"Unauthorized","data":null})"));
+        QVERIFY(Backend::looksLikeRelayResponse(200, R"({"status":200,"message":"Success","data":"pong"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(401, "<html>401 Authorization Required</html>"));
+        QVERIFY(!Backend::looksLikeRelayResponse(200, R"({"status":200,"message":"ok","data":"hello"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(403, R"({"status":403,"message":"Forbidden"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(401, R"({"status":200,"message":"Unauthorized"})"));
+        QVERIFY(!Backend::looksLikeRelayResponse(401, QByteArray()));
     }
 
     void testChatServiceEvidenceOrderingAndNotifications() {
@@ -3483,8 +4225,8 @@ private slots:
 
         // Save HTTPS BluePill / BlueBubbles URL -> webUiUrl points to server/web
         b.saveServerConfig(QStringLiteral("https://bluepill.example.com"), QString(), QStringLiteral("api-key-123"));
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://bluepill.example.com"));
-        QCOMPARE(b.webUiUrl(), QStringLiteral("https://bluepill.example.com/web"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://bluepill.example.com:1235"));
+        QCOMPARE(b.webUiUrl(), QStringLiteral("https://bluepill.example.com:1235/web"));
     }
 
     void testOutboundTempGuidDeduplication() {
@@ -6841,6 +7583,17 @@ private slots:
     void testRebuildEchoMatchesOnlyCacheRowsAndDeleteUnsendRestoresReceipt() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
+        // Offline: unsend applies locally at once (with a server it waits for the Mac).
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_echo.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_echo.json")));
@@ -6983,6 +7736,73 @@ private slots:
         QCOMPARE(aboutSpy.count(), 0);
         QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("receiptText")).toString(), QString());
         QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+    }
+
+    void testResolvedAttachmentDoesNotResetTimeline() {
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QByteArray savedHome = qgetenv("HOME");
+        qputenv("HOME", home.path().toLocal8Bit());
+        auto restoreHome = qScopeGuard([&]() { qputenv("HOME", savedHome); });
+        // No server: the resolve must come from the disk cache, not a download
+        // that an earlier test's credentials would start.
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        Backend b(false);
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QString attGuid = QStringLiteral("att-resolve-0001-image");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}};
+        const QJsonObject photo{
+            {QStringLiteral("guid"), QStringLiteral("m-resolve-photo")},
+            {QStringLiteral("text"), QString()},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs - 5000},
+            {QStringLiteral("attachments"), QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), attGuid},
+                {QStringLiteral("mimeType"), QStringLiteral("image/png")},
+                {QStringLiteral("transferName"), QStringLiteral("pic.png")}}}},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}};
+        b.ingestMessagesForTest(QJsonArray{photo}, true);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.cachedAttachmentUrl(attGuid), QString());
+
+        // The file is already in the cache (e.g. from an earlier session)
+        const QString cacheDir = home.path() + QStringLiteral("/.cache/imsg/attachments");
+        QVERIFY(QDir().mkpath(cacheDir));
+        const QString file = cacheDir + QLatin1Char('/') + attGuid.left(16) + QStringLiteral("_pic.png");
+        QImage img(64, 32, QImage::Format_RGB32);
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) img.setPixel(x, y, qRgb(x * 4, y * 8, (x * y) & 0xff));
+        QVERIFY(img.save(file));
+        QVERIFY(QFileInfo(file).size() >= 100);  // smaller cache files count as missing
+
+        QSignalSpy changedSpy(&b, &Backend::messagesChanged);
+        QSignalSpy aboutSpy(&b, &Backend::aboutToChangeMessages);
+        QSignalSpy readySpy(&b, &Backend::attachmentReady);
+        b.downloadAttachmentForTest(attGuid, QStringLiteral("pic.png"));
+
+        const QString url = QUrl::fromLocalFile(file).toString();
+        QCOMPARE(readySpy.count(), 1);
+        QCOMPARE(readySpy.at(0).at(1).toString(), url);
+        // No full timeline rebuild for a resolved image...
+        QCOMPARE(changedSpy.count(), 0);
+        QCOMPARE(aboutSpy.count(), 0);
+        // ...but the stored message and the lookup used by new delegates have it
+        const QVariantList imgs = b.messages().at(0).toMap().value(QStringLiteral("imageAttachments")).toList();
+        QVERIFY(!imgs.isEmpty());
+        QCOMPARE(imgs.at(0).toMap().value(QStringLiteral("localUrl")).toString(), url);
+        QCOMPARE(b.cachedAttachmentUrl(attGuid), url);
     }
 
     void testWriteConfigAtomicallyAndMakeRequestSecurity() {
