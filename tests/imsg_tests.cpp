@@ -2648,6 +2648,311 @@ private slots:
         QVERIFY(!Backend::isDecodableImageFile(dir.filePath(QStringLiteral("missing.jpg"))));
     }
 
+    void testContactDetailsShowEveryMacField() {
+        Backend backend(false);
+        backend.parseContactsJson(QByteArray(R"([{
+            "id": "uid-1", "firstName": "Alex", "lastName": "Rivera", "middleName": "Q",
+            "displayName": "Alex Rivera", "nickname": "Lex", "organization": "Example Co",
+            "jobTitle": "Engineer", "department": "",
+            "phoneNumbers": [{"address": "+1 (555) 555-0100", "label": "Mobile"}, {"address": "+15555550101"}],
+            "emails": [{"address": "user@example.com", "label": "Home"}],
+            "addresses": [{"address": "1 Example St, Springfield CA 90000", "label": "Work"}],
+            "urls": [], "note": "Met at the conference", "birthday": "2020-05-04"}])"));
+
+        const QVariantMap d = backend.contactDetails(QStringLiteral("+15555550100"));
+        QVERIFY(d.value(QStringLiteral("found")).toBool());
+        QCOMPARE(d.value(QStringLiteral("firstName")).toString(), QStringLiteral("Alex"));
+        QCOMPARE(d.value(QStringLiteral("lastName")).toString(), QStringLiteral("Rivera"));
+        QCOMPARE(d.value(QStringLiteral("email")).toString(), QStringLiteral("user@example.com"));
+        QStringList labels;
+        QStringList values;
+        for (const QVariant &v : d.value(QStringLiteral("rows")).toList()) {
+            labels << v.toMap().value(QStringLiteral("label")).toString();
+            values << v.toMap().value(QStringLiteral("value")).toString();
+        }
+        QCOMPARE(labels, (QStringList{QStringLiteral("Middle name"), QStringLiteral("Nickname"), QStringLiteral("Company"),
+                                      QStringLiteral("Job title"), QStringLiteral("Phone (Mobile)"), QStringLiteral("Phone"),
+                                      QStringLiteral("Email (Home)"), QStringLiteral("Address (Work)"),
+                                      QStringLiteral("Birthday"), QStringLiteral("Note")}));
+        QVERIFY(!labels.contains(QStringLiteral("Department")));  // empty fields are skipped
+        QVERIFY(values.contains(QStringLiteral("Met at the conference")));
+        // A photo from the Mac replaces the initials
+        Backend withPhoto(false);
+        withPhoto.parseContactsJson(QByteArray(R"([{"id": "uid-9", "firstName": "Sam", "lastName": "Lee",
+            "phoneNumbers": [{"address": "+15555550123"}], "avatar": "/api/v1/contact/uid-9/avatar"}])"));
+        QCOMPARE(withPhoto.contactAvatarApiPathForTest(QStringLiteral("+1 555-555-0123")), QStringLiteral("/api/v1/contact/uid-9/avatar"));
+        QCOMPARE(withPhoto.resolveContactAvatar(QStringLiteral("+15555550123")), QString());
+        QTemporaryDir photoDir;
+        const QString photoFile = photoDir.filePath(QStringLiteral("p.img"));
+        QImage face(32, 32, QImage::Format_RGB32);
+        face.fill(Qt::darkCyan);
+        QVERIFY(face.save(photoFile, "PNG"));
+        withPhoto.applyContactAvatarForTest(QStringLiteral("/api/v1/contact/uid-9/avatar"), photoFile);
+        QCOMPARE(withPhoto.resolveContactAvatar(QStringLiteral("+15555550123")), QUrl::fromLocalFile(photoFile).toString());
+
+        // Same contact by email; unknown address isn't found
+        QVERIFY(backend.contactDetails(QStringLiteral("USER@example.com")).value(QStringLiteral("found")).toBool());
+        QVERIFY(!backend.contactDetails(QStringLiteral("+15555550199")).value(QStringLiteral("found")).toBool());
+
+        // The dialog lists the rows and fills its inputs from the contact
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *win = engine.rootObjects().first();
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")),
+                                  Q_ARG(QVariant, QStringLiteral("Wrong Title Guess")));
+        QCOMPARE(win->property("contactModalFirstName").toString(), QStringLiteral("Alex"));
+        QCOMPARE(win->property("contactModalLastName").toString(), QStringLiteral("Rivera"));
+        QObject *rows = win->findChild<QObject *>(QStringLiteral("contactDetailRows"));
+        QVERIFY(rows);
+        QTRY_COMPARE(rows->property("count").toInt(), labels.size());
+
+        // The header name opens the dialog; there's no separate Edit Contact button
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+        QVERIFY(!qml.contains(QStringLiteral("i18n.tr(\"Edit Contact\")")));
+        QCOMPARE(qml.count(QStringLiteral("root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)")), 1);
+    }
+
+    void testContactAvatarRetryExpiryAndPerRelayCache() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QByteArray savedHome = qgetenv("HOME");
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+            qputenv("HOME", savedHome);
+        });
+        qputenv("HOME", tempDir.path().toUtf8());  // avatar cache lives under ~/.cache
+
+        QImage face(24, 24, QImage::Format_RGB32);
+        face.fill(Qt::darkCyan);
+        QByteArray png;
+        QBuffer pngBuf(&png);
+        QVERIFY(pngBuf.open(QIODevice::WriteOnly));
+        QVERIFY(face.save(&pngBuf, "PNG"));
+
+        // Fake relay: the first avatar request fails, later ones succeed
+        int avatarRequests = 0;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QTcpSocket *, QByteArray> sockBuffers;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &req = sockBuffers[sock];
+                    req += sock->readAll();
+                    if (!req.contains("\r\n\r\n")) return;
+                    QByteArray status = "200 OK", type = "application/json", body = R"({"status":200,"data":[]})";
+                    if (req.startsWith("GET /api/v1/contact/uid-9/avatar")) {
+                        ++avatarRequests;
+                        if (avatarRequests == 1) { status = "500 Error"; body = "{}"; }
+                        else { type = "image/png"; body = png; }
+                    }
+                    sock->write("HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\nConnection: close\r\nContent-Length: " +
+                                QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        const QString relay = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+        qputenv("BLUEPILL_SERVER_URL", relay.toUtf8());
+        qputenv("BLUEPILL_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_av.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_av.json")));
+        b.loadCredentials();
+        b.setAvatarRetryBaseMsForTest(50);
+        // Contacts arrive before any chat: nothing to fetch yet
+        b.parseContactsJson(QByteArray(R"([{"id": "uid-9", "firstName": "Sam", "lastName": "Lee",
+            "phoneNumbers": [{"address": "+15555550123"}], "avatar": "/api/v1/contact/uid-9/avatar"}])"));
+        QTest::qWait(200);
+        QCOMPARE(avatarRequests, 0);
+        // The chat list arrives later: its participant's photo is queued then
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550123");
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{{"guid", "av-1"}, {"text", "hi"}, {"isFromMe", false},
+            {"dateCreated", QDateTime::currentMSecsSinceEpoch()}, {"handle", QJsonObject{{"address", "+15555550123"}}},
+            {"chats", QJsonArray{QJsonObject{{"guid", chatGuid}, {"chatIdentifier", "+15555550123"}, {"style", 45}}}}}}, true);
+        // The failed first request is retried after a backoff
+        QTRY_VERIFY_WITH_TIMEOUT(!b.resolveContactAvatar(QStringLiteral("+15555550123")).isEmpty(), 5000);
+        QCOMPARE(avatarRequests, 2);
+
+        // Expired: refetched, and the current photo stays up meanwhile
+        b.expireContactAvatarsForTest();
+        b.fetchContactAvatarsForChatsForTest();
+        QVERIFY(!b.resolveContactAvatar(QStringLiteral("+15555550123")).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(avatarRequests, 3, 3000);
+        // Not expired: no request
+        b.fetchContactAvatarsForChatsForTest();
+        QTest::qWait(200);
+        QCOMPARE(avatarRequests, 3);
+
+        // Another relay's photo for the same contact id gets its own cache file
+        const QString path = QStringLiteral("/api/v1/contact/uid-9/avatar");
+        const QString fileA = b.contactAvatarCacheFileForTest(path);
+        qputenv("BLUEPILL_SERVER_URL", QByteArrayLiteral("https://relay-b.example.com"));
+        Backend other(false);
+        other.setStateFilePath(tempDir.filePath(QStringLiteral("state_av2.json")));
+        other.setConfigFilePath(tempDir.filePath(QStringLiteral("config_av2.json")));
+        other.loadCredentials();
+        QVERIFY(QFileInfo::exists(fileA));
+        QVERIFY(other.contactAvatarCacheFileForTest(path) != fileA);
+    }
+
+    void testContactInfoTabsListPhotosLinksAndFiles() {
+        // Never talk to a real relay from this test
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+        Backend b(false);
+        QTemporaryDir tempDir;
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_info.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_info.json")));
+        b.parseContactsJson(QByteArray(R"([{"id": "uid-1", "firstName": "Alex", "lastName": "Rivera",
+            "phoneNumbers": [{"address": "+15555550100", "label": "Mobile"}], "note": "Met at the conference"}])"));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550100")}, {QStringLiteral("style"), 45}};
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 600000;
+        auto att = [](const char *guid, const char *name, const char *mime) {
+            return QJsonObject{{"guid", QString::fromLatin1(guid)}, {"transferName", QString::fromLatin1(name)}, {"mimeType", QString::fromLatin1(mime)}};
+        };
+        b.ingestMessagesForTest(QJsonArray{
+            QJsonObject{{"guid", "i-1"}, {"text", "look https://example.com/a and https://example.org/b"}, {"isFromMe", false},
+                        {"dateCreated", t}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-2"}, {"text", ""}, {"isFromMe", true}, {"dateCreated", t + 1000},
+                        {"attachments", QJsonArray{att("a-photo-0001", "beach.jpg", "image/jpeg")}}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-3"}, {"text", "the doc"}, {"isFromMe", false}, {"dateCreated", t + 2000},
+                        {"attachments", QJsonArray{att("a-file-0001", "plan.pdf", "application/pdf")}}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-4"}, {"text", "again https://example.com/a."}, {"isFromMe", true}, {"dateCreated", t + 3000},
+                        {"chats", QJsonArray{chatObj}}},
+            // A pending and a ready row for the same photo (different GUIDs), plus a plugin payload
+            QJsonObject{{"guid", "i-5"}, {"text", ""}, {"isFromMe", false}, {"dateCreated", t + 4000},
+                        {"attachments", QJsonArray{QJsonObject{{"guid", "at_0_dup-pending"}, {"transferName", "dup.jpg"}, {"mimeType", "image/jpeg"}, {"transferState", 0}},
+                                                   QJsonObject{{"guid", "at_0_dup-ready"}, {"transferName", "dup.jpg"}, {"mimeType", "image/jpeg"}, {"transferState", 5}},
+                                                   att("a-plugin-0001", "x.pluginPayloadAttachment", "application/octet-stream")}},
+                        {"chats", QJsonArray{chatObj}}}}, true);
+        const QString otherGuid = QStringLiteral("iMessage;-;+15555550177");
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{{"guid", "o-1"}, {"text", "elsewhere https://example.net/z"}, {"isFromMe", false},
+            {"dateCreated", t}, {"chats", QJsonArray{QJsonObject{{"guid", otherGuid}, {"chatIdentifier", "+15555550177"}, {"style", 45}}}}}}, true);
+        b.selectChat(chatGuid);
+
+        const QVariantMap media = b.conversationMedia(chatGuid);
+        QCOMPARE(media.value(QStringLiteral("photos")).toList().size(), 2);  // beach + one dup.jpg
+        QCOMPARE(media.value(QStringLiteral("files")).toList().size(), 1);   // the plugin payload isn't a file
+        QCOMPARE(media.value(QStringLiteral("files")).toList().first().toMap().value(QStringLiteral("name")).toString(), QStringLiteral("plan.pdf"));
+        const QVariantList links = media.value(QStringLiteral("links")).toList();
+        QCOMPARE(links.size(), 2);  // duplicates collapse (trailing "." stripped); newest first
+        QCOMPARE(links.first().toMap().value(QStringLiteral("url")).toString(), QStringLiteral("https://example.com/a"));
+        QCOMPARE(Backend::extractFirstUrl(QStringLiteral("See https://example.com/report.")), QStringLiteral("https://example.com/report"));
+
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        win->resize(1200, 800);
+
+        // Clicking the name in the header opens read-only Details first (not the editor), with an Edit button
+        win->show();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        auto *nameArea = win->findChild<QQuickItem *>(QStringLiteral("contactHeaderNameArea"));
+        QVERIFY(nameArea);
+        QTRY_VERIFY(nameArea->width() > 0 && nameArea->isVisible());
+        QObject *composer = win->findChild<QObject *>(QStringLiteral("composerInput"));
+        QVERIFY(composer);
+        QMetaObject::invokeMethod(composer, "forceActiveFocus");
+        composer->setProperty("text", QStringLiteral("draft"));
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier,
+                          nameArea->mapToScene(QPointF(nameArea->width() / 2, nameArea->height() / 2)).toPoint());
+        QTRY_VERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoTab").toInt(), 0);
+        QVERIFY(!win->property("showContactModal").toBool());
+        QObject *detailRows = win->findChild<QObject *>(QStringLiteral("contactInfoDetailRows"));
+        QVERIFY(detailRows);
+        QTRY_VERIFY(detailRows->property("count").toInt() >= 2);  // phone + note
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("contactInfoEditBtn"))->property("visible").toBool());
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoPhotos"))->property("count").toInt(), 2);
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoLinks"))->property("count").toInt(), 2);
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoFiles"))->property("count").toInt(), 1);
+
+        // The card sits over the conversation, not the sidebar
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("contactInfoCard"));
+        auto *sidebar = win->findChild<QQuickItem *>(QStringLiteral("leftSidebarPane"));
+        QVERIFY(card && sidebar);
+        QVERIFY(!card->mapRectToScene(QRectF(0, 0, card->width(), card->height()))
+                     .intersects(sidebar->mapRectToScene(QRectF(0, 0, sidebar->width(), sidebar->height()))));
+
+        // The card has keyboard focus: Return doesn't send the composer's draft underneath
+        auto *infoModal = win->findChild<QQuickItem *>(QStringLiteral("contactInfoModal"));
+        QTRY_VERIFY(infoModal->hasActiveFocus());
+        const int msgCount = b.messages().size();
+        QTest::keyClick(win, Qt::Key_Return);
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("draft"));
+        QCOMPARE(b.messages().size(), msgCount);
+
+        // Edit → Cancel (or Esc) backs out to the card, not all the way out
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")), Q_ARG(QVariant, QString()));
+        QVERIFY(win->property("showContactModal").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!win->property("showContactModal").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QTRY_VERIFY(infoModal->hasActiveFocus());
+        // Saving a new name shows it on the card
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")), Q_ARG(QVariant, QString()));
+        b.saveContact(QStringLiteral("Alexandra"), QStringLiteral("Rivera"), QStringLiteral("+15555550100"), QString());
+        win->setProperty("showContactModal", false);
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoDetails").toMap().value(QStringLiteral("firstName")).toString(), QStringLiteral("Alexandra"));
+
+        // Enlarging a photo and closing it comes back to the Photos tab
+        win->setProperty("contactInfoTab", 1);
+        QMetaObject::invokeMethod(win, "openPhotoViewer", Q_ARG(QVariant, win->property("contactInfoMedia").toMap().value(QStringLiteral("photos"))), Q_ARG(QVariant, 0));
+        QVERIFY(win->property("showPhotoViewer").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!win->property("showPhotoViewer").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoTab").toInt(), 1);
+        QTRY_VERIFY(infoModal->hasActiveFocus());
+
+        // Switching conversations reloads the card for the new chat
+        b.selectChat(otherGuid);
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoMedia").toMap().value(QStringLiteral("links")).toList().size(), 1);
+        QCOMPARE(win->property("contactInfoMedia").toMap().value(QStringLiteral("photos")).toList().size(), 0);
+        QVERIFY(!win->property("contactInfoDetails").toMap().value(QStringLiteral("found")).toBool());
+
+        // Esc closes the card itself last, and focus returns to the composer
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!win->property("showContactInfo").toBool());
+    }
+
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
         Backend backend(false);
         backend.loadDemoData();

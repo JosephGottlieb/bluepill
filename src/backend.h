@@ -351,6 +351,11 @@ public:
     Q_INVOKABLE void seedDemoData() { loadDemoData(); }
     Q_INVOKABLE void saveContact(const QString &firstName, const QString &lastName, const QString &phone, const QString &email);
     Q_INVOKABLE void syncContactsNow();
+    // A Mac contact's fields for Edit Contact: firstName, lastName, phone, email, and
+    // rows ({label, value}) for every populated field. found=false when unknown.
+    Q_INVOKABLE QVariantMap contactDetails(const QString &address) const;
+    // Photos, links and files shared in a conversation (newest first): {photos, links, files}
+    Q_INVOKABLE QVariantMap conversationMedia(const QString &chatGuid) const;
     Q_INVOKABLE void loadOlderMessages();
 
     // Emoji shortcode & picker helpers
@@ -442,6 +447,12 @@ public:
         m_lastSoundPresetPlayed.clear();
     }
     void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
+    QString contactAvatarApiPathForTest(const QString &handle) const { return m_contactAvatarApiPaths.value(normalizeHandle(handle)); }
+    QString contactAvatarCacheFileForTest(const QString &apiPath) const { return avatarCacheFile(apiPath); }
+    void setAvatarRetryBaseMsForTest(qint64 ms) { m_avatarRetryBaseMs = ms; }
+    void expireContactAvatarsForTest() { for (auto it = m_contactAvatarFetchedAtMs.begin(); it != m_contactAvatarFetchedAtMs.end(); ++it) it.value() -= kAvatarRefreshMs + 1; }
+    void fetchContactAvatarsForChatsForTest() { fetchContactAvatarsForChats(); }
+    void applyContactAvatarForTest(const QString &apiPath, const QString &file) { applyContactAvatar(apiPath, file); }
     void downloadAttachmentForTest(const QString &guid, const QString &transferName) { downloadAttachment(guid, transferName, false); }
     bool tailnetCheckPendingForTest() const { return tailnetCheckPending(); }
 
@@ -461,6 +472,7 @@ public:
     static bool isDecodableImageFile(const QString &path);
     static QString formatExpressiveEffectLabel(const QString &styleId);
     static QString extractFirstUrl(const QString &text);
+    static QString stripTrailingUrlPunctuation(QString url);
     static bool isYouTubeUrl(const QString &url);
     static QString formatMessageTextWithLinks(const QString &raw);
     static bool isImageMimeOrExt(const QString &mime, const QString &fileName);
@@ -782,6 +794,26 @@ private:
     QString m_selectedChatGuid;
 
     QHash<QString, QString> m_contactNames;
+    QHash<QString, QVariantMap> m_contactRecords;  // full Mac contact, by normalized handle
+    // Contact photos served by bluepill-server, fetched for chat participants
+    QHash<QString, QString> m_contactAvatarApiPaths;  // normalized handle -> /api/v1/contact/<id>/avatar
+    QStringList m_contactAvatarQueue;
+    // Fetch state, keyed by relay + avatar path (avatarFetchKey)
+    QSet<QString> m_contactAvatarInFlight;
+    QHash<QString, qint64> m_contactAvatarFetchedAtMs;              // last success (or fresh disk copy)
+    struct AvatarFailure { int attempts = 0; qint64 retryAtMs = 0; };
+    QHash<QString, AvatarFailure> m_contactAvatarFailures;
+    int m_contactAvatarsInFlight = 0;
+    bool m_avatarScanPending = false;
+    qint64 m_avatarRetryBaseMs = 30000;
+    static constexpr qint64 kAvatarRefreshMs = 24LL * 60 * 60 * 1000;
+    static constexpr int kAvatarMaxAttempts = 5;
+    QString avatarFetchKey(const QString &apiPath) const;
+    QString avatarCacheFile(const QString &apiPath) const;
+    bool m_avatarRefreshPending = false;
+    void fetchContactAvatarsForChats();
+    void pumpContactAvatarQueue();
+    void applyContactAvatar(const QString &apiPath, const QString &file);
     QHash<QString, QString> m_contactRawAddresses;
     QHash<QString, QString> m_contactAvatars;
     QHash<QString, QStringList> m_chatParticipants;

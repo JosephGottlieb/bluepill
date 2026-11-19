@@ -5,6 +5,15 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ## [Unreleased]
 
 ### Added
+- **Edit Contact shows the whole Mac contact:** the dialog now fills the name, phone and email from the contact on the Mac, instead of splitting the chat title. The separate **Edit Contact** button is gone.
+- **Contact / conversation info:** clicking the name in the conversation header opens a read-only card over the conversation.
+  - **Details:** everything the Mac has for the contact, with **✎ Edit**, or **＋ Add Contact** for an unknown number.
+  - **Photos:** a grid that opens the photo viewer.
+  - **Links:** each shared link, opened in your browser.
+  - **Files:** other attachments, opened from there.
+  - **Group chats** get the same tabs, and Esc closes the card.
+  - Closing the editor (Save or Cancel) or the photo viewer goes back to the card, on the same tab. Switching conversations reloads it for the new chat.
+- **Contact photos instead of initials:** `bluepill-server` serves each contact's AddressBook photo at `/api/v1/contact/<id>/avatar`. That handles the photo stored inline, with or without the leading marker byte, and the newer `Images/` file reference. The client downloads photos only for people you have chats with, 4 at a time, caches them for a day, and shows them as circles in the chat list, the pinned row and the conversation header. Under **On your Mac** it lists every other populated field: middle name, nickname, company, job title, department, all phones and emails with their labels, addresses, URLs, birthday and note. `bluepill-server` now returns these fields from the AddressBook (labels, `middleName`, `jobTitle`, `department`, `addresses`, `urls`, `note`, `birthday`), reading only the columns that exist on that macOS version.
 - **Edit sent iMessages:** right-click a message you sent and choose **Edit**. The composer switches to edit mode (Enter saves, Esc cancels) and the message shows as Edited. If the Mac rejects the edit, the original text comes back, and your unsent draft is restored when you finish or cancel the edit.
 - **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
 

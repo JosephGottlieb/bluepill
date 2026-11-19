@@ -586,9 +586,7 @@ ApplicationWindow {
         root.photoViewerZoom = 1.0
         root.photoViewerPanX = 0
         root.photoViewerPanY = 0
-        if (backend.selectedChatGuid.length > 0) {
-            composerInput.forceActiveFocus()
-        }
+        root.focusAfterOverlay()
     }
 
     function handlePhotoViewerKey(event) {
@@ -698,6 +696,62 @@ ApplicationWindow {
     property string contactModalLastName: ""
     property string contactModalPhone: ""
     property string contactModalEmail: ""
+    // Populated fields of the Mac contact ({label, value}), shown read-only in the dialog
+    property var contactModalRows: []
+    // Contact / conversation info (read-only), opened from the header name
+    property bool showContactInfo: false
+    property int contactInfoTab: 0          // 0 Details, 1 Photos, 2 Links, 3 Files
+    property var contactInfoDetails: ({})
+    property var contactInfoMedia: ({ photos: [], links: [], files: [] })
+    function refreshContactInfo() {
+        root.contactInfoDetails = backend.selectedChatIsGroup ? ({ found: false }) : backend.contactDetails(backend.selectedChatAddress)
+        root.contactInfoMedia = backend.conversationMedia(backend.selectedChatGuid)
+    }
+    function openContactInfo(tab) {
+        if (backend.selectedChatGuid.length === 0) return
+        root.refreshContactInfo()
+        root.contactInfoTab = tab || 0
+        root.showContactInfo = true
+        // Keys go to the card, not the (covered) composer with its draft
+        contactInfoModal.forceActiveFocus()
+    }
+    function closeContactInfo() {
+        if (!root.showContactInfo) return
+        root.showContactInfo = false
+        if (backend.selectedChatGuid.length > 0) composerInput.forceActiveFocus()
+    }
+    // Where focus goes when the editor or photo viewer closes: back to the card if it's open
+    function focusAfterOverlay() {
+        if (root.showContactInfo) contactInfoModal.forceActiveFocus()
+        else if (backend.selectedChatGuid.length > 0) composerInput.forceActiveFocus()
+    }
+    // Closing the contact editor backs out to the card, with the saved details
+    onShowContactModalChanged: {
+        if (!showContactModal && showContactInfo) {
+            root.refreshContactInfo()
+            root.focusAfterOverlay()
+        }
+    }
+    function openContactModal(address, title) {
+        var d = backend.contactDetails(address || "")
+        if (d.found) {
+            // Fill from the Mac contact instead of guessing from the chat title
+            root.contactModalFirstName = d.firstName || ""
+            root.contactModalLastName = d.lastName || ""
+            root.contactModalPhone = d.phone || ""
+            root.contactModalEmail = d.email || ""
+            root.contactModalRows = d.rows || []
+        } else {
+            var parts = (title || "").split(" ")
+            var isEmail = (address || "").indexOf("@") >= 0
+            root.contactModalFirstName = parts[0] || ""
+            root.contactModalLastName = parts.slice(1).join(" ") || ""
+            root.contactModalPhone = isEmail ? "" : (address || "")
+            root.contactModalEmail = isEmail ? address : ""
+            root.contactModalRows = []
+        }
+        root.showContactModal = true
+    }
     property bool showEmojiPicker: false
     property string emojiPickerCategory: "All"
     property string emojiPickerQuery: ""
@@ -858,6 +912,10 @@ ApplicationWindow {
             var sameConv = (root.lastDraftChatGuid === newGuid) || (root.lastDraftChatGuid !== "" && newGuid !== "" && backend.isSameConversation(root.lastDraftChatGuid, newGuid))
             if (!sameConv) {
                 root.clearActionMenu()
+                // The info card follows the conversation
+                if (root.showContactInfo) {
+                    if (newGuid.length > 0) root.refreshContactInfo(); else root.closeContactInfo()
+                }
                 root.cancelEditing()
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
@@ -912,6 +970,7 @@ ApplicationWindow {
             }
         }
         function onContactsChanged() {
+            if (root.showContactInfo) root.contactInfoDetails = backend.selectedChatIsGroup ? ({ found: false }) : backend.contactDetails(backend.selectedChatAddress)
             if (root.showNewChatModal) root.refreshNewChatSuggestions()
             if (searchInput.text.trim().length > 0) root.refreshSidebarContacts()
         }
@@ -1150,11 +1209,7 @@ ApplicationWindow {
     Shortcut {
         sequences: ["Ctrl+Shift+C", "Alt+C"]
         onActivated: {
-            root.contactModalFirstName = ""
-            root.contactModalLastName = ""
-            root.contactModalPhone = backend.selectedChatAddress
-            root.contactModalEmail = ""
-            root.showContactModal = true
+            if (backend.selectedChatGuid.length > 0) root.openContactModal(backend.selectedChatAddress, "")
         }
     }
     Shortcut {
@@ -1317,6 +1372,8 @@ ApplicationWindow {
                 root.showContactModal = false
             } else if (root.showNewChatModal) {
                 root.showNewChatModal = false
+            } else if (root.showContactInfo) {
+                root.closeContactInfo()
             } else if (root.showEmojiPicker) {
                 root.showEmojiPicker = false
             } else if (root.isEmojiCycling || root.emojiAutocompleteResults.length > 0) {
@@ -2028,12 +2085,12 @@ ApplicationWindow {
                                             border.width: modelData.guid === backend.selectedChatGuid ? 2 : (pinTileMouse.containsMouse ? 1 : 0)
                                             border.color: modelData.guid === backend.selectedChatGuid ? theme.brightForeground : theme.accent
 
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: modelData.initials || "#"
-                                                font.pixelSize: theme.fontSize - 1
-                                                font.bold: true
-                                                color: "#ffffff"
+                                            RoundAvatar {
+                                                anchors.fill: parent
+                                                color: "transparent"
+                                                source: modelData.avatarUrl || ""
+                                                initials: modelData.initials || "#"
+                                                fontPixelSize: theme.fontSize - 1
                                             }
 
                                             // Unread badge dot on pinned avatar
@@ -2124,31 +2181,14 @@ ApplicationWindow {
                                 anchors.margins: 10
                                 spacing: 10
 
-                                // Avatar Circle
-                                Rectangle {
+                                // Avatar Circle (contact photo, or initials)
+                                RoundAvatar {
                                     Layout.preferredWidth: 44
                                     Layout.preferredHeight: 44
-                                    radius: 22
                                     color: modelData.avatarColor
-                                    clip: true
-
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: modelData.initials
-                                        font.pixelSize: theme.fontSize
-                                        font.bold: true
-                                        color: "#ffffff"
-                                        visible: avatarImg.status !== Image.Ready
-                                    }
-
-                                    Image {
-                                        id: avatarImg
-                                        anchors.fill: parent
-                                        source: modelData.avatarUrl || ""
-                                        autoTransform: true
-                                        fillMode: Image.PreserveAspectCrop
-                                        visible: status === Image.Ready
-                                    }
+                                    source: modelData.avatarUrl || ""
+                                    initials: modelData.initials
+                                    fontPixelSize: theme.fontSize
                                 }
 
                                 // Title, Service badge, Preview
@@ -2429,6 +2469,8 @@ ApplicationWindow {
 
             // Right Pane: Home Page Dashboard OR Active Conversation Header + Message Timeline + Composer
             ColumnLayout {
+                id: conversationPane
+                objectName: "conversationPane"
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: 0
@@ -3058,21 +3100,12 @@ ApplicationWindow {
                                 border.width: 1.5
                                 border.color: Qt.rgba(1, 1, 1, 0.22)
 
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: backend.selectedChatInitials
-                                    font.pixelSize: theme.fontSize + 1
-                                    font.bold: true
-                                    color: "#ffffff"
-                                    visible: headerAvatar.status !== Image.Ready
-                                }
-                                Image {
-                                    id: headerAvatar
+                                RoundAvatar {
                                     anchors.fill: parent
+                                    color: "transparent"
                                     source: backend.selectedChatAvatar
-                                    autoTransform: true
-                                    fillMode: Image.PreserveAspectCrop
-                                    visible: status === Image.Ready
+                                    initials: backend.selectedChatInitials
+                                    fontPixelSize: theme.fontSize + 1
                                 }
                             }
 
@@ -3133,19 +3166,15 @@ ApplicationWindow {
 
                         MouseArea {
                             id: contactHeaderHover
+                            objectName: "contactHeaderNameArea"
                             anchors.fill: parent
                             hoverEnabled: true
-                            cursorShape: (!backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0) ? Qt.PointingHandCursor : Qt.ArrowCursor
-                            onClicked: {
-                                if (!backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0) {
-                                    var parts = backend.selectedChatTitle.split(" ")
-                                    root.contactModalFirstName = parts[0] || ""
-                                    root.contactModalLastName = parts.slice(1).join(" ") || ""
-                                    root.contactModalPhone = backend.selectedChatAddress
-                                    root.contactModalEmail = ""
-                                    root.showContactModal = true
-                                }
-                            }
+                            cursorShape: Qt.PointingHandCursor
+                            // The name opens the contact / conversation info (Details, Photos, Links, Files)
+                            ToolTip.visible: containsMouse
+                            ToolTip.text: i18n.tr("Info")
+                            ToolTip.delay: 400
+                            onClicked: root.openContactInfo(0)
                         }
                     }
 
@@ -3160,41 +3189,6 @@ ApplicationWindow {
                                ? 62
                                : Math.round((activeChatHeader.height - height) / 2)
                         spacing: activeChatHeader.compactActionButtons ? 5 : 8
-
-                        // Add / Edit Contact Button
-                        Rectangle {
-                            visible: !backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0
-                            height: 32
-                            radius: 8
-                            width: contactBtnLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: backend.selectedChatHasContact ? theme.lighterBackground : Qt.rgba(10/255, 132/255, 255/255, 0.18)
-                            border.width: 1
-                            border.color: backend.selectedChatHasContact ? theme.muted : theme.accent
-
-                            Text {
-                                id: contactBtnLbl
-                                anchors.centerIn: parent
-                                text: activeChatHeader.ultraCompactActionButtons
-                                          ? (backend.selectedChatHasContact ? ("✎ " + i18n.tr("Contact")) : ("＋ " + i18n.tr("Contact")))
-                                          : (backend.selectedChatHasContact ? ("✎ " + i18n.tr("Edit Contact")) : ("＋ " + i18n.tr("Add Contact")))
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: !backend.selectedChatHasContact
-                                color: backend.selectedChatHasContact ? theme.foreground : theme.accent
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    var parts = backend.selectedChatTitle.split(" ")
-                                    root.contactModalFirstName = parts[0] || ""
-                                    root.contactModalLastName = parts.slice(1).join(" ") || ""
-                                    root.contactModalPhone = backend.selectedChatAddress
-                                    root.contactModalEmail = ""
-                                    root.showContactModal = true
-                                }
-                            }
-                        }
 
                         // Scroll to Top Button
                         Rectangle {
@@ -8680,6 +8674,385 @@ ApplicationWindow {
         }
     }
 
+    // Contact / conversation info: read-only details plus what's been shared
+    Rectangle {
+        id: contactInfoModal
+        objectName: "contactInfoModal"
+        visible: root.showContactInfo
+        // Holds focus while open so Return/typing never reach the composer underneath
+        Keys.onEscapePressed: root.closeContactInfo()
+        Keys.onPressed: (event) => { event.accepted = true }
+        // Over the open conversation only (not the sidebar)
+        readonly property point paneOrigin: {
+            void (conversationPane.x + conversationPane.y + conversationPane.width + conversationPane.height + root.width + root.height)
+            return conversationPane.mapToItem(contactInfoModal.parent, 0, 0)
+        }
+        x: paneOrigin.x
+        y: paneOrigin.y
+        width: conversationPane.width
+        height: conversationPane.height
+        color: "#aa0e0e14"
+        z: 997
+
+        MouseArea {
+            anchors.fill: parent
+            hoverEnabled: true
+            onClicked: root.closeContactInfo()
+        }
+
+        Rectangle {
+            objectName: "contactInfoCard"
+            width: Math.min(560, parent.width - 60)
+            height: Math.min(parent.height - 60, 560)
+            anchors.centerIn: parent
+            radius: theme.radius + 2
+            color: theme.darkBackground
+            border.width: 1
+            border.color: theme.accent
+            MouseArea { anchors.fill: parent }
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.margins: 20
+                spacing: 12
+
+                // Who
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 12
+                    RoundAvatar {
+                        Layout.preferredWidth: 56
+                        Layout.preferredHeight: 56
+                        color: backend.selectedChatColor
+                        source: backend.selectedChatAvatar
+                        initials: backend.selectedChatInitials
+                        fontPixelSize: theme.fontSize + 3
+                    }
+                    ColumnLayout {
+                        Layout.fillWidth: true
+                        spacing: 2
+                        Text {
+                            Layout.fillWidth: true
+                            text: backend.selectedChatTitle
+                            font.pixelSize: theme.fontSize + 3
+                            font.bold: true
+                            color: theme.brightForeground
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: backend.selectedChatSubtitle
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.darkForeground
+                            elide: Text.ElideRight
+                        }
+                    }
+                    Text {
+                        text: "✕"
+                        font.pixelSize: theme.fontSize + 1
+                        color: theme.foreground
+                        Layout.alignment: Qt.AlignTop
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.closeContactInfo()
+                        }
+                    }
+                }
+
+                // Tabs
+                Row {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Repeater {
+                        model: [
+                            i18n.tr("Details"),
+                            i18n.tr("Photos") + " (" + (root.contactInfoMedia.photos || []).length + ")",
+                            i18n.tr("Links") + " (" + (root.contactInfoMedia.links || []).length + ")",
+                            i18n.tr("Files") + " (" + (root.contactInfoMedia.files || []).length + ")"
+                        ]
+                        delegate: Rectangle {
+                            required property string modelData
+                            required property int index
+                            height: 28
+                            width: tabLbl.implicitWidth + 22
+                            radius: 7
+                            color: root.contactInfoTab === index ? theme.accent : (tabMouse.containsMouse ? theme.selection : theme.lighterBackground)
+                            border.width: 1
+                            border.color: root.contactInfoTab === index ? theme.accent : theme.muted
+                            Text {
+                                id: tabLbl
+                                anchors.centerIn: parent
+                                text: modelData
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: root.contactInfoTab === index
+                                color: root.contactInfoTab === index ? theme.darkerBackground : theme.foreground
+                            }
+                            MouseArea {
+                                id: tabMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.contactInfoTab = index
+                            }
+                        }
+                    }
+                }
+
+                StackLayout {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    currentIndex: root.contactInfoTab
+
+                    // 0. Details (read-only)
+                    ColumnLayout {
+                        spacing: 8
+                        ListView {
+                            objectName: "contactInfoDetailRows"
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            clip: true
+                            spacing: 4
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                            model: root.contactInfoDetails.found
+                                   ? (root.contactInfoDetails.rows || [])
+                                   : (backend.selectedChatIsGroup
+                                      ? [{ label: i18n.tr("Group"), value: backend.selectedChatSubtitle }]
+                                      : [{ label: i18n.tr("Address"), value: backend.selectedChatAddress }])
+                            delegate: RowLayout {
+                                required property var modelData
+                                width: ListView.view.width
+                                spacing: 10
+                                Text {
+                                    Layout.preferredWidth: 130
+                                    Layout.alignment: Qt.AlignTop
+                                    text: modelData.label
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.darkForeground
+                                    elide: Text.ElideRight
+                                }
+                                TextEdit {
+                                    Layout.fillWidth: true
+                                    text: modelData.value
+                                    textFormat: TextEdit.PlainText
+                                    readOnly: true
+                                    selectByMouse: true
+                                    wrapMode: TextEdit.Wrap
+                                    font.pixelSize: theme.fontSize - 1
+                                    color: theme.foreground
+                                    selectionColor: theme.selection
+                                }
+                            }
+                        }
+                        Rectangle {
+                            objectName: "contactInfoEditBtn"
+                            visible: !backend.selectedChatIsGroup && backend.selectedChatAddress.length > 0
+                            Layout.alignment: Qt.AlignRight
+                            height: 32
+                            width: editLbl.implicitWidth + 26
+                            radius: 8
+                            color: editInfoMouse.containsMouse ? theme.accent : theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.accent
+                            Text {
+                                id: editLbl
+                                anchors.centerIn: parent
+                                text: backend.selectedChatHasContact ? ("✎ " + i18n.tr("Edit")) : ("＋ " + i18n.tr("Add Contact"))
+                                font.pixelSize: theme.fontSize - 1
+                                font.bold: true
+                                color: editInfoMouse.containsMouse ? theme.darkerBackground : theme.accent
+                            }
+                            MouseArea {
+                                id: editInfoMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                // The card stays underneath; Save/Cancel back out to it
+                                onClicked: root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)
+                            }
+                        }
+                    }
+
+                    // 1. Photos
+                    Item {
+                        GridView {
+                            id: infoPhotoGrid
+                            objectName: "contactInfoPhotos"
+                            anchors.fill: parent
+                            clip: true
+                            cellWidth: Math.floor(width / Math.max(1, Math.floor(width / 120)))
+                            cellHeight: cellWidth
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                            model: root.contactInfoMedia.photos || []
+                            delegate: Item {
+                                required property var modelData
+                                required property int index
+                                width: infoPhotoGrid.cellWidth
+                                height: infoPhotoGrid.cellHeight
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: 3
+                                    radius: 6
+                                    clip: true
+                                    color: theme.lighterBackground
+                                    Image {
+                                        anchors.fill: parent
+                                        source: modelData.localUrl || ""
+                                        sourceSize.width: 240
+                                        asynchronous: true
+                                        autoTransform: true
+                                        fillMode: Image.PreserveAspectCrop
+                                    }
+                                    Text {
+                                        anchors.centerIn: parent
+                                        visible: !(modelData.localUrl || "").length
+                                        text: "📷"
+                                        font.pixelSize: theme.fontSize + 6
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        // Closing the viewer comes back to the Photos tab
+                                        onClicked: root.openPhotoViewer(root.contactInfoMedia.photos, index)
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            visible: infoPhotoGrid.count === 0
+                            text: i18n.tr("No photos in this conversation yet")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
+                        }
+                    }
+
+                    // 2. Links
+                    Item {
+                        ListView {
+                            id: infoLinkList
+                            objectName: "contactInfoLinks"
+                            anchors.fill: parent
+                            clip: true
+                            spacing: 4
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                            model: root.contactInfoMedia.links || []
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: ListView.view.width
+                                height: linkCol.implicitHeight + 12
+                                radius: 6
+                                color: linkMouse.containsMouse ? theme.lighterBackground : "transparent"
+                                ColumnLayout {
+                                    id: linkCol
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.margins: 8
+                                    spacing: 1
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.title || modelData.host || modelData.url
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: modelData.url + "  ·  " + Qt.formatDate(new Date(Number(modelData.date || 0)), "MMM d, yyyy")
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: theme.accent
+                                        elide: Text.ElideMiddle
+                                    }
+                                }
+                                MouseArea {
+                                    id: linkMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.openUrl(modelData.url)
+                                }
+                            }
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            visible: infoLinkList.count === 0
+                            text: i18n.tr("No links in this conversation yet")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
+                        }
+                    }
+
+                    // 3. Files
+                    Item {
+                        ListView {
+                            id: infoFileList
+                            objectName: "contactInfoFiles"
+                            anchors.fill: parent
+                            clip: true
+                            spacing: 4
+                            boundsBehavior: Flickable.StopAtBounds
+                            ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                            model: root.contactInfoMedia.files || []
+                            delegate: Rectangle {
+                                required property var modelData
+                                width: ListView.view.width
+                                height: 44
+                                radius: 6
+                                color: fileMouse.containsMouse ? theme.lighterBackground : "transparent"
+                                RowLayout {
+                                    anchors.fill: parent
+                                    anchors.leftMargin: 8
+                                    anchors.rightMargin: 8
+                                    spacing: 10
+                                    Text {
+                                        text: (modelData.mimeType || "").indexOf("audio/") === 0 ? "🎵"
+                                              : ((modelData.mimeType || "").indexOf("video/") === 0 ? "🎬" : "📎")
+                                        font.pixelSize: theme.fontSize + 2
+                                    }
+                                    ColumnLayout {
+                                        Layout.fillWidth: true
+                                        spacing: 1
+                                        Text {
+                                            Layout.fillWidth: true
+                                            text: modelData.name || i18n.tr("Attachment")
+                                            font.pixelSize: theme.fontSize - 1
+                                            color: theme.brightForeground
+                                            elide: Text.ElideMiddle
+                                        }
+                                        Text {
+                                            text: (modelData.fromMe ? i18n.tr("You") : backend.selectedChatTitle) + "  ·  " + Qt.formatDate(new Date(Number(modelData.date || 0)), "MMM d, yyyy")
+                                            font.pixelSize: theme.fontSize - 3
+                                            color: theme.darkForeground
+                                        }
+                                    }
+                                }
+                                MouseArea {
+                                    id: fileMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.openAttachment(modelData.guid, modelData.name || "")
+                                }
+                            }
+                        }
+                        Text {
+                            anchors.centerIn: parent
+                            visible: infoFileList.count === 0
+                            text: i18n.tr("No files in this conversation yet")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Add / Edit Contact Modal Overlay
     Rectangle {
         visible: root.showContactModal
@@ -8693,8 +9066,9 @@ ApplicationWindow {
         }
 
         Rectangle {
+            objectName: "contactModalCard"
             width: 440
-            height: 410
+            height: root.contactModalRows.length > 0 ? Math.min(parent.height - 80, 410 + 34 + root.contactModalRows.length * 40) : 410
             anchors.centerIn: parent
             radius: theme.radius + 2
             color: theme.darkBackground
@@ -8844,7 +9218,51 @@ ApplicationWindow {
                     }
                 }
 
-                Item { Layout.fillHeight: true }
+                // Everything else the Mac has for this contact (read-only)
+                Text {
+                    visible: root.contactModalRows.length > 0
+                    text: i18n.tr("On your Mac")
+                    font.pixelSize: theme.fontSize - 1
+                    font.bold: true
+                    color: theme.accent
+                }
+                ListView {
+                    objectName: "contactDetailRows"
+                    visible: root.contactModalRows.length > 0
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 4
+                    model: root.contactModalRows
+                    boundsBehavior: Flickable.StopAtBounds
+                    ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+                    delegate: RowLayout {
+                        required property var modelData
+                        width: ListView.view.width
+                        spacing: 10
+                        Text {
+                            Layout.preferredWidth: 130
+                            Layout.alignment: Qt.AlignTop
+                            text: modelData.label
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.darkForeground
+                            elide: Text.ElideRight
+                        }
+                        TextEdit {
+                            Layout.fillWidth: true
+                            text: modelData.value
+                            textFormat: TextEdit.PlainText
+                            readOnly: true
+                            selectByMouse: true
+                            wrapMode: TextEdit.Wrap
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.foreground
+                            selectionColor: theme.selection
+                        }
+                    }
+                }
+
+                Item { Layout.fillHeight: true; visible: root.contactModalRows.length === 0 }
 
                 RowLayout {
                     Layout.fillWidth: true
@@ -10116,12 +10534,7 @@ ApplicationWindow {
                             chatContextMenuPopup.visible = false
                             if (g.length > 0) {
                                 backend.selectChat(g)
-                                var parts = t.split(" ")
-                                root.contactModalFirstName = parts[0] || ""
-                                root.contactModalLastName = parts.slice(1).join(" ") || ""
-                                root.contactModalPhone = addr.length > 0 ? addr : backend.selectedChatAddress
-                                root.contactModalEmail = ""
-                                root.showContactModal = true
+                                root.openContactModal(addr.length > 0 ? addr : backend.selectedChatAddress, t)
                             }
                         }
                     }
