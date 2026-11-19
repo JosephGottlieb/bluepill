@@ -1332,10 +1332,16 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool fromUser
     return url;
 }
 
+// "ssh://..." or a scheme-less "user@host"; http(s)://user@host is a URL with userinfo.
+static bool isSshStyleServerUrl(const QString &trimmed) {
+    if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) return true;
+    return !trimmed.contains(QStringLiteral("://")) && trimmed.contains(QLatin1Char('@'));
+}
+
 static const QRegularExpression &serverUrlPortRegex() {
     // [scheme://] host-or-[ipv6] :port [rest]
     static const QRegularExpression re(
-        QStringLiteral(R"(^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:\[[^\]]+\]|[^/:?#@\s]+)):(\d{1,5})(?=[/?#]|\s*$)(.*)$)"),
+        QStringLiteral(R"(^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:[^/?#@\s]+@)?(?:\[[^\]]+\]|[^/:?#@\s]+)):(\d{1,5})(?=[/?#]|\s*$)(.*)$)"),
         QRegularExpression::DotMatchesEverythingOption);
     return re;
 }
@@ -1345,7 +1351,7 @@ QVariantMap Backend::splitServerUrl(const QString &rawUrl, bool hideDefaultPort)
     out.insert(QStringLiteral("url"), rawUrl);
     out.insert(QStringLiteral("port"), QString());
     const QString trimmed = rawUrl.trimmed();
-    if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) || trimmed.contains(QLatin1Char('@'))) {
+    if (isSshStyleServerUrl(trimmed)) {
         return out;
     }
     const QRegularExpressionMatch m = serverUrlPortRegex().match(trimmed);
@@ -1362,7 +1368,7 @@ QVariantMap Backend::splitServerUrl(const QString &rawUrl, bool hideDefaultPort)
 QString Backend::composeServerUrl(const QString &rawUrl, const QString &port) {
     const QString trimmed = rawUrl.trimmed();
     if (trimmed.isEmpty()) return QString();
-    if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) || trimmed.contains(QLatin1Char('@'))) {
+    if (isSshStyleServerUrl(trimmed)) {
         return normalizeServerEndpointUrl(trimmed);
     }
     const QVariantMap split = splitServerUrl(trimmed);
@@ -1451,6 +1457,13 @@ void Backend::probeTailscaleRelay(const QString &key, const QString &baseUrl, bo
     ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
     req.setSslConfiguration(ssl);
     QNetworkReply *reply = m_nam.get(req);
+    // Only the status code matters; never buffer more than a small body, and
+    // stop as soon as a peer sends more than that.
+    constexpr qint64 kProbeMaxBody = 4096;
+    reply->setReadBufferSize(kProbeMaxBody);
+    connect(reply, &QNetworkReply::readyRead, reply, [reply]() {
+        if (reply->bytesAvailable() >= kProbeMaxBody) reply->abort();
+    });
     connect(reply, &QNetworkReply::finished, this, [this, reply, key, baseUrl, allowIpFallback]() {
         reply->deleteLater();
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
@@ -1546,7 +1559,7 @@ void Backend::discoverTailscaleRelays() {
 
 bool Backend::isSameServerEndpoint(const QString &a, const QString &b) {
     const QString ta = a.trimmed(), tb = b.trimmed();
-    if (ta.compare(tb, Qt::CaseInsensitive) == 0) return true;
+    if (ta == tb) return true;  // scheme/host case is handled below; path and user are case-sensitive
     if (ta.isEmpty() || tb.isEmpty()) return false;
     const QUrl ua(ta), ub(tb);
     if (!ua.isValid() || !ub.isValid() || ua.host().isEmpty() || ub.host().isEmpty()) return false;
@@ -2343,8 +2356,40 @@ bool Backend::isTrustedPasswordTransportUrl(const QUrl &url) {
         if (addr.setAddress(host) && addr.isLoopback()) {
             return true;
         }
+        // Tailscale: WireGuard already encrypts the tunnel end to end.
+        if (host.endsWith(QStringLiteral(".ts.net"))) return true;
+        // Private networks (bluepill-server serves plain HTTP on :1235 by
+        // default): RFC 1918, link-local, IPv6 ULA, mDNS names. Public
+        // hosts still need https:// for the password.
+        if (host.endsWith(QStringLiteral(".local"))) return true;
+        if (!addr.isNull()) {
+            if (addr.protocol() == QAbstractSocket::IPv6Protocol) {
+                bool isV4 = false;
+                const QHostAddress v4(addr.toIPv4Address(&isV4));
+                if (isV4) addr = v4;
+            }
+            static const QList<QPair<QHostAddress, int>> kTrustedHttpSubnets = {
+                QHostAddress::parseSubnet(QStringLiteral("100.64.0.0/10")),        // Tailscale CGNAT
+                QHostAddress::parseSubnet(QStringLiteral("fd7a:115c:a1e0::/48")),  // Tailscale IPv6
+                QHostAddress::parseSubnet(QStringLiteral("10.0.0.0/8")),
+                QHostAddress::parseSubnet(QStringLiteral("172.16.0.0/12")),
+                QHostAddress::parseSubnet(QStringLiteral("192.168.0.0/16")),
+                QHostAddress::parseSubnet(QStringLiteral("169.254.0.0/16")),
+                QHostAddress::parseSubnet(QStringLiteral("fc00::/7")),
+                QHostAddress::parseSubnet(QStringLiteral("fe80::/10")),
+            };
+            for (const auto &subnet : kTrustedHttpSubnets) {
+                if (addr.isInSubnet(subnet)) return true;
+            }
+        }
     }
     return false;
+}
+
+bool Backend::isPasswordTransportAllowed(const QString &url) {
+    const QString trimmed = url.trimmed();
+    if (trimmed.isEmpty() || trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive)) return true;
+    return isTrustedPasswordTransportUrl(QUrl(trimmed));
 }
 
 QUrl Backend::buildApiUrl(const QString &apiPath, const QList<QPair<QString, QString>> &queryItems) const {

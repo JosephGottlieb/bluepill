@@ -192,8 +192,9 @@ mkdir -p "${CLIENT_DIR}"
 chmod 700 "${CLIENT_DIR}"
 
 CLIENT_CFG="${CLIENT_DIR}/config.json"
-# Use the address/port the relay actually listens on: the Mac's BIND_HOST and the
-# "port" from its server.json (older installs may still use 1234; Homebrew uses 1235).
+# Point at the relay's port (the "port" from its server.json; older installs may still
+# use 1234, Homebrew uses 1235) on an address this machine can reach: the Mac's BIND_HOST,
+# or, if BIND_HOST is 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
 RELAY_URL="${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}"
 RELAY_TOKEN="${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}"
 

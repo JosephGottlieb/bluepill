@@ -507,7 +507,10 @@ public:
     }
     static bool hasNonEmptyWavDataChunk(const QString &filePath);
     static bool isTrustedPasswordTransportUrl(const QUrl &url);
+    // QML: false when Settings would save an http:// URL the guard above refuses.
+    Q_INVOKABLE static bool isPasswordTransportAllowed(const QString &url);
     QNetworkRequest makeRequestForTest(const QString &pathAndQuery) const { return makeRequest(pathAndQuery); }
+    void setTailscaleRelaysForTest(const QVariantList &relays) { setTailscaleScanState(relays, QStringLiteral("done"), false); }
     quint64 serverEndpointGenerationForTest() const { return m_serverEndpointGeneration; }
     bool supportsBatchMessageGuidInQueryForTest() const { return m_supportsBatchMessageGuidInQuery; }
     bool isExpiredPendingDeliveryForTest(const QString &msgGuid) const { return m_expiredPendingDeliveryGuids.contains(msgGuid); }

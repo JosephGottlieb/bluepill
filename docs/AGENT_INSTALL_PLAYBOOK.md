@@ -226,8 +226,10 @@ mkdir -p "${CLIENT_CONFIG_DIR}"
 chmod 700 "${CLIENT_CONFIG_DIR}"
 
 CLIENT_CONFIG="${CLIENT_CONFIG_DIR}/config.json"
-# Use the relay's real address and the "port" from its server.json (older installs
-# may still use 1234; Homebrew uses 1235). Or ssh://user@mac-host / https://relay.example.com:443
+# Point at the relay's port (the "port" from its server.json; older installs may still
+# use 1234, Homebrew uses 1235) on an address this machine can reach: the Mac's bind
+# address, or, if it binds 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
+# Or ssh://user@mac-host / https://relay.example.com:443
 RELAY_URL="http://127.0.0.1:1235"
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
 
@@ -290,13 +292,16 @@ fi
 Run this non-interactive verification script to validate complete connectivity across all components:
 
 ```bash
-RELAY_HOST="127.0.0.1:1235" # Same host:port as RELAY_URL in Step 3.2
+RELAY_URL="http://127.0.0.1:1235" # Same value as RELAY_URL in Step 3.2 (scheme included)
 RELAY_PWD="CHANGE_ME_TO_A_SECURE_TOKEN"
+RELAY_ADDR="${RELAY_URL%/}"
+# These HTTP checks can't test an ssh:// relay: for SSH mode, run them on the Mac
+# against http://127.0.0.1:1235 instead (e.g. via `ssh user@mac-host`).
 
 echo "=== BluePill End-to-End Validation ==="
 
 # 1. Ping Check
-PING_RESP=$(timeout 5s curl -s -f "http://${RELAY_HOST}/api/v1/ping?password=${RELAY_PWD}" </dev/null || echo "FAILED")
+PING_RESP=$(timeout 5s curl -s -f "${RELAY_ADDR}/api/v1/ping?password=${RELAY_PWD}" </dev/null || echo "FAILED")
 if [[ "$PING_RESP" == *"pong"* ]]; then
     echo "[✓] REST Ping: OK"
 else
@@ -304,13 +309,13 @@ else
 fi
 
 # 2. Server Info & Private API Check
-INFO_RESP=$(timeout 5s curl -s -f "http://${RELAY_HOST}/api/v1/server/info?password=${RELAY_PWD}" </dev/null || echo "{}")
+INFO_RESP=$(timeout 5s curl -s -f "${RELAY_ADDR}/api/v1/server/info?password=${RELAY_PWD}" </dev/null || echo "{}")
 OS_VER=$(echo "$INFO_RESP" | jq -r '.data.os_version // "Unknown"')
 PRIV_API=$(echo "$INFO_RESP" | jq -r '.data.private_api // false')
 echo "[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}"
 
 # 3. Web UI Accessibility Check
-WEB_CODE=$(timeout 5s curl -s -o /dev/null -w "%{http_code}" "http://${RELAY_HOST}/web" </dev/null || echo "000")
+WEB_CODE=$(timeout 5s curl -s -o /dev/null -w "%{http_code}" "${RELAY_ADDR}/web" </dev/null || echo "000")
 if [[ "$WEB_CODE" == "200" ]]; then
     echo "[✓] Embedded Web UI: OK (HTTP 200)"
 else
@@ -318,7 +323,7 @@ else
 fi
 
 # 4. Chat Query Check
-CHAT_RESP=$(timeout 5s curl -s -f -X POST "http://${RELAY_HOST}/api/v1/chat/query?password=${RELAY_PWD}" \
+CHAT_RESP=$(timeout 5s curl -s -f -X POST "${RELAY_ADDR}/api/v1/chat/query?password=${RELAY_PWD}" \
     -H "Content-Type: application/json" -d '{"limit": 5, "offset": 0}' </dev/null || echo "FAILED")
 if [[ "$CHAT_RESP" == *"\"status\":200"* ]] || [[ "$CHAT_RESP" == *"\"data\":"* ]]; then
     echo "[✓] Chat Database Query: OK"

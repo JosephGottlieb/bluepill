@@ -8876,14 +8876,25 @@ ApplicationWindow {
                         model: backend.tailscaleRelays
                         delegate: Rectangle {
                             readonly property bool isRelay: modelData.probeState === "relay"
+                            readonly property string relayName: modelData.name
                             readonly property bool isSelected: root.composedPrimaryServerUrl() === modelData.url
                             objectName: "tailscaleRelayRow"
                             Layout.fillWidth: true
                             implicitHeight: relayRowCol.implicitHeight + 14
                             radius: 6
                             color: isSelected ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: isSelected ? theme.accent : theme.muted
+                            border.width: activeFocus ? 2 : 1
+                            border.color: (isSelected || activeFocus) ? theme.accent : theme.muted
+                            activeFocusOnTab: true
+                            Accessible.role: Accessible.Button
+                            Accessible.name: modelData.name + " " + modelData.url
+                            function selectRelay() {
+                                root.loadPrimaryServerFields(modelData.url)
+                                serverPasswordInput.forceActiveFocus()
+                            }
+                            Keys.onReturnPressed: selectRelay()
+                            Keys.onEnterPressed: selectRelay()
+                            Keys.onSpacePressed: selectRelay()
                             ColumnLayout {
                                 id: relayRowCol
                                 anchors.left: parent.left
@@ -8930,10 +8941,7 @@ ApplicationWindow {
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.loadPrimaryServerFields(modelData.url)
-                                    serverPasswordInput.forceActiveFocus()
-                                }
+                                onClicked: parent.selectRelay()
                             }
                         }
                     }
@@ -8943,7 +8951,8 @@ ApplicationWindow {
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
-                    readonly property bool isSshUrl: /^ssh:\/\//i.test(serverUrlInput.text.trim()) || serverUrlInput.text.indexOf("@") >= 0
+                    // ssh://... or scheme-less user@host; http(s)://user@host is a normal URL
+                    readonly property bool isSshUrl: /^ssh:\/\//i.test(serverUrlInput.text.trim()) || (serverUrlInput.text.indexOf("://") < 0 && serverUrlInput.text.indexOf("@") >= 0)
                     id: primaryServerFields
                     RowLayout {
                         Layout.fillWidth: true
@@ -9049,6 +9058,16 @@ ApplicationWindow {
                                 }
                             }
                         }
+                    }
+                    Text {
+                        objectName: "serverUrlCleartextWarning"
+                        Layout.fillWidth: true
+                        visible: serverUrlInput.text.trim().length > 0 && !primaryServerFields.isSshUrl
+                                 && !backend.isPasswordTransportAllowed(root.composedPrimaryServerUrl())
+                        text: i18n.tr("Plain http:// only works on localhost, Tailscale, or a private LAN address. For a public host, use https:// (a TLS reverse proxy).")
+                        font.pixelSize: theme.fontSize - 3
+                        color: theme.red
+                        wrapMode: Text.WordWrap
                     }
                 }
 

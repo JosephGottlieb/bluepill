@@ -15,6 +15,7 @@
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
+#include <functional>
 #include <QtTest>
 
 #include "backend.h"
@@ -2995,6 +2996,40 @@ private slots:
         QVERIFY(!same("https://relay.example.com", "https://other.example.com"));
         QVERIFY(!same("https://relay.example.com/bb", "https://relay.example.com"));
         QVERIFY(!same("", "https://relay.example.com"));
+        // Path and user name are case-sensitive; only scheme and host are not.
+        QVERIFY(same("HTTPS://RELAY.example.com/bb", "https://relay.example.com/bb"));
+        QVERIFY(!same("https://relay.example.com/Relay", "https://relay.example.com/relay"));
+        QVERIFY(!same("https://Alex@relay.example.com", "https://alex@relay.example.com"));
+    }
+
+    void testCleartextPasswordTransportAllowsTailscaleAndPrivateLan() {
+        auto ok = [](const char *u) { return Backend::isTrustedPasswordTransportUrl(QUrl(QString::fromUtf8(u))); };
+        // Tailscale (WireGuard-encrypted)
+        QVERIFY(ok("http://100.100.1.2:1235/api/v1/ping"));
+        QVERIFY(ok("http://[fd7a:115c:a1e0::1]:1235/api/v1/ping"));
+        QVERIFY(ok("http://studio.tailnet-example.ts.net:1235/api/v1/ping"));
+        QVERIFY(ok("ws://studio.tailnet-example.ts.net:1235/socket.io/"));
+        // Private LAN
+        QVERIFY(ok("http://10.0.0.5:1235"));
+        QVERIFY(ok("http://172.16.4.2:1235"));
+        QVERIFY(ok("http://192.168.1.50:1235"));
+        QVERIFY(ok("http://169.254.10.1:1235"));
+        QVERIFY(ok("http://[fd00::5]:1235"));
+        QVERIFY(ok("http://[fe80::1]:1235"));
+        QVERIFY(ok("http://[::ffff:192.168.1.50]:1235"));
+        QVERIFY(ok("http://mac-relay.local:1235"));
+        // Public / unknown hosts still need TLS
+        QVERIFY(!ok("http://relay.example.com:1235"));
+        QVERIFY(!ok("http://203.0.113.5:1235"));
+        QVERIFY(!ok("http://172.32.0.1:1235"));
+        QVERIFY(!ok("http://100.128.0.1:1235"));
+        QVERIFY(!ok("http://evil.ts.net.example.com:1235"));
+        QVERIFY(!ok("http://my-mac:1235"));
+        QVERIFY(ok("https://relay.example.com"));
+        // QML helper: SSH and empty fields never warn
+        QVERIFY(Backend::isPasswordTransportAllowed(QStringLiteral("ssh://user@mac.local")));
+        QVERIFY(Backend::isPasswordTransportAllowed(QString()));
+        QVERIFY(!Backend::isPasswordTransportAllowed(QStringLiteral("http://relay.example.com:1235")));
     }
 
     void testResavingUnchangedSettingsKeepsEndpointsAndPendingEdits() {
@@ -3042,6 +3077,31 @@ private slots:
         QCOMPARE(b.serverUrl(), QStringLiteral("https://other.invalid:1235"));
         QCOMPARE(b.secondaryServerUrl(), QStringLiteral("http://backup2.invalid:1235"));
         QVERIFY(!b.hasPendingIcloudNoteSaveForTest(noteId));
+
+        // A path that differs only in case is a real edit and must be saved
+        b.saveServerConfig(QStringLiteral("https://other.invalid:1235/Relay"), QString(), QString());
+        b.saveServerConfig(QStringLiteral("https://other.invalid:1235/relay"), QString(), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://other.invalid:1235/relay"));
+
+        // http(s)://user@host is a URL, not SSH: unchanged re-saves keep the
+        // saved endpoint (implicit 443 and explicit port) and pending edits.
+        for (const QString &saved : {QStringLiteral("https://alex@relay.invalid"), QStringLiteral("https://alex@relay.invalid:8080")}) {
+            {
+                QFile f(cfgPath);
+                QVERIFY(f.open(QIODevice::WriteOnly | QIODevice::Truncate));
+                f.write(QJsonDocument(QJsonObject{{QStringLiteral("serverUrl"), saved},
+                                                  {QStringLiteral("password"), QStringLiteral("pw")}}).toJson());
+            }
+            b.setConfigFilePath(cfgPath);
+            QCOMPARE(b.serverUrl(), saved);
+            const QString id = b.saveIcloudNote(QStringLiteral("note_userinfo"), QStringLiteral("Draft"), QStringLiteral("Body"), QStringLiteral("Notes"));
+            QVERIFY(b.hasPendingIcloudNoteSaveForTest(id));
+            const QVariantMap fields = Backend::splitServerUrl(saved, true);
+            const QString port = fields.value(QStringLiteral("port")).toString().isEmpty() ? QStringLiteral("443") : fields.value(QStringLiteral("port")).toString();
+            b.saveServerConfig(Backend::composeServerUrl(fields.value(QStringLiteral("url")).toString(), port), QString(), QString());
+            QCOMPARE(b.serverUrl(), saved);
+            QVERIFY(b.hasPendingIcloudNoteSaveForTest(id));
+        }
     }
 
     void testServerUrlDefaultsToHttpAndRelayPort() {
@@ -3082,6 +3142,9 @@ private slots:
         QCOMPARE(split("http://[2001:db8::2]:9000"), QStringLiteral("http://[2001:db8::2]|9000"));
         QCOMPARE(split("my-mac"), QStringLiteral("my-mac|"));
         QCOMPARE(split("user@mac.local"), QStringLiteral("user@mac.local|"));
+        QCOMPARE(split("ssh://user@mac.local:2222"), QStringLiteral("ssh://user@mac.local:2222|"));
+        QCOMPARE(split("https://alex@relay.example.com:8080/bb"), QStringLiteral("https://alex@relay.example.com/bb|8080"));
+        QCOMPARE(split("https://alex@relay.example.com"), QStringLiteral("https://alex@relay.example.com|"));
         QCOMPARE(split("my-mac:99999"), QStringLiteral("my-mac:99999|"));
 
         auto compose = [](const char *u, const char *p) {
@@ -3094,6 +3157,8 @@ private slots:
         QCOMPARE(compose("https://relay.example.com/bb", "8443"), QStringLiteral("https://relay.example.com:8443/bb"));
         QCOMPARE(compose("my-mac:5000", "4000"), QStringLiteral("http://my-mac:5000"));  // inline wins
         QCOMPARE(compose("user@mac.local", "4000"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(compose("https://alex@relay.example.com", "443"), QStringLiteral("https://alex@relay.example.com:443"));
+        QCOMPARE(compose("https://alex@relay.example.com", ""), QStringLiteral("https://alex@relay.example.com:1235"));
         QCOMPARE(compose("", "4000"), QString());
         // Round trip: what the dialog loads composes back to the saved URL
         const QVariantMap loaded = Backend::splitServerUrl(QStringLiteral("http://mac-relay.example.com:1235"), true);
@@ -3150,6 +3215,50 @@ private slots:
         portIn->setProperty("text", QString());
         b.saveServerConfig(call("composedPrimaryServerUrl").toString(), QString(), QStringLiteral("pw"));
         QCOMPARE(b.serverUrl(), QStringLiteral("http://my-mac.local:1235"));
+
+        // Show the dialog so visibility below is the effective on-screen state
+        root->setProperty("showServerConfigModal", true);
+        QCoreApplication::processEvents();
+
+        // Cleartext warning: shown for a public http:// host, hidden for LAN/Tailscale
+        QObject *warn = root->findChild<QObject *>(QStringLiteral("serverUrlCleartextWarning"));
+        QVERIFY(warn);
+        urlIn->setProperty("text", QStringLiteral("http://relay.example.com"));
+        portIn->setProperty("text", QString());
+        QVERIFY(warn->property("visible").toBool());
+        urlIn->setProperty("text", QStringLiteral("192.168.1.50"));
+        QVERIFY(!warn->property("visible").toBool());
+
+        // Discovered relay rows are keyboard-focusable and Return selects one
+        urlIn->setProperty("text", QString());
+        portIn->setProperty("text", QString());
+        b.setTailscaleRelaysForTest(QVariantList{
+            QVariantMap{{"name", "Air"}, {"host", "air.tailnet-example.ts.net"}, {"ip", "100.100.1.3"},
+                        {"url", "http://air.tailnet-example.ts.net:1235"}, {"key", "air"}, {"probeState", "relay"}},
+            QVariantMap{{"name", "Studio"}, {"host", "studio.tailnet-example.ts.net"}, {"ip", "100.100.1.2"},
+                        {"url", "http://studio.tailnet-example.ts.net:1235"}, {"key", "studio"}, {"probeState", "relay"}}});
+        QCoreApplication::processEvents();
+        QQuickItem *studioRow = nullptr;
+        // Repeater delegates have no QObject parent, so walk the visual tree.
+        std::function<void(QQuickItem *)> findRow = [&](QQuickItem *item) {
+            if (!item || studioRow) return;
+            if (item->objectName() == QStringLiteral("tailscaleRelayRow") &&
+                item->property("relayName").toString() == QStringLiteral("Studio")) {
+                studioRow = item;
+                return;
+            }
+            for (QQuickItem *child : item->childItems()) findRow(child);
+        };
+        auto *window = qobject_cast<QQuickWindow *>(root);
+        QVERIFY(window);
+        findRow(window->contentItem());
+        QVERIFY(studioRow);
+        QVERIFY(studioRow->activeFocusOnTab());
+        studioRow->forceActiveFocus();
+        QVERIFY(studioRow->hasActiveFocus());
+        QTest::keyClick(studioRow->window(), Qt::Key_Return);
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("http://studio.tailnet-example.ts.net"));
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("http://studio.tailnet-example.ts.net:1235"));
     }
 
     void testParseTailscaleMacPeers() {
