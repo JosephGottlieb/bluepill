@@ -189,6 +189,75 @@ def apple_ts_to_epoch_ms(val: Any) -> int:
     return int(v * 1000 + APPLE_EPOCH_OFFSET_MS)
 
 
+
+def _sqlite_columns(conn: sqlite3.Connection, table: str) -> set:
+    """Column names of a table ("" set when the table doesn't exist)."""
+    try:
+        return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def _clean_ab_label(raw: Any) -> str:
+    """AddressBook labels look like "_$!<Mobile>!$_"; custom labels are plain text."""
+    label = str(raw or "").strip()
+    m = re.match(r"^_\$!<(.+)>!\$_$", label)
+    return (m.group(1) if m else label).strip()
+
+
+def _ab_birthday(raw: Any, yearless: bool = False) -> str:
+    """ZBIRTHDAY is seconds since 2001-01-01 UTC. Returns YYYY-MM-DD, or --MM-DD without a year."""
+    try:
+        dt = datetime.datetime(2001, 1, 1, tzinfo=datetime.timezone.utc) + datetime.timedelta(seconds=float(raw))
+    except (TypeError, ValueError, OverflowError):
+        return ""
+    # Contacts stores the day either at noon UTC or at local midnight of the
+    # zone it was entered in (07:00 UTC in California, 15:00 the day before in
+    # Tokyo, 10:00 the day before in Kiribati).
+    local = dt.astimezone()
+    minutes = dt.hour * 60 + dt.minute
+    if local.hour == 0 and local.minute == 0:
+        day = local.date()  # midnight in this Mac's zone (also settles 10:00-11:59 UTC)
+    elif minutes <= 12 * 60:
+        day = dt.date()  # noon UTC, or midnight west of UTC (offset -0..-12h)
+    else:
+        day = (dt + datetime.timedelta(days=1)).date()  # midnight east of UTC (+0..+14h)
+    dt = datetime.datetime(day.year, day.month, day.day)
+    # Apple stores year-less birthdays in 1604.
+    return dt.strftime("--%m-%d") if yearless or dt.year == 1604 else dt.strftime("%Y-%m-%d")
+
+
+def _image_mime(data: bytes) -> str:
+    if data.startswith(b"\x89PNG"):
+        return "image/png"
+    if data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return "image/webp"
+    if len(data) >= 12 and data[4:8] == b"ftyp":
+        return "image/heic"
+    return "image/jpeg"
+
+
+def _ab_image_bytes(blob: Any, images_dir: str) -> bytes:
+    """AddressBook photo blobs are the image itself, often with a leading 0x01
+    marker byte, or (newer macOS) a reference to a file in the source's Images/."""
+    if not blob:
+        return b""
+    data = bytes(blob)
+    if data[:1] == b"\x01":
+        data = data[1:]
+    if data.startswith(b"\xff\xd8") or data.startswith(b"\x89PNG") or data[4:8] == b"ftyp" or data[:4] == b"RIFF":
+        return data
+    ref = data.split(b"\x00", 1)[0].decode("utf-8", errors="ignore").strip()
+    if ref and re.fullmatch(r"[A-Za-z0-9_.:-]{8,128}", ref):
+        path = os.path.join(images_dir, ref)
+        if os.path.isfile(path):
+            try:
+                with open(path, "rb") as fh:
+                    return fh.read(8 * 1024 * 1024)
+            except OSError:
+                return b""
+    return b""
+
 def epoch_ms_to_apple_ns(epoch_ms: int) -> int:
     """Convert Unix epoch milliseconds to Apple chat.db nanoseconds since 2001-01-01."""
     if epoch_ms <= 0:
@@ -1860,7 +1929,8 @@ class BluePillEngine:
                 return self._contacts_cache
 
         contacts: List[Dict[str, Any]] = []
-        seen_keys = set()
+        seen_keys: Dict[Tuple[Any, ...], Dict[str, Any]] = {}
+        avatar_index: Dict[str, Tuple[str, int]] = {}
 
         # 1. Load from BlueBubbles config.db contact + contact_address tables (if present)
         if os.path.exists(self.bb_config_db_path):
@@ -1906,9 +1976,7 @@ class BluePillEngine:
                     )
                     if dedup_key in seen_keys:
                         continue
-                    seen_keys.add(dedup_key)
-                    contacts.append(
-                        {
+                    bb_contact = {
                             "id": f"bb-{cid}",
                             "firstName": first,
                             "lastName": last,
@@ -1920,7 +1988,8 @@ class BluePillEngine:
                             "birthday": "",
                             "avatar": str(r["avatar"] or ""),
                         }
-                    )
+                    seen_keys[dedup_key] = bb_contact
+                    contacts.append(bb_contact)
             except Exception:
                 pass
 
@@ -1933,44 +2002,81 @@ class BluePillEngine:
                 uri = f"file:{urllib.parse.quote(os.path.abspath(db_file))}?mode=ro"
                 conn = sqlite3.connect(uri, uri=True, timeout=2.0)
                 conn.row_factory = sqlite3.Row
+                rec_cols = _sqlite_columns(conn, "ZABCDRECORD")
+                photo_cols = [c for c in ("ZTHUMBNAILIMAGEDATA", "ZIMAGEDATA") if c in rec_cols]
+                optional = [c for c in ("ZMIDDLENAME", "ZNICKNAME", "ZORGANIZATION", "ZNAME", "ZJOBTITLE",
+                                        "ZDEPARTMENT", "ZBIRTHDAY", "ZBIRTHDAYYEARLESS") if c in rec_cols]
+                where = " OR ".join(f"{c} IS NOT NULL" for c in ("ZFIRSTNAME", "ZLASTNAME", "ZORGANIZATION", "ZNICKNAME")
+                                    if c in rec_cols) or "1"
                 records = conn.execute(
-                    """
-                    SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME, ZMIDDLENAME,
-                           ZNICKNAME, ZORGANIZATION, ZNAME
-                    FROM ZABCDRECORD
-                    WHERE ZFIRSTNAME IS NOT NULL
-                       OR ZLASTNAME IS NOT NULL
-                       OR ZORGANIZATION IS NOT NULL
-                       OR ZNICKNAME IS NOT NULL
-                    """
+                    f"SELECT Z_PK, ZUNIQUEID, ZFIRSTNAME, ZLASTNAME{''.join(', ' + c for c in optional)} "
+                    f"FROM ZABCDRECORD WHERE {where}"
                 ).fetchall()
                 if not records:
                     conn.close()
                     continue
 
-                phones_by_owner: Dict[int, List[Dict[str, str]]] = {}
-                try:
-                    for prow in conn.execute(
-                        "SELECT ZOWNER, ZFULLNUMBER, ZLABEL FROM ZABCDPHONENUMBER WHERE ZFULLNUMBER IS NOT NULL"
-                    ):
-                        owner = prow["ZOWNER"]
-                        num = (prow["ZFULLNUMBER"] or "").strip()
-                        if owner and num:
-                            phones_by_owner.setdefault(int(owner), []).append({"address": num})
-                except sqlite3.Error:
-                    pass
+                def labeled(table: str, value_col: str) -> Dict[int, List[Dict[str, str]]]:
+                    out: Dict[int, List[Dict[str, str]]] = {}
+                    cols = _sqlite_columns(conn, table)
+                    if not cols or value_col not in cols or "ZOWNER" not in cols:
+                        return out
+                    label_sel = ", ZLABEL" if "ZLABEL" in cols else ""
+                    try:
+                        for row in conn.execute(
+                            f"SELECT ZOWNER, {value_col}{label_sel} FROM {table} WHERE {value_col} IS NOT NULL"
+                        ):
+                            owner = row["ZOWNER"]
+                            val = str(row[value_col] or "").strip()
+                            if owner and val:
+                                entry = {"address": val}
+                                label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
+                                if label:
+                                    entry["label"] = label
+                                out.setdefault(int(owner), []).append(entry)
+                    except sqlite3.Error:
+                        pass
+                    return out
 
-                emails_by_owner: Dict[int, List[Dict[str, str]]] = {}
-                try:
-                    for erow in conn.execute(
-                        "SELECT ZOWNER, ZADDRESS, ZLABEL FROM ZABCDEMAILADDRESS WHERE ZADDRESS IS NOT NULL"
-                    ):
-                        owner = erow["ZOWNER"]
-                        addr = (erow["ZADDRESS"] or "").strip()
-                        if owner and addr:
-                            emails_by_owner.setdefault(int(owner), []).append({"address": addr})
-                except sqlite3.Error:
-                    pass
+                phones_by_owner = labeled("ZABCDPHONENUMBER", "ZFULLNUMBER")
+                emails_by_owner = labeled("ZABCDEMAILADDRESS", "ZADDRESS")
+                urls_by_owner = labeled("ZABCDURLADDRESS", "ZURL")
+
+                addresses_by_owner: Dict[int, List[Dict[str, str]]] = {}
+                pa_cols = _sqlite_columns(conn, "ZABCDPOSTALADDRESS")
+                parts = [c for c in ("ZSTREET", "ZCITY", "ZSTATE", "ZZIPCODE", "ZCOUNTRYNAME") if c in pa_cols]
+                if "ZOWNER" in pa_cols and parts:
+                    label_sel = ", ZLABEL" if "ZLABEL" in pa_cols else ""
+                    try:
+                        for row in conn.execute(f"SELECT ZOWNER, {', '.join(parts)}{label_sel} FROM ZABCDPOSTALADDRESS"):
+                            street = str(row["ZSTREET"] or "").strip() if "ZSTREET" in parts else ""
+                            city_line = " ".join(
+                                str(row[c] or "").strip() for c in ("ZCITY", "ZSTATE", "ZZIPCODE") if c in parts and row[c]
+                            )
+                            country = str(row["ZCOUNTRYNAME"] or "").strip() if "ZCOUNTRYNAME" in parts else ""
+                            formatted = ", ".join(x for x in (street.replace("\n", ", "), city_line, country) if x)
+                            if row["ZOWNER"] and formatted:
+                                entry = {"address": formatted}
+                                label = _clean_ab_label(row["ZLABEL"] if label_sel else "")
+                                if label:
+                                    entry["label"] = label
+                                addresses_by_owner.setdefault(int(row["ZOWNER"]), []).append(entry)
+                    except sqlite3.Error:
+                        pass
+
+                notes_by_owner: Dict[int, str] = {}
+                note_cols = _sqlite_columns(conn, "ZABCDNOTE")
+                if "ZTEXT" in note_cols and "ZCONTACT" in note_cols:
+                    try:
+                        for row in conn.execute("SELECT ZCONTACT, ZTEXT FROM ZABCDNOTE WHERE ZTEXT IS NOT NULL"):
+                            text = str(row["ZTEXT"] or "").strip()
+                            if row["ZCONTACT"] and text:
+                                notes_by_owner[int(row["ZCONTACT"])] = text
+                    except sqlite3.Error:
+                        pass
+
+                def col(r: sqlite3.Row, name: str) -> str:
+                    return str(r[name] or "").strip() if name in optional else ""
 
                 for r in records:
                     pk = int(r["Z_PK"])
@@ -1980,9 +2086,9 @@ class BluePillEngine:
                         continue
                     first = (r["ZFIRSTNAME"] or "").strip()
                     last = (r["ZLASTNAME"] or "").strip()
-                    org = (r["ZORGANIZATION"] or "").strip()
-                    nick = (r["ZNICKNAME"] or "").strip()
-                    display = f"{first} {last}".strip() or org or nick or (r["ZNAME"] or "").strip()
+                    org = col(r, "ZORGANIZATION")
+                    nick = col(r, "ZNICKNAME")
+                    display = f"{first} {last}".strip() or org or nick or col(r, "ZNAME")
                     if not display:
                         continue
                     uid = (r["ZUNIQUEID"] or str(pk)).strip()
@@ -1991,23 +2097,45 @@ class BluePillEngine:
                         tuple(sorted(p["address"] for p in phones)),
                         tuple(sorted(e["address"] for e in emails)),
                     )
-                    if dedup_key in seen_keys:
-                        continue
-                    seen_keys.add(dedup_key)
-                    contacts.append(
-                        {
+                    existing = seen_keys.get(dedup_key)
+                    avatar = ""
+                    if photo_cols:
+                        avatar_index[uid] = (db_file, pk)
+                        avatar = f"/api/v1/contact/{urllib.parse.quote(uid, safe='')}/avatar"
+                    birthday = ""
+                    if "ZBIRTHDAY" in optional and r["ZBIRTHDAY"] is not None:
+                        birthday = _ab_birthday(r["ZBIRTHDAY"], "ZBIRTHDAYYEARLESS" in optional and bool(r["ZBIRTHDAYYEARLESS"]))
+                    ab_contact = {
                             "id": uid,
                             "firstName": first,
                             "lastName": last,
+                            "middleName": col(r, "ZMIDDLENAME"),
                             "displayName": display,
                             "nickname": nick,
                             "organization": org,
+                            "jobTitle": col(r, "ZJOBTITLE"),
+                            "department": col(r, "ZDEPARTMENT"),
                             "phoneNumbers": phones,
                             "emails": emails,
-                            "birthday": "",
-                            "avatar": "",
+                            "addresses": addresses_by_owner.get(pk, []),
+                            "urls": urls_by_owner.get(pk, []),
+                            "note": notes_by_owner.get(pk, ""),
+                            "birthday": birthday,
+                            "avatar": avatar,
                         }
-                    )
+                    if existing is not None:
+                        # Same person as a BlueBubbles (or earlier source) entry: keep one
+                        # contact, filling in whatever the Mac adds (birthday, note, photo...)
+                        for key, value in ab_contact.items():
+                            if key == "id":
+                                continue
+                            if key in ("phoneNumbers", "emails") and value:
+                                existing[key] = value  # same addresses, but with the Mac's labels
+                            elif value and not existing.get(key):
+                                existing[key] = value
+                        continue
+                    seen_keys[dedup_key] = ab_contact
+                    contacts.append(ab_contact)
                 conn.close()
             except Exception:
                 continue
@@ -2015,7 +2143,39 @@ class BluePillEngine:
         with self._contacts_lock:
             self._contacts_cache = contacts
             self._contacts_cache_ts = now
+            self._contact_avatar_index = avatar_index
         return contacts
+
+    def contact_avatar(self, contact_id: str) -> Optional[Tuple[bytes, str]]:
+        """(image bytes, mime) for a contact's photo from the AddressBook, or None."""
+        with self._contacts_lock:
+            index = dict(getattr(self, "_contact_avatar_index", {}) or {})
+        if contact_id not in index:
+            self.query_contacts(force_refresh=False)
+            with self._contacts_lock:
+                index = dict(getattr(self, "_contact_avatar_index", {}) or {})
+        loc = index.get(contact_id)
+        if not loc:
+            return None
+        db_file, pk = loc
+        try:
+            uri = f"file:{urllib.parse.quote(os.path.abspath(db_file))}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True, timeout=2.0)
+            try:
+                cols = [c for c in ("ZTHUMBNAILIMAGEDATA", "ZIMAGEDATA") if c in _sqlite_columns(conn, "ZABCDRECORD")]
+                if not cols:
+                    return None
+                row = conn.execute(f"SELECT {', '.join(cols)} FROM ZABCDRECORD WHERE Z_PK = ?", (pk,)).fetchone()
+            finally:
+                conn.close()
+        except sqlite3.Error:
+            return None
+        images_dir = os.path.join(os.path.dirname(db_file), "Images")
+        for blob in (row or ()):
+            data = _ab_image_bytes(blob, images_dir)
+            if data:
+                return data, _image_mime(data)
+        return None
 
     def query_pinned_chats(self) -> List[Dict[str, Any]]:
         """Parse ~/Library/Preferences/com.apple.messages.pinning.plist and resolve against chat.db."""
@@ -4784,32 +4944,124 @@ class BluePillEngine:
             "dateCreated": now_ms,
         }
 
-    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+    def _chat_guid_for_message(self, msg_guid: str) -> Optional[str]:
+        """Chat a message belongs to in chat.db: "" when chat.db says it isn't
+        there, None when chat.db can't be read (so absence isn't known)."""
+        mg = (msg_guid or "").strip()
+        if not mg:
+            return ""
+        if not os.path.exists(self.db_path):
+            return None
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        try:
+            conn = self._open_chat_db()
+            try:
+                row = conn.execute(
+                    """
+                    SELECT c.guid
+                    FROM message m
+                    JOIN chat_message_join cmj ON cmj.message_id = m.ROWID
+                    JOIN chat c ON c.ROWID = cmj.chat_id
+                    WHERE m.guid = ? OR m.guid = ?
+                    LIMIT 1
+                    """,
+                    (mg, norm_mg),
+                ).fetchone()
+            finally:
+                conn.close()
+            return str(row[0] or "").strip() if row else ""
+        except Exception:
+            return None
+
+    def _message_action_chat_guid(self, msg_guid: str, body: Dict[str, Any]) -> str:
         chat_guid = (body.get("chatGuid") or "").strip()
+        if chat_guid and self._message_exists_in_chat(msg_guid, chat_guid):
+            return chat_guid
+        found = self._chat_guid_for_message(msg_guid)
+        if found is None:
+            # chat.db unreadable: trust the client's chat rather than refusing
+            return chat_guid
+        return found  # the message's real (sibling) chat, or "" -> 404
+
+    def _message_action_date(self, action: str, msg_guid: str) -> Optional[int]:
+        """The message's date_retracted (unsend) or date_edited (edit) in chat.db, or None."""
+        column = "date_retracted" if action == "unsend-message" else "date_edited"
+        mg = (msg_guid or "").strip()
+        norm_mg = mg.split("/", 1)[-1] if "/" in mg else mg
+        if not mg or not os.path.exists(self.db_path):
+            return None
+        try:
+            conn = self._open_chat_db()
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(message)").fetchall()}
+                if column not in cols:
+                    return None
+                row = conn.execute(
+                    f"SELECT MAX(COALESCE({column}, 0)) FROM message WHERE guid = ? OR guid = ?",
+                    (mg, norm_mg),
+                ).fetchone()
+            finally:
+                conn.close()
+            return int(row[0] or 0) if row else None
+        except Exception:
+            return None
+
+    def _run_message_action(self, action: str, data: Dict[str, Any]) -> Tuple[int, str]:
+        """Send an edit/unsend to the Messages helper. Returns (http_status, error).
+
+        200 only once the helper confirms it, or (after a timeout) chat.db shows it
+        happened. An unconfirmed timeout is 504 and is never retried here: the
+        helper may still apply it, and the next sync shows the real state."""
+        # Recorded before dispatch: after a timeout only a *newer* edit/retract date
+        # counts, so an earlier edit can't confirm this one
+        before = self._message_action_date(action, data.get("messageGuid", ""))
+        sent, _ = self._send_helper_payload_with_tx(action, data, wait_timeout=3.0)
+        state = getattr(self._tx_local, "last_state", "")
+        if state == "disconnected":
+            return 503, "The Messages helper (Private API) isn't connected on the Mac"
+        if not sent:
+            return 502, "Messages refused the request"
+        if state == "timeout":
+            for _ in range(4):
+                after = self._message_action_date(action, data.get("messageGuid", ""))
+                if before is not None and after is not None and after > before:
+                    return 200, ""
+                time.sleep(0.5)
+            return 504, "Messages didn't confirm in time; it may still go through"
+        return 200, ""
+
+    def edit_message(self, msg_guid: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], str]:
+        edited = (body.get("editedMessage") or body.get("message") or "").strip()
+        if not edited:
+            return 400, {}, "editedMessage is required"
+        chat_guid = self._message_action_chat_guid(msg_guid, body)
+        if not chat_guid:
+            return 404, {}, "Message not found"
         part_index = int(body.get("partIndex", 0) or 0)
-        self._send_helper_payload(
+        status, err = self._run_message_action(
             "edit-message",
             {
                 "chatGuid": chat_guid,
                 "messageGuid": msg_guid,
                 "editedMessage": edited,
-                "backwardsCompatibilityMessage": edited,
+                "backwardsCompatibilityMessage": (body.get("backwardsCompatibilityMessage") or edited),
                 "partIndex": part_index,
             },
         )
         now_ms = int(time.time() * 1000)
-        return {"guid": msg_guid, "text": edited, "dateEdited": now_ms}
+        return status, ({"guid": msg_guid, "text": edited, "dateEdited": now_ms} if status == 200 else {}), err
 
-    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Dict[str, Any]:
+    def unsend_message(self, msg_guid: str, body: Dict[str, Any]) -> Tuple[int, Dict[str, Any], str]:
+        chat_guid = self._message_action_chat_guid(msg_guid, body)
+        if not chat_guid:
+            return 404, {}, "Message not found"
         part_index = int(body.get("partIndex", 0) or 0)
-        chat_guid = (body.get("chatGuid") or "").strip()
-        self._send_helper_payload(
+        status, err = self._run_message_action(
             "unsend-message",
             {"chatGuid": chat_guid, "messageGuid": msg_guid, "partIndex": part_index},
         )
         now_ms = int(time.time() * 1000)
-        return {"guid": msg_guid, "text": "", "dateRetracted": now_ms}
+        return status, ({"guid": msg_guid, "text": "", "dateRetracted": now_ms} if status == 200 else {}), err
 
     def mark_chat_read(self, chat_guid: str, read: bool = True) -> Dict[str, Any]:
         guids_to_mark = [chat_guid]
@@ -9624,6 +9876,20 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.query_contacts())
             return
 
+        m_avatar = re.match(r"^/api/v1/contact/([^/]+)/avatar$", path)
+        if m_avatar:
+            found = self.engine.contact_avatar(urllib.parse.unquote(m_avatar.group(1)))
+            if not found:
+                self._send_json(404, None, "No photo for this contact")
+                return
+            data, mime = found
+            self._log_http(200)
+            self.send_response(200)
+            self._send_attachment_common_headers(mime, "avatar", len(data))
+            self.end_headers()
+            self.wfile.write(data)
+            return
+
         m_chat_msg = re.match(r"^/api/v1/chat/([^/]+)/message$", path)
         if m_chat_msg:
             chat_guid = urllib.parse.unquote(m_chat_msg.group(1))
@@ -10022,13 +10288,15 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         m_edit = re.match(r"^/api/v1/message/([^/]+)/edit$", path)
         if m_edit:
             guid = urllib.parse.unquote(m_edit.group(1))
-            self._send_json(200, self.engine.edit_message(guid, body))
+            status, data, err = self.engine.edit_message(guid, body)
+            self._send_json(status, data if status == 200 else None, err or "Success")
             return
 
         m_unsend = re.match(r"^/api/v1/message/([^/]+)/unsend$", path)
         if m_unsend:
             guid = urllib.parse.unquote(m_unsend.group(1))
-            self._send_json(200, self.engine.unsend_message(guid, body))
+            status, data, err = self.engine.unsend_message(guid, body)
+            self._send_json(status, data if status == 200 else None, err or "Success")
             return
 
         m_read = re.match(r"^/api/v1/chat/([^/]+)/(read|unread)$", path)
@@ -10238,6 +10506,166 @@ def run_selftest(engine: BluePillEngine) -> int:
         enable_background_daemons=False,
     )
     test_eng.photos_library_path = os.path.join(test_eng._config_dir, "Photos Library.photoslibrary")
+    # AddressBook contacts return every populated field (labels, addresses, birthday, note...)
+    with tempfile.TemporaryDirectory() as ab_dir:
+        ab_path = os.path.join(ab_dir, "AddressBook-v22.abcddb")
+        ab = sqlite3.connect(ab_path)
+        ab.executescript(
+            """
+            CREATE TABLE ZABCDRECORD (Z_PK INTEGER PRIMARY KEY, ZUNIQUEID TEXT, ZFIRSTNAME TEXT, ZLASTNAME TEXT,
+                ZMIDDLENAME TEXT, ZNICKNAME TEXT, ZORGANIZATION TEXT, ZNAME TEXT, ZJOBTITLE TEXT,
+                ZDEPARTMENT TEXT, ZBIRTHDAY REAL, ZTHUMBNAILIMAGEDATA BLOB);
+            CREATE TABLE ZABCDPHONENUMBER (ZOWNER INTEGER, ZFULLNUMBER TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDEMAILADDRESS (ZOWNER INTEGER, ZADDRESS TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDPOSTALADDRESS (ZOWNER INTEGER, ZSTREET TEXT, ZCITY TEXT, ZSTATE TEXT,
+                ZZIPCODE TEXT, ZCOUNTRYNAME TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDURLADDRESS (ZOWNER INTEGER, ZURL TEXT, ZLABEL TEXT);
+            CREATE TABLE ZABCDNOTE (ZCONTACT INTEGER, ZTEXT TEXT);
+            INSERT INTO ZABCDRECORD VALUES (1, 'uid-1', 'Alex', 'Rivera', 'Q', 'Lex', 'Example Co', NULL,
+                'Engineer', 'Platform', 610286400, NULL);
+            INSERT INTO ZABCDPHONENUMBER VALUES (1, '+1 (555) 555-0100', '_$!<Mobile>!$_');
+            INSERT INTO ZABCDPHONENUMBER VALUES (1, '+1 (555) 555-0101', 'Studio');
+            INSERT INTO ZABCDEMAILADDRESS VALUES (1, 'user@example.com', '_$!<Home>!$_');
+            INSERT INTO ZABCDPOSTALADDRESS VALUES (1, '1 Example St', 'Springfield', 'CA', '90000', 'USA', '_$!<Work>!$_');
+            INSERT INTO ZABCDURLADDRESS VALUES (1, 'https://example.com', '_$!<HomePage>!$_');
+            INSERT INTO ZABCDNOTE VALUES (1, 'Met at the conference');
+            """
+        )
+        fake_png = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
+        ab.execute("UPDATE ZABCDRECORD SET ZTHUMBNAILIMAGEDATA = ? WHERE Z_PK = 1", (b"\x01" + fake_png,))
+        ab.commit()
+        ab.close()
+        ab_eng = BluePillEngine(db_path="/nonexistent/selftest_chat.db", password="x",
+                                enable_background_daemons=False, addressbook_glob=ab_path)
+        ab_eng.bb_config_db_path = "/nonexistent/config.db"
+        found = ab_eng.query_contacts(force_refresh=True)
+        assert len(found) == 1, f"AddressBook contacts: {found}"
+        c0 = found[0]
+        assert c0["middleName"] == "Q" and c0["nickname"] == "Lex" and c0["jobTitle"] == "Engineer", c0
+        assert c0["department"] == "Platform" and c0["organization"] == "Example Co", c0
+        assert c0["phoneNumbers"][0] == {"address": "+1 (555) 555-0100", "label": "Mobile"}, c0["phoneNumbers"]
+        assert c0["phoneNumbers"][1]["label"] == "Studio", c0["phoneNumbers"]
+        assert c0["emails"][0]["label"] == "Home", c0["emails"]
+        assert c0["addresses"][0] == {"address": "1 Example St, Springfield CA 90000, USA", "label": "Work"}, c0["addresses"]
+        assert c0["urls"][0]["address"] == "https://example.com", c0["urls"]
+        assert c0["note"] == "Met at the conference", c0
+        assert c0["birthday"] == "2020-05-04", c0["birthday"]
+        assert c0["avatar"] == "/api/v1/contact/uid-1/avatar", c0["avatar"]
+        photo = ab_eng.contact_avatar("uid-1")
+        assert photo and photo[0] == fake_png and photo[1] == "image/png", photo
+        assert ab_eng.contact_avatar("no-such-contact") is None
+        # A BlueBubbles entry for the same person is kept once, filled in with the Mac's fields
+        bb_path = os.path.join(ab_dir, "config.db")
+        bb = sqlite3.connect(bb_path)
+        bb.executescript(
+            """
+            CREATE TABLE contact (id INTEGER PRIMARY KEY, first_name TEXT, last_name TEXT, display_name TEXT, avatar TEXT);
+            CREATE TABLE contact_address (contactId INTEGER, address TEXT, type TEXT);
+            INSERT INTO contact VALUES (7, 'Alex', 'Rivera', 'Alex Rivera', '');
+            INSERT INTO contact_address VALUES (7, '+1 (555) 555-0100', 'phone');
+            INSERT INTO contact_address VALUES (7, '+1 (555) 555-0101', 'phone');
+            INSERT INTO contact_address VALUES (7, 'user@example.com', 'email');
+            """
+        )
+        bb.commit()
+        bb.close()
+        ab_eng.bb_config_db_path = bb_path
+        merged = ab_eng.query_contacts(force_refresh=True)
+        assert len(merged) == 1, f"duplicate BlueBubbles + Mac contact: {merged}"
+        m0 = merged[0]
+        assert m0["id"] == "bb-7" and m0["note"] == "Met at the conference" and m0["birthday"] == "2020-05-04", m0
+        assert m0["avatar"] == "/api/v1/contact/uid-1/avatar" and m0["phoneNumbers"][0]["label"] == "Mobile", m0
+        assert ab_eng.contact_avatar("uid-1") is not None
+        ab_eng.bb_config_db_path = "/nonexistent/config.db"
+    # Birthdays: noon UTC, or local midnight anywhere from UTC-12 to UTC+14
+    _old_tz = os.environ.get("TZ")
+    try:
+        os.environ["TZ"] = "UTC"
+        time.tzset()
+        assert _ab_birthday(610286400) == "2020-05-04"            # noon UTC
+        assert _ab_birthday(610286400 - 5 * 3600) == "2020-05-04"  # midnight in California (07:00 UTC)
+        assert _ab_birthday(610286400 - 21 * 3600) == "2020-05-04"  # midnight in Tokyo (15:00 UTC the day before)
+        assert _ab_birthday(610286400 - 22 * 3600) == "2020-05-04"  # midnight UTC+10
+        assert _ab_birthday(610286400 - 2 * 3600) == "2020-05-04"  # midnight Hawaii (10:00 UTC)
+        os.environ["TZ"] = "Pacific/Kiritimati"  # UTC+14: 10:00 UTC the day before is local midnight
+        time.tzset()
+        assert _ab_birthday(610286400 - 26 * 3600) == "2020-05-04", _ab_birthday(610286400 - 26 * 3600)
+        assert _ab_birthday(610286400) == "2020-05-04"
+        assert _ab_birthday(-12517416000) == "--05-04", "1604 is year-less"
+    finally:
+        if _old_tz is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = _old_tz
+        time.tzset()
+    # Edit/unsend report failures instead of always answering 200
+    st, _, err = test_eng.unsend_message("selftest-msg", {"chatGuid": "iMessage;-;+15555550100"})
+    assert st == 503 and "helper" in err, f"unsend without helper: {st} {err}"
+    st, _, _ = test_eng.edit_message("selftest-msg", {"chatGuid": "iMessage;-;+15555550100"})
+    assert st == 400, f"edit without text: {st}"
+    st, _, _ = test_eng.unsend_message("selftest-msg", {})
+    assert st == 404, f"unsend with unknown chat: {st}"
+    # With a readable chat.db, an unknown message is 404 even when the client names a chat;
+    # a helper timeout is 504 unless chat.db shows the unsend/edit landed
+    with tempfile.TemporaryDirectory() as act_dir:
+        act_db = os.path.join(act_dir, "chat.db")
+        c = sqlite3.connect(act_db)
+        c.executescript(
+            "CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT);"
+            "CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, date_edited INTEGER, date_retracted INTEGER);"
+            "CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER);"
+            "INSERT INTO chat VALUES (1, 'iMessage;-;+15555550100');"
+            "INSERT INTO message VALUES (1, 'known-msg', 0, 0);"
+            "INSERT INTO chat_message_join VALUES (1, 1);"
+        )
+        c.commit()
+        c.close()
+        act_eng = BluePillEngine(db_path=act_db, password="selftest-secret", enable_background_daemons=False)
+        st, _, _ = act_eng.unsend_message("ghost-msg", {"chatGuid": "iMessage;-;+15555550100"})
+        assert st == 404, f"unsend of unknown message with a chatGuid: {st}"
+        act_eng._send_helper_payload_with_tx = lambda a, d, wait_timeout=0.8: (
+            setattr(act_eng._tx_local, "last_state", "timeout") or (True, "")
+        )
+        _real_sleep = time.sleep
+        time.sleep = lambda _s: None
+        try:
+            st, _, err = act_eng.unsend_message("known-msg", {"chatGuid": "iMessage;-;+15555550100"})
+            assert st == 504 and "confirm" in err, f"unconfirmed unsend timeout: {st} {err}"
+            timeout_send = act_eng._send_helper_payload_with_tx
+            def _retract_then_timeout(a, d, wait_timeout=0.8):
+                c1 = sqlite3.connect(act_db)
+                c1.execute("UPDATE message SET date_retracted = ? WHERE guid = 'known-msg'",
+                           (int((time.time() - 978307200) * 1_000_000_000),))
+                c1.commit()
+                c1.close()
+                return timeout_send(a, d, wait_timeout)
+            act_eng._send_helper_payload_with_tx = _retract_then_timeout
+            st, _, err = act_eng.unsend_message("known-msg", {"chatGuid": "iMessage;-;+15555550100"})
+            assert st == 200, f"unsend confirmed by chat.db after timeout: {st} {err}"
+            act_eng._send_helper_payload_with_tx = timeout_send
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "x"})
+            assert st == 504, f"unconfirmed edit timeout: {st} {err}"
+            # An edit from a second ago is already in chat.db: it doesn't confirm this one
+            c = sqlite3.connect(act_db)
+            c.execute("UPDATE message SET date_edited = ? WHERE guid = 'known-msg'",
+                      (int((time.time() - 978307200 - 1) * 1_000_000_000),))
+            c.commit()
+            c.close()
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "B"})
+            assert st == 504, f"earlier edit confirmed a timed-out one: {st} {err}"
+            # ...but a date_edited written after dispatch does
+            orig_send = act_eng._send_helper_payload_with_tx
+            def _send_then_land(a, d, wait_timeout=0.8):
+                c2 = sqlite3.connect(act_db)
+                c2.execute("UPDATE message SET date_edited = date_edited + 1000 WHERE guid = 'known-msg'")
+                c2.commit()
+                c2.close()
+                return orig_send(a, d, wait_timeout)
+            act_eng._send_helper_payload_with_tx = _send_then_land
+            st, _, err = act_eng.edit_message("known-msg", {"chatGuid": "iMessage;-;+15555550100", "editedMessage": "C"})
+            assert st == 200, f"edit landed after timeout: {st} {err}"
+        finally:
+            time.sleep = _real_sleep
     test_eng.icloud_photos_cache_dir = os.path.join(test_eng._config_dir, "icloud-photos-cache")
     launchctl_calls: List[List[str]] = []
     test_eng._run_launchctl = lambda args: (
