@@ -243,8 +243,8 @@ private slots:
             QStringLiteral("test-api-key"));
         const QStringList candidates = backend.candidateUrls();
         QCOMPARE(candidates.size(), 2);
-        QCOMPARE(candidates.at(0), QStringLiteral("https://relay.example.com"));
-        QCOMPARE(candidates.at(1), QStringLiteral("https://failover-relay.example.com"));
+        QCOMPARE(candidates.at(0), QStringLiteral("https://relay.example.com:1235"));
+        QCOMPARE(candidates.at(1), QStringLiteral("https://failover-relay.example.com:1235"));
         QCOMPARE(backend.consecutiveFailures(), 0);
     }
 
@@ -2860,12 +2860,12 @@ private slots:
             QStringLiteral("super-secret-token"));
 
         QCOMPARE(b.serverUrl(), QStringLiteral("http://relay.example.com:1235"));
-        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.example.com"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.example.com:1235"));
         QCOMPARE(b.hasPasswordConfigured(), true);
         QCOMPARE(b.needsSetup(), false);
         QCOMPARE(b.candidateUrls(), (QStringList{
             QStringLiteral("http://relay.example.com:1235"),
-            QStringLiteral("https://backup.example.com")
+            QStringLiteral("https://backup.example.com:1235")
         }));
 
         // Verify 0600 permissions on config.json
@@ -2880,16 +2880,16 @@ private slots:
             QStringLiteral("https://new-relay.example.com"),
             QStringLiteral("https://new-backup.example.com"),
             QString());
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://new-relay.example.com"));
-        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://new-relay.example.com:1235"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com:1235"));
         QCOMPARE(b.hasPasswordConfigured(), true);
         QCOMPARE(b.needsSetup(), false);
 
         // Reload into a fresh Backend instance and verify persistence
         Backend b2(false);
         b2.setConfigFilePath(cfgPath);
-        QCOMPARE(b2.serverUrl(), QStringLiteral("https://new-relay.example.com"));
-        QCOMPARE(b2.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com"));
+        QCOMPARE(b2.serverUrl(), QStringLiteral("https://new-relay.example.com:1235"));
+        QCOMPARE(b2.secondaryServerUrl(), QStringLiteral("https://new-backup.example.com:1235"));
         QCOMPARE(b2.hasPasswordConfigured(), true);
         QCOMPARE(b2.needsSetup(), false);
 
@@ -2985,13 +2985,99 @@ private slots:
         QCOMPARE(n("http://my-mac:8080"), QStringLiteral("http://my-mac:8080"));
         // Explicit http:// without port -> default relay port
         QCOMPARE(n("http://my-mac"), QStringLiteral("http://my-mac:1235"));
-        // https:// is left alone (reverse proxy / Tailscale Serve on 443)
-        QCOMPARE(n("https://relay.example.com"), QStringLiteral("https://relay.example.com"));
+        // https:// without a port also gets the default relay port
+        QCOMPARE(n("https://relay.example.com"), QStringLiteral("https://relay.example.com:1235"));
         QCOMPARE(n("HTTPS://relay.example.com:8443/"), QStringLiteral("HTTPS://relay.example.com:8443"));
+        QCOMPARE(n("https://relay.example.com:443"), QStringLiteral("https://relay.example.com:443"));
+        // Loading saved config never adds a port
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("https://relay.example.com"), false), QStringLiteral("https://relay.example.com"));
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("my-mac"), false), QStringLiteral("http://my-mac"));
         // SSH forms unchanged
         QCOMPARE(n("user@mac.local"), QStringLiteral("ssh://user@mac.local"));
         QCOMPARE(n("ssh://user@mac.local"), QStringLiteral("ssh://user@mac.local"));
         QCOMPARE(n(""), QString());
+    }
+
+    void testSplitAndComposeServerUrlPortField() {
+        auto split = [](const char *u, bool hide = false) {
+            const QVariantMap m = Backend::splitServerUrl(QString::fromUtf8(u), hide);
+            return m.value("url").toString() + QStringLiteral("|") + m.value("port").toString();
+        };
+        QCOMPARE(split("my-mac:8080"), QStringLiteral("my-mac|8080"));
+        QCOMPARE(split("https://relay.example.com:8443/bb/"), QStringLiteral("https://relay.example.com/bb|8443"));
+        QCOMPARE(split("http://100.64.0.7:1235", true), QStringLiteral("http://100.64.0.7|"));
+        QCOMPARE(split("http://100.64.0.7:1235", false), QStringLiteral("http://100.64.0.7|1235"));
+        QCOMPARE(split("http://[fd7a::1]:9000"), QStringLiteral("http://[fd7a::1]|9000"));
+        QCOMPARE(split("my-mac"), QStringLiteral("my-mac|"));
+        QCOMPARE(split("user@mac.local"), QStringLiteral("user@mac.local|"));
+        QCOMPARE(split("my-mac:99999"), QStringLiteral("my-mac:99999|"));
+
+        auto compose = [](const char *u, const char *p) {
+            return Backend::composeServerUrl(QString::fromUtf8(u), QString::fromUtf8(p));
+        };
+        QCOMPARE(compose("my-mac", ""), QStringLiteral("http://my-mac:1235"));
+        QCOMPARE(compose("my-mac", "4000"), QStringLiteral("http://my-mac:4000"));
+        QCOMPARE(compose("https://relay.example.com", ""), QStringLiteral("https://relay.example.com:1235"));
+        QCOMPARE(compose("https://relay.example.com", "443"), QStringLiteral("https://relay.example.com:443"));
+        QCOMPARE(compose("https://relay.example.com/bb", "8443"), QStringLiteral("https://relay.example.com:8443/bb"));
+        QCOMPARE(compose("my-mac:5000", "4000"), QStringLiteral("http://my-mac:5000"));  // inline wins
+        QCOMPARE(compose("user@mac.local", "4000"), QStringLiteral("ssh://user@mac.local"));
+        QCOMPARE(compose("", "4000"), QString());
+        // Round trip: what the dialog loads composes back to the saved URL
+        const QVariantMap loaded = Backend::splitServerUrl(QStringLiteral("http://mbp.tail1234.ts.net:1235"), true);
+        QCOMPARE(Backend::composeServerUrl(loaded.value("url").toString(), loaded.value("port").toString()),
+                 QStringLiteral("http://mbp.tail1234.ts.net:1235"));
+    }
+
+    void testSettingsDialogPortFieldCarryOverAndSave() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("cfg_port.json"));
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_port.json")));
+        b.setConfigFilePath(cfgPath);
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *root = engine.rootObjects().first();
+        QObject *urlIn = root->findChild<QObject *>(QStringLiteral("serverUrlInput"));
+        QObject *portIn = root->findChild<QObject *>(QStringLiteral("serverPortInput"));
+        QVERIFY(urlIn && portIn);
+        auto call = [root](const char *fn, const QVariant &arg = QVariant()) {
+            QVariant ret;
+            if (arg.isValid()) QMetaObject::invokeMethod(root, fn, Q_RETURN_ARG(QVariant, ret), Q_ARG(QVariant, arg));
+            else QMetaObject::invokeMethod(root, fn, Q_RETURN_ARG(QVariant, ret));
+            return ret;
+        };
+
+        // Saved default-port URL loads as host + greyed (empty) port
+        call("loadPrimaryServerFields", QStringLiteral("http://mbp.tail1234.ts.net:1235"));
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("http://mbp.tail1234.ts.net"));
+        QCOMPARE(portIn->property("text").toString(), QString());
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("http://mbp.tail1234.ts.net:1235"));
+
+        // Legacy portless https config keeps 443 when re-saved
+        call("loadPrimaryServerFields", QStringLiteral("https://relay.example.com"));
+        QCOMPARE(portIn->property("text").toString(), QStringLiteral("443"));
+        QCOMPARE(call("composedPrimaryServerUrl").toString(), QStringLiteral("https://relay.example.com:443"));
+
+        // Typing host:port in the URL field carries the port over
+        urlIn->setProperty("text", QStringLiteral("https://relay.example.com:8443"));
+        portIn->setProperty("text", QString());
+        call("carryOverPrimaryServerPort");
+        QCOMPARE(urlIn->property("text").toString(), QStringLiteral("https://relay.example.com"));
+        QCOMPARE(portIn->property("text").toString(), QStringLiteral("8443"));
+
+        // Bare host + empty port saves with the default port
+        urlIn->setProperty("text", QStringLiteral("my-mac.local"));
+        portIn->setProperty("text", QString());
+        b.saveServerConfig(call("composedPrimaryServerUrl").toString(), QString(), QStringLiteral("pw"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("http://my-mac.local:1235"));
     }
 
     void testParseTailscaleMacPeers() {
@@ -3046,8 +3132,8 @@ private slots:
 
         // Save HTTPS BluePill / BlueBubbles URL -> webUiUrl points to server/web
         b.saveServerConfig(QStringLiteral("https://bluepill.example.com"), QString(), QStringLiteral("api-key-123"));
-        QCOMPARE(b.serverUrl(), QStringLiteral("https://bluepill.example.com"));
-        QCOMPARE(b.webUiUrl(), QStringLiteral("https://bluepill.example.com/web"));
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://bluepill.example.com:1235"));
+        QCOMPARE(b.webUiUrl(), QStringLiteral("https://bluepill.example.com:1235/web"));
     }
 
     void testOutboundTempGuidDeduplication() {

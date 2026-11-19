@@ -222,11 +222,37 @@ ApplicationWindow {
 
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
-            serverUrlInput.text = backend.serverUrl
+            root.loadPrimaryServerFields(backend.serverUrl)
             secondaryServerUrlInput.text = backend.secondaryServerUrl
             serverPasswordInput.text = backend.serverPassword
             root.showServerPassword = false
         }
+    }
+
+    // Primary server URL is edited as two fields: URL (no port) + Port.
+    function loadPrimaryServerFields(url) {
+        var raw = url || ""
+        var parts = backend.splitServerUrl(raw, true)
+        var explicit = backend.splitServerUrl(raw, false).port
+        serverUrlInput.text = parts.url
+        serverPortInput.text = parts.port
+        // A saved URL with no port has been using the scheme's port (older
+        // configs, reverse proxies). Show it so re-saving doesn't move it to 1235.
+        if (!explicit) {
+            if (/^https:\/\//i.test(raw)) serverPortInput.text = "443"
+            else if (/^http:\/\//i.test(raw)) serverPortInput.text = "80"
+        }
+    }
+    // Move a port typed inline ("host:8080") into the Port field.
+    function carryOverPrimaryServerPort() {
+        var parts = backend.splitServerUrl(serverUrlInput.text, false)
+        if (parts.port && parts.port.length > 0) {
+            serverUrlInput.text = parts.url
+            serverPortInput.text = parts.port
+        }
+    }
+    function composedPrimaryServerUrl() {
+        return backend.composeServerUrl(serverUrlInput.text, serverPortInput.text)
     }
 
     function openServerConfigModal() {
@@ -235,7 +261,7 @@ ApplicationWindow {
         root.showContactModal = false
         root.showNewChatModal = false
         root.showEmojiPicker = false
-        serverUrlInput.text = backend.serverUrl
+        root.loadPrimaryServerFields(backend.serverUrl)
         secondaryServerUrlInput.text = backend.secondaryServerUrl
         serverPasswordInput.text = backend.serverPassword
         root.showServerPassword = false
@@ -8114,7 +8140,7 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). A bare host name connects over http:// on port 1235. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
+                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap
@@ -8190,7 +8216,7 @@ ApplicationWindow {
                             if (backend.tailscaleScanning || serverUrlInput.text.trim().length > 0) return
                             var found = backend.tailscaleRelays.filter(function(r) { return r.probeState === "relay" })
                             if (found.length === 1) {
-                                serverUrlInput.text = found[0].url
+                                root.loadPrimaryServerFields(found[0].url)
                                 serverPasswordInput.forceActiveFocus()
                             }
                         }
@@ -8200,7 +8226,7 @@ ApplicationWindow {
                         model: backend.tailscaleRelays
                         delegate: Rectangle {
                             readonly property bool isRelay: modelData.probeState === "relay"
-                            readonly property bool isSelected: serverUrlInput.text === modelData.url
+                            readonly property bool isSelected: root.composedPrimaryServerUrl() === modelData.url
                             objectName: "tailscaleRelayRow"
                             Layout.fillWidth: true
                             implicitHeight: relayRowCol.implicitHeight + 14
@@ -8255,7 +8281,7 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    serverUrlInput.text = modelData.url
+                                    root.loadPrimaryServerFields(modelData.url)
                                     serverPasswordInput.forceActiveFocus()
                                 }
                             }
@@ -8263,53 +8289,114 @@ ApplicationWindow {
                     }
                 }
 
-                // Primary Server URL
+                // Primary Server URL + Port
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
-                    Text {
+                    readonly property bool isSshUrl: /^ssh:\/\//i.test(serverUrlInput.text.trim()) || serverUrlInput.text.indexOf("@") >= 0
+                    id: primaryServerFields
+                    RowLayout {
                         Layout.fillWidth: true
-                        text: i18n.tr("Primary Server URL")
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.foreground
-                        elide: Text.ElideRight
+                        spacing: 8
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Primary Server URL")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            Layout.preferredWidth: serverPortBox.width
+                            text: i18n.tr("Port")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.foreground
+                            elide: Text.ElideRight
+                        }
                     }
-                    Rectangle {
+                    RowLayout {
                         Layout.fillWidth: true
-                        height: Math.max(40, theme.fontSize + 20)
-                        Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
-                        radius: 6
-                        clip: true
-                        color: theme.lighterBackground
-                        border.width: 1
-                        border.color: serverUrlInput.activeFocus ? theme.accent : theme.muted
-
-                        TextInput {
-                            id: serverUrlInput
-                            objectName: "serverUrlInput"
-                            anchors.fill: parent
-                            anchors.leftMargin: 10
-                            anchors.rightMargin: 10
+                        spacing: 8
+                        Rectangle {
+                            Layout.fillWidth: true
+                            height: Math.max(40, theme.fontSize + 20)
+                            Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
+                            radius: 6
                             clip: true
-                            verticalAlignment: TextInput.AlignVCenter
-                            text: backend.serverUrl
-                            color: theme.brightForeground
-                            font.pixelSize: theme.fontSize
-                            selectByMouse: true
-                            KeyNavigation.tab: secondaryServerUrlInput
-                            Keys.onReturnPressed: {
-                                backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
-                                root.showServerConfigModal = false
-                            }
-                            Text {
-                                text: "my-mac.tailnet.ts.net  (or https://relay.example.com)"
-                                color: theme.darkForeground
-                                visible: !serverUrlInput.text && !serverUrlInput.activeFocus
-                                anchors.verticalCenter: parent.verticalCenter
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: serverUrlInput.activeFocus ? theme.accent : theme.muted
+
+                            TextInput {
+                                id: serverUrlInput
+                                objectName: "serverUrlInput"
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                clip: true
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: theme.brightForeground
                                 font.pixelSize: theme.fontSize
-                                elide: Text.ElideRight
-                                width: parent.width
+                                selectByMouse: true
+                                KeyNavigation.tab: serverPortInput
+                                onEditingFinished: root.carryOverPrimaryServerPort()
+                                Keys.onReturnPressed: {
+                                    backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
+                                    root.showServerConfigModal = false
+                                }
+                                Text {
+                                    text: "my-mac.tailnet.ts.net  (or https://relay.example.com)"
+                                    color: theme.darkForeground
+                                    visible: !serverUrlInput.text && !serverUrlInput.activeFocus
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    font.pixelSize: theme.fontSize
+                                    elide: Text.ElideRight
+                                    width: parent.width
+                                }
+                            }
+                        }
+                        Rectangle {
+                            id: serverPortBox
+                            Layout.preferredWidth: Math.max(84, theme.fontSize * 6)
+                            height: Math.max(40, theme.fontSize + 20)
+                            Layout.preferredHeight: Math.max(40, theme.fontSize + 20)
+                            radius: 6
+                            clip: true
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: serverPortInput.activeFocus ? theme.accent : theme.muted
+                            opacity: primaryServerFields.isSshUrl ? 0.4 : 1.0
+
+                            TextInput {
+                                id: serverPortInput
+                                objectName: "serverPortInput"
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                clip: true
+                                enabled: !primaryServerFields.isSshUrl
+                                verticalAlignment: TextInput.AlignVCenter
+                                color: theme.brightForeground
+                                font.pixelSize: theme.fontSize
+                                selectByMouse: true
+                                inputMethodHints: Qt.ImhDigitsOnly
+                                maximumLength: 5
+                                validator: IntValidator { bottom: 1; top: 65535 }
+                                KeyNavigation.tab: secondaryServerUrlInput
+                                KeyNavigation.backtab: serverUrlInput
+                                Keys.onReturnPressed: {
+                                    backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
+                                    root.showServerConfigModal = false
+                                }
+                                Text {
+                                    // Greyed default shown whenever the field is empty.
+                                    text: String(1235)
+                                    color: theme.darkForeground
+                                    visible: !serverPortInput.text
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    font.pixelSize: theme.fontSize
+                                }
                             }
                         }
                     }
@@ -8351,7 +8438,7 @@ ApplicationWindow {
                             selectByMouse: true
                             KeyNavigation.tab: serverPasswordInput
                             Keys.onReturnPressed: {
-                                backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
+                                backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
                                 root.showServerConfigModal = false
                             }
                             Text {
@@ -8406,7 +8493,7 @@ ApplicationWindow {
                                 font.pixelSize: theme.fontSize
                                 selectByMouse: true
                                 Keys.onReturnPressed: {
-                                    backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
+                                    backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
                                     root.showServerConfigModal = false
                                 }
                                 Text {
@@ -8812,7 +8899,7 @@ ApplicationWindow {
                             anchors.fill: parent
                             cursorShape: Qt.PointingHandCursor
                             onClicked: {
-                                backend.saveServerConfig(serverUrlInput.text, secondaryServerUrlInput.text, serverPasswordInput.text)
+                                backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
                                 root.showServerConfigModal = false
                             }
                         }

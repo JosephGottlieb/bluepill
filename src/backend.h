@@ -241,7 +241,15 @@ public:
     Q_INVOKABLE QString webUiUrl() const;
     // Default relay port used when a scheme-less or http:// URL omits one.
     static constexpr int kDefaultRelayPort = 1235;
-    static QString normalizeServerEndpointUrl(const QString &rawUrl);
+    // applyDefaultPort=false is used when loading saved config/env vars so an
+    // existing "https://relay" (proxy on 443) is never rewritten to :1235.
+    static QString normalizeServerEndpointUrl(const QString &rawUrl, bool applyDefaultPort = true);
+    // Splits "scheme://host:port/path" into {url: text without ":port", port}.
+    // Keeps the typed text otherwise unchanged (no scheme is added). With
+    // hideDefaultPort, a port equal to kDefaultRelayPort comes back as "".
+    Q_INVOKABLE static QVariantMap splitServerUrl(const QString &rawUrl, bool hideDefaultPort = false);
+    // Joins the URL and Port fields; a port typed inline in the URL wins.
+    Q_INVOKABLE static QString composeServerUrl(const QString &rawUrl, const QString &port);
     // Parses `tailscale status --json` into online macOS peers:
     // [{name, host, ip, url}] (url = http://<MagicDNS name>:1235).
     static QVariantList parseTailscaleMacPeers(const QByteArray &statusJson, QString *backendState = nullptr);

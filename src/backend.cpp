@@ -1228,7 +1228,7 @@ void Backend::checkServerAndLoad() {
     }
 }
 
-QString Backend::normalizeServerEndpointUrl(const QString &rawUrl) {
+QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool applyDefaultPort) {
     QString url = rawUrl.trimmed();
     while (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
@@ -1240,6 +1240,7 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl) {
     const bool hasHttp = url.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive);
     const bool hasHttps = url.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive);
     if (!hasHttp && !hasHttps) {
+        if (url.contains(QStringLiteral("://"))) return url;  // unknown scheme: leave as typed
         if (url.contains(QLatin1Char('@')) && !url.contains(QLatin1Char('/'))) {
             return QStringLiteral("ssh://") + url;
         }
@@ -1248,9 +1249,9 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl) {
         // TLS (reverse proxy, Tailscale Serve, BlueBubbles) types https://.
         url = QStringLiteral("http://") + url;
     }
-    if (hasHttps) return url;
-
-    // http:// without an explicit port -> the relay's default port (1235).
+    // No explicit port -> the relay's default port (1235), for http:// and
+    // https:// alike. Reverse proxies on 443 need ":443" (or the Port field).
+    if (!applyDefaultPort) return url;
     QUrl parsed(url, QUrl::StrictMode);
     if (parsed.isValid() && !parsed.host().isEmpty() && parsed.port() == -1) {
         parsed.setPort(kDefaultRelayPort);
@@ -1259,6 +1260,54 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl) {
         return out;
     }
     return url;
+}
+
+static const QRegularExpression &serverUrlPortRegex() {
+    // [scheme://] host-or-[ipv6] :port [rest]
+    static const QRegularExpression re(
+        QStringLiteral(R"(^(\s*(?:[A-Za-z][A-Za-z0-9+.-]*://)?(?:\[[^\]]+\]|[^/:?#@\s]+)):(\d{1,5})(?=[/?#]|\s*$)(.*)$)"),
+        QRegularExpression::DotMatchesEverythingOption);
+    return re;
+}
+
+QVariantMap Backend::splitServerUrl(const QString &rawUrl, bool hideDefaultPort) {
+    QVariantMap out;
+    out.insert(QStringLiteral("url"), rawUrl);
+    out.insert(QStringLiteral("port"), QString());
+    const QString trimmed = rawUrl.trimmed();
+    if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) || trimmed.contains(QLatin1Char('@'))) {
+        return out;
+    }
+    const QRegularExpressionMatch m = serverUrlPortRegex().match(trimmed);
+    if (!m.hasMatch()) return out;
+    const int port = m.captured(2).toInt();
+    if (port < 1 || port > 65535) return out;
+    QString rest = m.captured(3);
+    while (rest.endsWith(QLatin1Char('/'))) rest.chop(1);
+    out.insert(QStringLiteral("url"), m.captured(1).trimmed() + rest);
+    out.insert(QStringLiteral("port"), (hideDefaultPort && port == kDefaultRelayPort) ? QString() : QString::number(port));
+    return out;
+}
+
+QString Backend::composeServerUrl(const QString &rawUrl, const QString &port) {
+    const QString trimmed = rawUrl.trimmed();
+    if (trimmed.isEmpty()) return QString();
+    if (trimmed.startsWith(QStringLiteral("ssh://"), Qt::CaseInsensitive) || trimmed.contains(QLatin1Char('@'))) {
+        return normalizeServerEndpointUrl(trimmed);
+    }
+    const QVariantMap split = splitServerUrl(trimmed);
+    if (!split.value(QStringLiteral("port")).toString().isEmpty()) {
+        return normalizeServerEndpointUrl(trimmed);  // inline port wins
+    }
+    const int p = port.trimmed().toInt();
+    if (p < 1 || p > 65535) return normalizeServerEndpointUrl(trimmed);
+    // Insert ":port" after the host, before any path.
+    QString withScheme = trimmed;
+    if (!withScheme.contains(QStringLiteral("://"))) withScheme.prepend(QStringLiteral("http://"));
+    QUrl u(withScheme, QUrl::TolerantMode);
+    if (!u.isValid() || u.host().isEmpty()) return normalizeServerEndpointUrl(trimmed);
+    u.setPort(p);
+    return normalizeServerEndpointUrl(u.toString());
 }
 
 QString Backend::webUiUrl() const {
@@ -1306,6 +1355,7 @@ QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QStri
         entry.insert(QStringLiteral("host"), host);
         entry.insert(QStringLiteral("ip"), ip);
         entry.insert(QStringLiteral("url"), QStringLiteral("http://%1:%2").arg(host).arg(kDefaultRelayPort));
+        entry.insert(QStringLiteral("baseUrl"), QStringLiteral("http://%1").arg(host));
         entry.insert(QStringLiteral("probeState"), QStringLiteral("pending"));
         out.append(entry);
     }
@@ -1504,19 +1554,19 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
 }
 
 void Backend::loadCredentials() {
-    m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"));
+    m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"), false);
     if (m_serverUrl.isEmpty()) {
-        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"));
+        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"), false);
     }
     if (m_serverUrl.isEmpty()) {
-        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_URL"));
+        m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_URL"), false);
     }
-    m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SECONDARY_URL"));
+    m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SECONDARY_URL"), false);
     if (m_secondaryServerUrl.isEmpty()) {
-        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SECONDARY_URL"));
+        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SECONDARY_URL"), false);
     }
     if (m_secondaryServerUrl.isEmpty()) {
-        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_SECONDARY_URL"));
+        m_secondaryServerUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEBUBBLES_SECONDARY_URL"), false);
     }
     m_password = qEnvironmentVariable("BLUEPILL_PASSWORD").trimmed();
     if (m_password.isEmpty()) {
@@ -1535,12 +1585,12 @@ void Backend::loadCredentials() {
             const QJsonObject obj = QJsonDocument::fromJson(cfgFile.readAll()).object();
             cfgFile.close();
             if (m_serverUrl.isEmpty()) {
-                m_serverUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("serverUrl")).toString());
+                m_serverUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("serverUrl")).toString(), false);
             }
             if (m_secondaryServerUrl.isEmpty()) {
-                m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("secondaryServerUrl")).toString());
+                m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("secondaryServerUrl")).toString(), false);
                 if (m_secondaryServerUrl.isEmpty()) {
-                    m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("failoverUrl")).toString());
+                    m_secondaryServerUrl = normalizeServerEndpointUrl(obj.value(QStringLiteral("failoverUrl")).toString(), false);
                 }
             }
             if (m_password.isEmpty()) {
@@ -1561,7 +1611,7 @@ void Backend::loadCredentials() {
                 if (spUrl.isEmpty()) {
                     spUrl = obj.value(QStringLiteral("flutter.serverAddress")).toString().trimmed();
                 }
-                m_serverUrl = normalizeServerEndpointUrl(spUrl);
+                m_serverUrl = normalizeServerEndpointUrl(spUrl, false);
             }
             if (m_password.isEmpty()) {
                 m_password = obj.value(QStringLiteral("guidAuthKey")).toString().trimmed();
