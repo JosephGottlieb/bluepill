@@ -1,6 +1,7 @@
 <RCC>
     <qresource prefix="/">
         <file>Main.qml</file>
+        <file>RoundedCornerMask.qml</file>
         <file>ThemedComboBox.qml</file>
         <file>RoundAvatar.qml</file>
         <file>bluepill.svg</file>

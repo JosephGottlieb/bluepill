@@ -137,6 +137,8 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <QSslConfiguration>
 #include <QSslSocket>
 #include <QStandardPaths>
+#include <QTextBoundaryFinder>
+#include "emoji_ranges.h"
 #include <QHostInfo>
 #include <QThreadPool>
 #include <QUrl>
@@ -2695,6 +2697,64 @@ bool Backend::isImageMimeOrExt(const QString &mime, const QString &fileName) {
         || lowerName.endsWith(QStringLiteral(".tiff"))
         || lowerName.endsWith(QStringLiteral(".tif"))
         || lowerName.endsWith(QStringLiteral(".bmp"));
+}
+
+bool Backend::isAnimatedImageAttachment(const QString &mimeType, const QString &fileName) {
+    const QString mime = mimeType.trimmed().toLower();
+    if (mime == QStringLiteral("image/gif") || mime == QStringLiteral("image/webp")) return true;
+    QString name = fileName.trimmed().toLower();
+    const int q = name.indexOf(QLatin1Char('?'));
+    if (q >= 0) name.truncate(q);
+    return name.endsWith(QStringLiteral(".gif")) || name.endsWith(QStringLiteral(".webp"));
+}
+
+namespace {
+template <size_t N>
+bool inEmojiRanges(const EmojiRange (&ranges)[N], char32_t cp) {
+    const EmojiRange *it = std::upper_bound(std::begin(ranges), std::end(ranges), cp,
+                                            [](char32_t v, const EmojiRange &r) { return v < r.lo; });
+    return it != std::begin(ranges) && cp <= (it - 1)->hi;
+}
+// Emoji shown as emoji on their own (Unicode Emoji_Presentation).
+bool isStrongEmojiCodePoint(char32_t cp) { return inEmojiRanges(kEmojiPresentationRanges, cp); }
+// Emoji that are text by default and only count with U+FE0F.
+bool isTextDefaultEmojiCodePoint(char32_t cp) { return inEmojiRanges(kTextDefaultEmojiRanges, cp); }
+bool isKeycapBase(char32_t cp) {
+    return (cp >= U'0' && cp <= U'9') || cp == U'#' || cp == U'*';
+}
+bool isEmojiJoinerOrModifier(char32_t cp) {
+    return cp == 0x200D || cp == 0xFE0F || cp == 0x20E3 || (cp >= 0xE0020 && cp <= 0xE007F);
+}
+}  // namespace
+
+int Backend::jumboEmojiCount(const QString &text) {
+    const QString trimmed = text.trimmed();
+    if (trimmed.isEmpty()) return 0;
+    QTextBoundaryFinder finder(QTextBoundaryFinder::Grapheme, trimmed);
+    int count = 0;
+    qsizetype start = 0;
+    while (start < trimmed.size()) {
+        qsizetype end = finder.toNextBoundary();
+        if (end < 0) end = trimmed.size();
+        const QString cluster = trimmed.mid(start, end - start);
+        start = end;
+        if (cluster.trimmed().isEmpty()) continue;  // spaces between emoji are fine
+
+        bool strong = false, weak = false, keycapBase = false, hasVs16 = false, hasKeycap = false;
+        for (const char32_t cp : cluster.toUcs4()) {
+            if (cp == 0xFE0F) hasVs16 = true;
+            if (cp == 0x20E3) hasKeycap = true;
+            if (isStrongEmojiCodePoint(cp)) strong = true;
+            else if (isTextDefaultEmojiCodePoint(cp)) weak = true;
+            else if (isKeycapBase(cp)) keycapBase = true;
+            else if (cp == 0xFE0E) return 0;                  // explicit text presentation
+            else if (!isEmojiJoinerOrModifier(cp)) return 0;  // letters, punctuation...
+        }
+        const bool isEmoji = keycapBase ? (hasKeycap && !strong && !weak) : (strong || (weak && hasVs16));
+        if (!isEmoji) return 0;
+        if (++count > 3) return 0;  // iOS only enlarges up to three
+    }
+    return count;
 }
 
 bool Backend::isMessageDeletedOrRetracted(const QJsonObject &m) {
