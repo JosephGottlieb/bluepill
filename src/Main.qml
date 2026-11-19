@@ -1360,6 +1360,38 @@ ApplicationWindow {
                     }
                 }
 
+                // Sync (was in the conversation header): conversations and contacts
+                Rectangle {
+                    id: topSyncBtn
+                    objectName: "topSyncBtn"
+                    width: topSyncLbl.implicitWidth + 18
+                    height: 30
+                    radius: 7
+                    color: topSyncMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: (topSyncMouse.containsMouse || backend.syncingHistory) ? theme.accent : theme.muted
+                    ToolTip.visible: topSyncMouse.containsMouse
+                    ToolTip.text: i18n.tr("Sync conversations and contacts (Ctrl+R)")
+                    ToolTip.delay: 400
+                    Text {
+                        id: topSyncLbl
+                        anchors.centerIn: parent
+                        text: backend.syncingHistory ? ("↻ " + i18n.tr("Syncing…")) : ("↻ " + i18n.tr("Sync"))
+                        font.pixelSize: theme.fontSize - 2
+                        color: backend.syncingHistory ? theme.accent : theme.foreground
+                    }
+                    MouseArea {
+                        id: topSyncMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            backend.refreshAll()
+                            backend.syncContactsNow()
+                        }
+                    }
+                }
+
                 // Global Notifications Toggle Button
                 Rectangle {
                     width: 32
@@ -2053,8 +2085,38 @@ ApplicationWindow {
                                             maximumLineCount: 1
                                         }
 
+                                        // Read/unread toggle (was the header's Read button)
                                         Rectangle {
-                                            visible: chatHover.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            id: rowReadToggleBtn
+                                            objectName: "rowReadToggleBtn"
+                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            width: 22
+                                            height: 20
+                                            radius: 5
+                                            z: 3
+                                            color: rowReadMouse.containsMouse ? theme.accent : theme.background
+                                            border.width: 1
+                                            border.color: theme.muted
+                                            ToolTip.visible: rowReadMouse.containsMouse
+                                            ToolTip.text: modelData.unreadCount > 0 ? i18n.tr("Mark as read") : i18n.tr("Mark as unread")
+                                            ToolTip.delay: 400
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: modelData.unreadCount > 0 ? "✓" : "●"
+                                                font.pixelSize: theme.fontSize - 3
+                                                color: rowReadMouse.containsMouse ? theme.darkerBackground : theme.foreground
+                                            }
+                                            MouseArea {
+                                                id: rowReadMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: backend.toggleChatReadUnread(modelData.guid)
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2078,7 +2140,7 @@ ApplicationWindow {
 
                                         Rectangle {
                                             id: rowDeleteChatBtn
-                                            visible: chatHover.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
+                                            visible: chatHover.containsMouse || rowReadMouse.containsMouse || rowMuteMouse.containsMouse || rowDeleteMouse.containsMouse
                                             width: 22
                                             height: 20
                                             radius: 5
@@ -2319,21 +2381,23 @@ ApplicationWindow {
                     readonly property int actionBtnPad: compactActionButtons ? 14 : 20
                     readonly property real naturalIdentityWidth: 16 + 44 + 12 + Math.max(contactTitleText.implicitWidth + 8 + hdrSrvPill.implicitWidth, contactSubtitleText.visible ? contactSubtitleText.implicitWidth : 0) + 16
                     readonly property real naturalActionsWidth: headerActionsRow.implicitWidth
-                    readonly property bool stackChatHeaderRows: (activeChatHeader.width > 0) && (activeChatHeader.width < 900) && ((naturalIdentityWidth + naturalActionsWidth + 44) > activeChatHeader.width || activeChatHeader.width < 700)
-                    implicitHeight: stackChatHeaderRows ? 104 : 68
+                    // One row: the actions moved to hover menus, the top bar and the
+                    // timeline's floating arrows, so nothing needs a second row.
+                    readonly property bool stackChatHeaderRows: false
+                    implicitHeight: 60
                     Layout.preferredHeight: implicitHeight
-                    color: theme.darkBackground
+                    // Transparent strip with the contact centered, like Messages
+                    color: "transparent"
 
                     // Left / Top Side: Contact Identity Card
                     Rectangle {
                         id: contactIdentityCard
                         objectName: "contactIdentityCard"
-                        x: 18
-                        y: activeChatHeader.stackChatHeaderRows ? 8 : Math.round((activeChatHeader.height - height) / 2)
-                        height: activeChatHeader.stackChatHeaderRows ? 48 : 52
-                        readonly property real maxAllowedWidth: activeChatHeader.stackChatHeaderRows
-                                                                    ? Math.max(180, activeChatHeader.width - 36)
-                                                                    : Math.max(180, activeChatHeader.width - headerActionsRow.width - 44)
+                        readonly property real sideReserve: headerActionsRow.width > 0 ? headerActionsRow.width + 26 : 18
+                        x: Math.max(18, Math.round((activeChatHeader.width - width) / 2))
+                        y: Math.round((activeChatHeader.height - height) / 2)
+                        height: 52
+                        readonly property real maxAllowedWidth: Math.max(180, activeChatHeader.width - 2 * sideReserve)
                         width: Math.min(activeChatHeader.naturalIdentityWidth, maxAllowedWidth)
                         radius: 8
                         clip: true
@@ -2452,12 +2516,8 @@ ApplicationWindow {
                     Row {
                         id: headerActionsRow
                         objectName: "headerActionsRow"
-                        x: activeChatHeader.stackChatHeaderRows
-                               ? 18
-                               : Math.max(18, activeChatHeader.width - width - 18)
-                        y: activeChatHeader.stackChatHeaderRows
-                               ? 62
-                               : Math.round((activeChatHeader.height - height) / 2)
+                        x: Math.max(18, activeChatHeader.width - width - 18)
+                        y: Math.round((activeChatHeader.height - height) / 2)
                         spacing: activeChatHeader.compactActionButtons ? 5 : 8
 
                         // Add / Edit Contact Button
@@ -2495,185 +2555,6 @@ ApplicationWindow {
                             }
                         }
 
-                        // Scroll to Top Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: topBtnLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: topBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: topBtnMouse.containsMouse ? theme.accent : theme.muted
-
-                            Text {
-                                id: topBtnLbl
-                                anchors.centerIn: parent
-                                text: "↑ " + i18n.tr("Top")
-                                font.pixelSize: theme.fontSize - 2
-                                color: topBtnMouse.containsMouse ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                id: topBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: messageListView.scrollToTop()
-                            }
-                        }
-
-                        // Scroll to Bottom Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: bottomBtnLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: bottomBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: bottomBtnMouse.containsMouse ? theme.accent : theme.muted
-
-                            Text {
-                                id: bottomBtnLbl
-                                anchors.centerIn: parent
-                                text: "↓ " + i18n.tr("Bottom")
-                                font.pixelSize: theme.fontSize - 2
-                                color: bottomBtnMouse.containsMouse ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                id: bottomBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: messageListView.scrollToBottom()
-                            }
-                        }
-
-                        // Mute / Unmute Conversation Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: muteChatLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: backend.selectedChatMuted ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.selectedChatMuted ? theme.accent : theme.muted
-
-                            Text {
-                                id: muteChatLbl
-                                anchors.centerIn: parent
-                                text: backend.selectedChatMuted ? ("🔔 " + i18n.tr("Muted")) : ("🔕 " + i18n.tr("Mute"))
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.selectedChatMuted
-                                color: backend.selectedChatMuted ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.toggleChatMute(backend.selectedChatGuid)
-                            }
-                        }
-
-                        // Mark Read Button (Bidirectional iMessage Read/Unread Sync)
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: markReadLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: backend.selectedChatUnreadCount > 0 ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.selectedChatUnreadCount > 0 ? theme.accent : theme.muted
-
-                            Text {
-                                id: markReadLbl
-                                anchors.centerIn: parent
-                                text: backend.selectedChatUnreadCount > 0
-                                          ? ("✓ " + (activeChatHeader.ultraCompactActionButtons ? i18n.tr("Read") : i18n.tr("Mark Read")))
-                                          : ("✓ " + i18n.tr("Read"))
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.selectedChatUnreadCount > 0
-                                color: backend.selectedChatUnreadCount > 0 ? theme.accent : theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                onClicked: function(mouse) {
-                                    if (mouse.button === Qt.RightButton) {
-                                        backend.markChatUnread(backend.selectedChatGuid)
-                                        root.showToast("● " + i18n.tr("Marked chat as unread in iMessage"))
-                                    } else {
-                                        if (backend.selectedChatUnreadCount > 0) {
-                                            backend.markChatRead(backend.selectedChatGuid)
-                                            root.showToast("✓ " + i18n.tr("Marked chat as read in iMessage"))
-                                        } else {
-                                            backend.toggleChatReadUnread(backend.selectedChatGuid)
-                                            if (backend.selectedChatUnreadCount > 0) {
-                                                root.showToast("● " + i18n.tr("Marked chat as unread in iMessage"))
-                                            } else {
-                                                root.showToast("✓ " + i18n.tr("Marked chat as read in iMessage"))
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        // Sync Contacts / Refresh Button
-                        Rectangle {
-                            height: 32
-                            radius: 8
-                            width: refreshLbl.implicitWidth + activeChatHeader.actionBtnPad
-                            color: theme.lighterBackground
-                            border.width: 1
-                            border.color: theme.muted
-
-                            Text {
-                                id: refreshLbl
-                                anchors.centerIn: parent
-                                text: "↻ " + i18n.tr("Sync")
-                                font.pixelSize: theme.fontSize - 2
-                                color: theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.syncContactsNow()
-                            }
-                        }
-
-                        // Delete Conversation Button (deletes conversation & syncs across iPhone/iCloud)
-                        Rectangle {
-                            id: headerDeleteChatBtn
-                            height: 32
-                            radius: 8
-                            width: 34
-                            color: headerDeleteChatMouse.containsMouse ? "#3b1d26" : theme.lighterBackground
-                            border.width: 1
-                            border.color: headerDeleteChatMouse.containsMouse ? "#f7768e" : theme.muted
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "󰆴"
-                                font.pixelSize: theme.fontSize
-                                color: headerDeleteChatMouse.containsMouse ? "#f7768e" : theme.foreground
-                            }
-                            MouseArea {
-                                id: headerDeleteChatMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.pendingDeleteChatGuid = backend.selectedChatGuid
-                                    root.pendingDeleteChatTitle = backend.selectedChatTitle
-                                    root.showDeleteChatModal = true
-                                }
-                            }
-                        }
-                    }
-
-                    Rectangle {
-                        anchors.bottom: parent.bottom
-                        width: parent.width
-                        height: 1
-                        color: theme.lighterBackground
                     }
                 }
 
@@ -3094,6 +2975,82 @@ ApplicationWindow {
 
                     ScrollBar.vertical: ScrollBar {
                         policy: ScrollBar.AsNeeded
+                    }
+
+                    // Floating "Top (Ctrl+Home)" arrow (replaces the header's Top button). Parented to
+                    // the ListView itself so it stays put while the content scrolls.
+                    Rectangle {
+                        id: scrollToTopArrow
+                        objectName: "scrollToTopArrow"
+                        parent: messageListView
+                        z: 20
+                        width: 36
+                        height: 36
+                        radius: 18
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
+                        anchors.top: parent.top
+                        anchors.topMargin: 12
+                        visible: messageListView.count > 0 && (messageListView.contentY > messageListView.originY + messageListView.topMargin + 40)
+                        opacity: scrollToTopArrowMouse.containsMouse ? 1.0 : 0.85
+                        color: scrollToTopArrowMouse.containsMouse ? theme.accent : theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.accent
+                        ToolTip.visible: scrollToTopArrowMouse.containsMouse
+                        ToolTip.text: i18n.tr("Top (Ctrl+Home)")
+                        ToolTip.delay: 400
+                        Text {
+                            anchors.centerIn: parent
+                            text: "↑"
+                            font.pixelSize: theme.fontSize + 2
+                            font.bold: true
+                            color: scrollToTopArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
+                        }
+                        MouseArea {
+                            id: scrollToTopArrowMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: messageListView.scrollToTop()
+                        }
+                    }
+
+                    // Floating "Newest messages (Ctrl+End)" arrow (replaces the header's Bottom button). Parented to
+                    // the ListView itself so it stays put while the content scrolls.
+                    Rectangle {
+                        id: scrollToBottomArrow
+                        objectName: "scrollToBottomArrow"
+                        parent: messageListView
+                        z: 20
+                        width: 36
+                        height: 36
+                        radius: 18
+                        anchors.right: parent.right
+                        anchors.rightMargin: 16
+                        anchors.bottom: parent.bottom
+                        anchors.bottomMargin: 12
+                        visible: messageListView.count > 0 && (!messageListView.atYEnd && messageListView.contentHeight > messageListView.height)
+                        opacity: scrollToBottomArrowMouse.containsMouse ? 1.0 : 0.85
+                        color: scrollToBottomArrowMouse.containsMouse ? theme.accent : theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.accent
+                        ToolTip.visible: scrollToBottomArrowMouse.containsMouse
+                        ToolTip.text: i18n.tr("Newest messages (Ctrl+End)")
+                        ToolTip.delay: 400
+                        Text {
+                            anchors.centerIn: parent
+                            text: "↓"
+                            font.pixelSize: theme.fontSize + 2
+                            font.bold: true
+                            color: scrollToBottomArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
+                        }
+                        MouseArea {
+                            id: scrollToBottomArrowMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: messageListView.scrollToBottom()
+                        }
                     }
 
                     delegate: ColumnLayout {
@@ -4972,7 +4929,8 @@ ApplicationWindow {
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0
                     Layout.fillWidth: true
-                    Layout.preferredHeight: Math.min(160, Math.max(72, theme.fontSize + 52, composerInput.contentHeight + composerInput.topPadding + composerInput.bottomPadding + 28))
+                    // Hugs the input: one line is as tall as the buttons, and it grows as text wraps
+                    Layout.preferredHeight: Math.min(160, Math.max(64, composerBox.Layout.preferredHeight + 20))
                     color: theme.darkBackground
 
                     Rectangle {
@@ -5024,8 +4982,12 @@ ApplicationWindow {
                         }
 
                         Rectangle {
+                            id: composerBox
+                            objectName: "composerBox"
                             Layout.fillWidth: true
-                            Layout.fillHeight: true
+                            Layout.alignment: Qt.AlignVCenter
+                            // No empty space under a single line; up to ~6 lines before scrolling
+                            Layout.preferredHeight: Math.min(140, Math.max(44, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))
                             radius: theme.radius
                             color: theme.background
                             border.width: 1
@@ -5036,8 +4998,8 @@ ApplicationWindow {
                                 anchors.fill: parent
                                 anchors.leftMargin: 8
                                 anchors.rightMargin: 8
-                                topPadding: 10
-                                bottomPadding: 14
+                                topPadding: 11
+                                bottomPadding: 11
                                 leftPadding: 4
                                 rightPadding: 4
                                 placeholderText: i18n.tr("Type an iMessage... (:smile: for emoji, Enter to send)")
@@ -8470,7 +8432,6 @@ ApplicationWindow {
                         }
                         Repeater {
                             model: [
-                                { label: backend.syncingHistory ? ("↻ " + i18n.tr("Syncing...")) : ("↻ " + i18n.tr("Sync Now")), name: "settingsSyncNowBtn", run: function() { backend.refreshAll() } },
                                 { label: "🌐 " + i18n.tr("Web UI"), name: "settingsWebUiBtn", run: function() { backend.openWebUi() } }
                             ]
                             delegate: Rectangle {

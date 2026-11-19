@@ -582,8 +582,10 @@ private slots:
         QVERIFY(qml.contains(QStringLiteral("bottomSettleTimer")));
         QVERIFY(qml.contains(QStringLiteral("messageListView.scrollToTop()")));
         QVERIFY(qml.contains(QStringLiteral("messageListView.scrollToBottom()")));
-        QVERIFY(qml.contains(QStringLiteral("i18n.tr(\"Top\")")));
-        QVERIFY(qml.contains(QStringLiteral("i18n.tr(\"Bottom\")")));
+        // Top/Bottom are floating arrows over the timeline, not header buttons
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"scrollToTopArrow\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"scrollToBottomArrow\"")));
+        QVERIFY(!qml.contains(QStringLiteral("i18n.tr(\"Bottom\")")));
         QVERIFY(qml.contains(QStringLiteral("Load older messages")));
     }
 
@@ -1557,8 +1559,10 @@ private slots:
         const QString qml = QString::fromUtf8(qmlFile.readAll());
 
         // 1. Verify Bottom Message Composer Bar height & composerInput bottomPadding for descenders (p, q, g, y, j)
-        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(160, Math.max(72, theme.fontSize + 52, composerInput.contentHeight + composerInput.topPadding + composerInput.bottomPadding + 28))")));
-        QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 8\n                                anchors.rightMargin: 8\n                                topPadding: 10\n                                bottomPadding: 14")));
+        // The input hugs its text (even padding, room for descenders), and the bar hugs the input
+        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(160, Math.max(64, composerBox.Layout.preferredHeight + 20))")));
+        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(140, Math.max(44, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))")));
+        QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 8\n                                anchors.rightMargin: 8\n                                topPadding: 11\n                                bottomPadding: 11")));
 
         // 2. Verify New Message modal, Search Bar, and Emoji Search Field bottomPadding & expanded heights
         QVERIFY(qml.contains(QStringLiteral("id: newChatRecipient\n                        anchors.fill: parent\n                        anchors.leftMargin: 10\n                        anchors.rightMargin: 10\n                        topPadding: 8\n                        bottomPadding: 12")));
@@ -2380,49 +2384,27 @@ private slots:
         QVERIFY(headerActionsRow != nullptr);
         QVERIFY(leftSidebarPane != nullptr);
 
-        // 1. Wide window (1400px): single-row header (height 68), zero overlap
-        win->setWidth(1400);
-        win->setHeight(820);
-        QCoreApplication::processEvents();
-        QTRY_VERIFY_WITH_TIMEOUT(activeChatHeader->width() > 1000, 1000);
-        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), false, 1000);
-        QCOMPARE(qRound(activeChatHeader->height()), 68);
-        QVERIFY2(contactIdentityCard->x() + contactIdentityCard->width() <= headerActionsRow->x(),
-                 "In 1-row wide mode, contactIdentityCard must not overlap headerActionsRow");
-        if (!qEnvironmentVariableIsEmpty("IMSG_WIDE_SCREENSHOT")) {
-            win->grabWindow().save(QString::fromUtf8(qgetenv("IMSG_WIDE_SCREENSHOT")));
+        // One transparent 60px row at every width; the contact is centered and never
+        // overlaps what's left of the actions row.
+        QCOMPARE(activeChatHeader->property("color").value<QColor>().alpha(), 0);
+        for (int w : {1400, 900, 720}) {
+            win->setWidth(w);
+            win->setHeight(820);
+            QCoreApplication::processEvents();
+            QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), false, 1000);
+            QCOMPARE(qRound(activeChatHeader->height()), 60);
+            const QRectF identity(contactIdentityCard->x(), contactIdentityCard->y(),
+                                  contactIdentityCard->width(), contactIdentityCard->height());
+            const QRectF actions(headerActionsRow->x(), headerActionsRow->y(),
+                                 headerActionsRow->width(), headerActionsRow->height());
+            QVERIFY2(actions.width() == 0 || !identity.intersects(actions), qPrintable(QStringLiteral("overlap at %1px").arg(w)));
+            QVERIFY2(qAbs(identity.center().x() - activeChatHeader->width() / 2.0) <= 1.0,
+                     qPrintable(QStringLiteral("not centered at %1px: %2 vs %3").arg(w).arg(identity.center().x()).arg(activeChatHeader->width() / 2.0)));
+            QVERIFY(actions.right() <= activeChatHeader->width());
+            if (w == 1400 && !qEnvironmentVariableIsEmpty("IMSG_WIDE_SCREENSHOT")) {
+                win->grabWindow().save(QString::fromUtf8(qgetenv("IMSG_WIDE_SCREENSHOT")));
+            }
         }
-
-        // 2. 50% Desktop Split (900px): dynamic 2-row header (height 104), zero overlap, full name visible
-        win->setWidth(900);
-        QCoreApplication::processEvents();
-        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), true, 1000);
-        QCOMPARE(qRound(activeChatHeader->height()), 104);
-        const QRectF identityRect900(contactIdentityCard->x(), contactIdentityCard->y(),
-                                     contactIdentityCard->width(), contactIdentityCard->height());
-        const QRectF actionsRect900(headerActionsRow->x(), headerActionsRow->y(),
-                                    headerActionsRow->width(), headerActionsRow->height());
-        QVERIFY2(!identityRect900.intersects(actionsRect900),
-                 "In 50% split mode (900px), contactIdentityCard and headerActionsRow must have zero geometric overlap");
-        QVERIFY2(actionsRect900.right() <= activeChatHeader->width(),
-                 "In 50% split mode (900px), action buttons row must fit within activeChatHeader width");
-        if (!qEnvironmentVariableIsEmpty("IMSG_SPLIT_SCREENSHOT")) {
-            win->grabWindow().save(QString::fromUtf8(qgetenv("IMSG_SPLIT_SCREENSHOT")));
-        }
-
-        // 3. Narrow split (720px): compact buttons on row 2, zero overlap
-        win->setWidth(720);
-        QCoreApplication::processEvents();
-        QTRY_COMPARE_WITH_TIMEOUT(activeChatHeader->property("stackChatHeaderRows").toBool(), true, 1000);
-        QCOMPARE(activeChatHeader->property("ultraCompactActionButtons").toBool(), true);
-        const QRectF identityRect720(contactIdentityCard->x(), contactIdentityCard->y(),
-                                     contactIdentityCard->width(), contactIdentityCard->height());
-        const QRectF actionsRect720(headerActionsRow->x(), headerActionsRow->y(),
-                                    headerActionsRow->width(), headerActionsRow->height());
-        QVERIFY2(!identityRect720.intersects(actionsRect720),
-                 "In narrow split mode (720px), contactIdentityCard and headerActionsRow must have zero geometric overlap");
-        QVERIFY2(actionsRect720.right() <= activeChatHeader->width(),
-                 "In narrow split mode (720px), compact action buttons must fit within activeChatHeader width");
 
         QVERIFY2(qmlWarnings.isEmpty(), qPrintable(qmlWarnings.join(QStringLiteral("\n"))));
     }
@@ -4817,7 +4799,7 @@ private slots:
             };
             auto *historyCol = win->findChild<QQuickItem *>(QStringLiteral("historySettingsCol"));
             QVERIFY(historyCol != nullptr);
-            auto *syncNowBtn = findVisual(historyCol, QStringLiteral("settingsSyncNowBtn"));
+            auto *syncNowBtn = win->findChild<QQuickItem *>(QStringLiteral("topSyncBtn"));  // Sync lives in the top bar
             auto *webUiBtn = findVisual(historyCol, QStringLiteral("settingsWebUiBtn"));
             auto *settingsTitle = win->findChild<QQuickItem *>(QStringLiteral("settingsModalTitle"));
             auto *cfgBadge = win->findChild<QQuickItem *>(QStringLiteral("cfgStatusBadge"));
