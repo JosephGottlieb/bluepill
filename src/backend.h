@@ -241,9 +241,14 @@ public:
     Q_INVOKABLE QString webUiUrl() const;
     // Default relay port used when a scheme-less or http:// URL omits one.
     static constexpr int kDefaultRelayPort = 1235;
-    // applyDefaultPort=false is used when loading saved config/env vars so an
-    // existing "https://relay" (proxy on 443) is never rewritten to :1235.
-    static QString normalizeServerEndpointUrl(const QString &rawUrl, bool applyDefaultPort = true);
+    // fromUserInput=true (Settings): bare host -> http://, no port -> :1235.
+    // fromUserInput=false (config.json / env vars / keyring): keep the legacy
+    // behaviour exactly (bare host -> https://, no port added) so existing
+    // endpoints are never rewritten.
+    static QString normalizeServerEndpointUrl(const QString &rawUrl, bool fromUserInput = true);
+    // True when two server URLs reach the same endpoint (scheme, host,
+    // effective port, path), e.g. "https://relay" and "https://relay:443".
+    static bool isSameServerEndpoint(const QString &a, const QString &b);
     // Splits "scheme://host:port/path" into {url: text without ":port", port}.
     // Keeps the typed text otherwise unchanged (no scheme is added). With
     // hideDefaultPort, a port equal to kDefaultRelayPort comes back as "".
@@ -533,6 +538,7 @@ private:
     bool m_tailscaleScanning = false;
     int m_tailscalePendingProbes = 0;
     void setTailscaleScanState(const QVariantList &relays, const QString &status, bool scanning);
+    void probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback);
     QPointer<QNetworkReply> m_activeMessagesReply;
     QPointer<QNetworkReply> m_activeEnrichReply;
     QPointer<QNetworkReply> m_activeSocketPollReply;

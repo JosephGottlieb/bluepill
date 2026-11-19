@@ -9,6 +9,7 @@
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QQmlApplicationEngine>
+#include <QScopeGuard>
 #include <QQmlContext>
 #include <QQuickItem>
 #include <QQuickWindow>
@@ -2980,6 +2981,67 @@ private slots:
         QVERIFY(failItem.value(QStringLiteral("metaBadgeText")).toString().contains(QStringLiteral("⚠ Not Delivered")));
     }
 
+    void testServerEndpointEquivalence() {
+        auto same = [](const char *a, const char *b) {
+            return Backend::isSameServerEndpoint(QString::fromUtf8(a), QString::fromUtf8(b));
+        };
+        QVERIFY(same("https://relay.example.com", "https://relay.example.com:443"));
+        QVERIFY(same("http://relay.example.com", "HTTP://Relay.Example.com:80/"));
+        QVERIFY(same("ssh://user@mac.local", "ssh://user@mac.local"));
+        QVERIFY(!same("https://relay.example.com", "https://relay.example.com:1235"));
+        QVERIFY(!same("http://relay.example.com:1235", "https://relay.example.com:1235"));
+        QVERIFY(!same("https://relay.example.com", "https://other.example.com"));
+        QVERIFY(!same("https://relay.example.com/bb", "https://relay.example.com"));
+        QVERIFY(!same("", "https://relay.example.com"));
+    }
+
+    void testResavingUnchangedSettingsKeepsEndpointsAndPendingEdits() {
+        // Env vars override config.json; isolate from earlier tests.
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_SECONDARY_URL", "IMSG_SECONDARY_URL", "BLUEBUBBLES_SECONDARY_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&savedEnv]() {
+            for (auto it = savedEnv.constBegin(); it != savedEnv.constEnd(); ++it) qputenv(it.key().constData(), it.value());
+        });
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QString cfgPath = tempDir.filePath(QStringLiteral("cfg_resave.json"));
+        {
+            QFile f(cfgPath);
+            QVERIFY(f.open(QIODevice::WriteOnly));
+            f.write(QJsonDocument(QJsonObject{
+                {QStringLiteral("serverUrl"), QStringLiteral("https://relay.invalid")},
+                {QStringLiteral("secondaryServerUrl"), QStringLiteral("https://backup.invalid")},
+                {QStringLiteral("password"), QStringLiteral("pw")}}).toJson());
+        }
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_resave.json")));
+        b.setConfigFilePath(cfgPath);
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://relay.invalid"));
+
+        const QString noteId = b.saveIcloudNote(QStringLiteral("note_resave_1"), QStringLiteral("Draft"), QStringLiteral("Body"), QStringLiteral("Notes"));
+        QVERIFY(b.hasPendingIcloudNoteSaveForTest(noteId));
+
+        // Settings shows the effective port (443) for the portless primary and
+        // submits the failover text unchanged: nothing may move or be discarded.
+        b.saveServerConfig(Backend::composeServerUrl(QStringLiteral("https://relay.invalid"), QStringLiteral("443")),
+                           QStringLiteral("https://backup.invalid"), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://relay.invalid"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("https://backup.invalid"));
+        QVERIFY(b.hasPendingIcloudNoteSaveForTest(noteId));
+
+        // A real endpoint change still applies the new defaults and invalidates pending edits
+        b.saveServerConfig(QStringLiteral("https://other.invalid"), QStringLiteral("backup2.invalid"), QString());
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://other.invalid:1235"));
+        QCOMPARE(b.secondaryServerUrl(), QStringLiteral("http://backup2.invalid:1235"));
+        QVERIFY(!b.hasPendingIcloudNoteSaveForTest(noteId));
+    }
+
     void testServerUrlDefaultsToHttpAndRelayPort() {
         auto n = [](const char *s) { return Backend::normalizeServerEndpointUrl(QString::fromUtf8(s)); };
         // Bare host -> http:// + default relay port
@@ -2997,7 +3059,9 @@ private slots:
         QCOMPARE(n("https://relay.example.com:443"), QStringLiteral("https://relay.example.com:443"));
         // Loading saved config never adds a port
         QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("https://relay.example.com"), false), QStringLiteral("https://relay.example.com"));
-        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("my-mac"), false), QStringLiteral("http://my-mac"));
+        // ...and keeps the historical https:// for scheme-less saved/env values
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("my-mac"), false), QStringLiteral("https://my-mac"));
+        QCOMPARE(Backend::normalizeServerEndpointUrl(QStringLiteral("relay.example.com:443"), false), QStringLiteral("https://relay.example.com:443"));
         // SSH forms unchanged
         QCOMPARE(n("user@mac.local"), QStringLiteral("ssh://user@mac.local"));
         QCOMPARE(n("ssh://user@mac.local"), QStringLiteral("ssh://user@mac.local"));
@@ -3114,6 +3178,7 @@ private slots:
         QCOMPARE(studio.value("ip").toString(), QStringLiteral("192.0.2.9"));
         QCOMPARE(studio.value("url").toString(), QStringLiteral("http://studio.tailnet.example.com:1235"));
         QCOMPARE(studio.value("probeState").toString(), QStringLiteral("pending"));
+        QCOMPARE(studio.value("key").toString(), QStringLiteral("studio.tailnet.example.com"));
 
         QString stopped;
         QVERIFY(Backend::parseTailscaleMacPeers(R"({"BackendState":"Stopped","Peer":{}})", &stopped).isEmpty());

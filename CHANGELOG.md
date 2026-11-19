@@ -10,6 +10,10 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 ### Added
 - **Tailscale relay discovery in Settings:** When `tailscale` is installed and connected, Settings lists online macOS peers, checks each for a relay on `:1235`, and fills in the URL with one click. On first run, if exactly one relay answers, it's filled in for you. If the relay isn't reachable, the dialog says the relay may be listening only on `127.0.0.1`.
 
+- **Settings re-save never moves or invalidates an endpoint:** an unchanged primary or failover URL is kept exactly as saved (for example, `https://relay` stays on 443). Endpoint changes are compared by effective scheme, host, port and path, so an equivalent URL such as `https://relay:443` no longer discards pending iCloud Hub edits.
+- **Legacy URLs keep `https://`:** scheme-less URLs from `config.json`, environment variables and the keyring keep the historical `https://` default. The new `http://` + `1235` defaults apply only to values entered in Settings.
+- **Tailscale discovery works without MagicDNS:** if a peer's DNS name doesn't resolve (e.g. `--accept-dns=false`), the probe retries the peer's Tailscale IP.
+
 ### Documentation
 - Use the Homebrew relay port `1235` everywhere the docs referred to the BluePill relay on `1234` (server.json examples, LaunchAgent plists, reverse-proxy targets, Tailscale Serve, Web UI URLs, agent playbooks). BlueBubbles' own default `1234` is still mentioned where it applies.
 - Document the Settings Port field, Tailscale relay discovery, and when to enter `443` (TLS reverse proxy / Tailscale Serve).

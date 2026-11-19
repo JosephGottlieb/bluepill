@@ -1228,7 +1228,7 @@ void Backend::checkServerAndLoad() {
     }
 }
 
-QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool applyDefaultPort) {
+QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool fromUserInput) {
     QString url = rawUrl.trimmed();
     while (url.endsWith(QLatin1Char('/'))) {
         url.chop(1);
@@ -1244,14 +1244,14 @@ QString Backend::normalizeServerEndpointUrl(const QString &rawUrl, bool applyDef
         if (url.contains(QLatin1Char('@')) && !url.contains(QLatin1Char('/'))) {
             return QStringLiteral("ssh://") + url;
         }
-        // The BluePill relay serves plain HTTP unless it was started with
-        // --tls-cert/--tls-key, so a bare host means http://. Anyone behind
-        // TLS (reverse proxy, Tailscale Serve, BlueBubbles) types https://.
-        url = QStringLiteral("http://") + url;
+        // Settings: the BluePill relay serves plain HTTP unless started with
+        // --tls-cert/--tls-key, so a bare host means http://. Saved config and
+        // env vars keep the historical https:// so existing setups don't move.
+        url = (fromUserInput ? QStringLiteral("http://") : QStringLiteral("https://")) + url;
     }
-    // No explicit port -> the relay's default port (1235), for http:// and
-    // https:// alike. Reverse proxies on 443 need ":443" (or the Port field).
-    if (!applyDefaultPort) return url;
+    // Settings only: no explicit port -> the relay's default port (1235), for
+    // http:// and https:// alike. Reverse proxies on 443 need ":443".
+    if (!fromUserInput) return url;
     QUrl parsed(url, QUrl::StrictMode);
     if (parsed.isValid() && !parsed.host().isEmpty() && parsed.port() == -1) {
         parsed.setPort(kDefaultRelayPort);
@@ -1356,6 +1356,7 @@ QVariantList Backend::parseTailscaleMacPeers(const QByteArray &statusJson, QStri
         entry.insert(QStringLiteral("ip"), ip);
         entry.insert(QStringLiteral("url"), QStringLiteral("http://%1:%2").arg(host).arg(kDefaultRelayPort));
         entry.insert(QStringLiteral("baseUrl"), QStringLiteral("http://%1").arg(host));
+        entry.insert(QStringLiteral("key"), host);
         entry.insert(QStringLiteral("probeState"), QStringLiteral("pending"));
         out.append(entry);
     }
@@ -1371,6 +1372,53 @@ void Backend::setTailscaleScanState(const QVariantList &relays, const QString &s
     m_tailscaleStatus = status;
     m_tailscaleScanning = scanning;
     emit tailscaleRelaysChanged();
+}
+
+void Backend::probeTailscaleRelay(const QString &key, const QString &baseUrl, bool allowIpFallback) {
+    QNetworkRequest req(QUrl(baseUrl + QStringLiteral("/api/v1/ping")));
+    req.setTransferTimeout(3000);
+    QSslConfiguration ssl = req.sslConfiguration();
+    ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
+    req.setSslConfiguration(ssl);
+    QNetworkReply *reply = m_nam.get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, key, baseUrl, allowIpFallback]() {
+        reply->deleteLater();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        QString state;
+        if (httpStatus == 200 || httpStatus == 401 || httpStatus == 403) state = QStringLiteral("relay");
+        else if (httpStatus > 0) state = QStringLiteral("other");
+        else state = QStringLiteral("unreachable");
+
+        QVariantList updated = m_tailscaleRelays;
+        for (QVariant &v : updated) {
+            QVariantMap m = v.toMap();
+            if (m.value(QStringLiteral("key")).toString() != key) continue;
+            const QString ip = m.value(QStringLiteral("ip")).toString();
+            // MagicDNS names don't resolve when the client runs with
+            // --accept-dns=false; retry the peer's Tailscale IP before giving up.
+            if (state == QStringLiteral("unreachable") && allowIpFallback && !ip.isEmpty() &&
+                m.value(QStringLiteral("host")).toString() != ip) {
+                probeTailscaleRelay(key, QStringLiteral("http://%1:%2").arg(ip).arg(kDefaultRelayPort), false);
+                return;  // still pending; the IP probe settles this peer
+            }
+            if (state == QStringLiteral("relay") && !allowIpFallback) {
+                m.insert(QStringLiteral("host"), ip);
+                m.insert(QStringLiteral("url"), baseUrl);
+                m.insert(QStringLiteral("baseUrl"), QStringLiteral("http://%1").arg(ip));
+            }
+            m.insert(QStringLiteral("probeState"), state);
+            v = m;
+        }
+        // Relays that answered first, then the rest.
+        std::stable_sort(updated.begin(), updated.end(), [](const QVariant &a, const QVariant &b) {
+            const bool ar = a.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
+            const bool br = b.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
+            return ar && !br;
+        });
+        m_tailscalePendingProbes = qMax(0, m_tailscalePendingProbes - 1);
+        const bool done = m_tailscalePendingProbes == 0;
+        setTailscaleScanState(updated, done ? QStringLiteral("done") : QStringLiteral("probing"), !done);
+    });
 }
 
 void Backend::discoverTailscaleRelays() {
@@ -1417,49 +1465,54 @@ void Backend::discoverTailscaleRelays() {
         // Probe each Mac's relay port. The relay answers unauthenticated
         // requests with 401 JSON, which is enough to know it's listening.
         m_tailscalePendingProbes = relays.size();
-        for (int i = 0; i < relays.size(); ++i) {
-            const QString url = relays[i].toMap().value(QStringLiteral("url")).toString();
-            QNetworkRequest req(QUrl(url + QStringLiteral("/api/v1/ping")));
-            req.setTransferTimeout(3000);
-            QSslConfiguration ssl = req.sslConfiguration();
-            ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
-            req.setSslConfiguration(ssl);
-            QNetworkReply *reply = m_nam.get(req);
-            connect(reply, &QNetworkReply::finished, this, [this, reply, url]() {
-                reply->deleteLater();
-                const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-                QString state;
-                if (httpStatus == 200 || httpStatus == 401 || httpStatus == 403) state = QStringLiteral("relay");
-                else if (httpStatus > 0) state = QStringLiteral("other");
-                else state = QStringLiteral("unreachable");
-
-                QVariantList updated = m_tailscaleRelays;
-                for (QVariant &v : updated) {
-                    QVariantMap m = v.toMap();
-                    if (m.value(QStringLiteral("url")).toString() == url) {
-                        m.insert(QStringLiteral("probeState"), state);
-                        v = m;
-                    }
-                }
-                // Relays that answered first, then the rest.
-                std::stable_sort(updated.begin(), updated.end(), [](const QVariant &a, const QVariant &b) {
-                    const bool ar = a.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
-                    const bool br = b.toMap().value(QStringLiteral("probeState")).toString() == QStringLiteral("relay");
-                    return ar && !br;
-                });
-                m_tailscalePendingProbes = qMax(0, m_tailscalePendingProbes - 1);
-                const bool done = m_tailscalePendingProbes == 0;
-                setTailscaleScanState(updated, done ? QStringLiteral("done") : QStringLiteral("probing"), !done);
-            });
+        for (const QVariant &v : relays) {
+            const QVariantMap m = v.toMap();
+            probeTailscaleRelay(m.value(QStringLiteral("key")).toString(), m.value(QStringLiteral("url")).toString(), true);
         }
     });
     proc->start(exe, {QStringLiteral("status"), QStringLiteral("--json")});
     killTimer->start(5000);
 }
 
+bool Backend::isSameServerEndpoint(const QString &a, const QString &b) {
+    const QString ta = a.trimmed(), tb = b.trimmed();
+    if (ta.compare(tb, Qt::CaseInsensitive) == 0) return true;
+    if (ta.isEmpty() || tb.isEmpty()) return false;
+    const QUrl ua(ta), ub(tb);
+    if (!ua.isValid() || !ub.isValid() || ua.host().isEmpty() || ub.host().isEmpty()) return false;
+    auto effectivePort = [](const QUrl &u) {
+        const QString scheme = u.scheme().toLower();
+        return u.port(scheme == QStringLiteral("https") ? 443 : scheme == QStringLiteral("http") ? 80 : -1);
+    };
+    auto path = [](const QUrl &u) {
+        QString p = u.path();
+        while (p.endsWith(QLatin1Char('/'))) p.chop(1);
+        return p;
+    };
+    return ua.scheme().compare(ub.scheme(), Qt::CaseInsensitive) == 0 &&
+           ua.host().compare(ub.host(), Qt::CaseInsensitive) == 0 &&
+           effectivePort(ua) == effectivePort(ub) && path(ua) == path(ub) &&
+           ua.userName() == ub.userName();
+}
+
+// A field the user didn't change keeps the saved URL verbatim, so re-saving
+// Settings never moves an existing endpoint (e.g. "https://relay" -> :1235).
+static QString resolveSavedOrNewServerUrl(const QString &input, const QString &saved) {
+    if (!saved.isEmpty()) {
+        if (Backend::isSameServerEndpoint(Backend::normalizeServerEndpointUrl(input, false), saved) ||
+            Backend::isSameServerEndpoint(Backend::normalizeServerEndpointUrl(input, true), saved)) {
+            return saved;
+        }
+    }
+    return Backend::normalizeServerEndpointUrl(input, true);
+}
+
 void Backend::saveServerConfig(const QString &serverUrl, const QString &secondaryUrl, const QString &password) {
-    const QString normPrimary = normalizeServerEndpointUrl(serverUrl);
-    const QString normSecondary = normalizeServerEndpointUrl(secondaryUrl);
+    // m_serverUrl may point at the failover after a candidate rotation; the
+    // configured primary is tracked in m_lastConfiguredBaseUrl.
+    const QString savedPrimary = m_lastConfiguredBaseUrl.isEmpty() ? m_serverUrl : m_lastConfiguredBaseUrl;
+    const QString normPrimary = resolveSavedOrNewServerUrl(serverUrl, savedPrimary);
+    const QString normSecondary = resolveSavedOrNewServerUrl(secondaryUrl, m_secondaryServerUrl);
     QString resolvedPassword = password.trimmed();
     if (resolvedPassword.isEmpty()) {
         resolvedPassword = m_password;
@@ -1490,7 +1543,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     }
 
     const bool endpointReplaced = !m_lastConfiguredBaseUrl.isEmpty() && !normPrimary.isEmpty() &&
-                                  m_lastConfiguredBaseUrl != normPrimary;
+                                  !isSameServerEndpoint(m_lastConfiguredBaseUrl, normPrimary);
     if (endpointReplaced) {
         const int discardedCount = m_pendingIcloudNoteSaves.size() + m_pendingIcloudNoteDeletes.size() +
                                    m_pendingIcloudEventSaves.size() + m_pendingIcloudEventDeletes.size();
