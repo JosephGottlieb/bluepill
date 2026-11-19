@@ -113,6 +113,17 @@ class Backend : public QObject {
     Q_PROPERTY(bool recordingVoice READ recordingVoice NOTIFY voiceRecordingChanged)
     Q_PROPERTY(int voiceRecordingSeconds READ voiceRecordingSeconds NOTIFY voiceRecordingChanged)
     Q_PROPERTY(QVariantList voiceRecordingWaveform READ voiceRecordingWaveform NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(bool hasRecordedVoiceMemo READ hasRecordedVoiceMemo NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(int recordedVoiceDurationSeconds READ recordedVoiceDurationSeconds NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QVariantList recordedVoiceWaveform READ recordedVoiceWaveform NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QString recordedVoicePath READ recordedVoicePath NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QString recordedVoiceChatGuid READ recordedVoiceChatGuid NOTIFY voiceRecordingChanged)
+    Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioDevicesChanged)
+    Q_PROPERTY(bool audioInputDiscoverySucceeded READ audioInputDiscoverySucceeded NOTIFY audioDevicesChanged)
+    Q_PROPERTY(bool audioOutputDiscoverySucceeded READ audioOutputDiscoverySucceeded NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QString selectedAudioInputDevice READ selectedAudioInputDevice WRITE setSelectedAudioInputDevice NOTIFY audioDevicesChanged)
+    Q_PROPERTY(QString selectedAudioOutputDevice READ selectedAudioOutputDevice WRITE setSelectedAudioOutputDevice NOTIFY audioDevicesChanged)
     Q_PROPERTY(QVariantList scheduledMessages READ scheduledMessages NOTIFY scheduledMessagesChanged)
     Q_PROPERTY(QStringList selectedChatParticipants READ selectedChatParticipants NOTIFY selectedChatChanged)
     Q_PROPERTY(QVariantList icloudNotes READ icloudNotes NOTIFY icloudNotesChanged)
@@ -183,6 +194,19 @@ public:
     bool recordingVoice() const { return m_recordingVoice; }
     int voiceRecordingSeconds() const { return m_voiceRecordingSeconds; }
     QVariantList voiceRecordingWaveform() const { return m_voiceRecordingWaveform; }
+    bool hasRecordedVoiceMemo() const { return m_hasRecordedVoiceMemo; }
+    int recordedVoiceDurationSeconds() const { return m_recordedVoiceDurationSeconds; }
+    QVariantList recordedVoiceWaveform() const { return m_recordedVoiceWaveform; }
+    QString recordedVoicePath() const { return m_recordedVoicePath; }
+    QString recordedVoiceChatGuid() const { return m_recordedVoiceChatGuid; }
+    QVariantList audioInputDevices() const { return m_audioInputDevices; }
+    QVariantList audioOutputDevices() const { return m_audioOutputDevices; }
+    bool audioInputDiscoverySucceeded() const { return m_audioInputDiscoverySucceeded; }
+    bool audioOutputDiscoverySucceeded() const { return m_audioOutputDiscoverySucceeded; }
+    QString selectedAudioInputDevice() const { return m_selectedAudioInputDevice; }
+    QString selectedAudioOutputDevice() const { return m_selectedAudioOutputDevice; }
+    void setSelectedAudioInputDevice(const QString &deviceId);
+    void setSelectedAudioOutputDevice(const QString &deviceId);
     QVariantList scheduledMessages() const { return m_scheduledMessages; }
     QStringList selectedChatParticipants() const;
     QVariantList icloudNotes() const { return m_icloudNotes; }
@@ -294,8 +318,13 @@ public:
     Q_INVOKABLE void toggleAudioPlayback(const QString &attachmentGuid, const QString &sourceUrl = QString());
     Q_INVOKABLE void seekAudioPlayback(const QString &attachmentGuid, double ratio);
     Q_INVOKABLE void startVoiceRecording();
+    Q_INVOKABLE void stopVoiceRecordingForPreview();
+    Q_INVOKABLE void togglePreviewRecordedVoiceMemo();
+    Q_INVOKABLE void sendRecordedVoiceMemo();
     Q_INVOKABLE void stopAndSendVoiceRecording();
     Q_INVOKABLE void cancelVoiceRecording();
+    Q_INVOKABLE bool canSendRecordedVoiceMemoToSelectedChat() const;
+    Q_INVOKABLE void refreshAudioDevices();
     Q_INVOKABLE void sendMessageWithEffect(const QString &text, const QString &effectId);
     Q_INVOKABLE void scheduleMessage(const QString &text, qint64 sendAtMs);
     Q_INVOKABLE void cancelScheduledMessage(const QString &scheduleId);
@@ -357,6 +386,7 @@ public:
         m_soundPlayCountForTest = 0;
         m_lastSoundPresetPlayed.clear();
     }
+    void rebuildSelectedChatMessagesForTest() { rebuildSelectedChatMessages(); }
 
     // Pure testable helpers
     static QString normalizeHandle(const QString &raw);
@@ -376,6 +406,15 @@ public:
     static bool isImageMimeOrExt(const QString &mime, const QString &fileName);
     static QJsonArray deduplicateMessageAttachments(const QJsonArray &atts);
     static bool isMessageDeletedOrRetracted(const QJsonObject &m);
+    static QString computeOutgoingReceiptText(
+        const QJsonObject &msgObj,
+        bool hasLaterIncomingReply = false,
+        qint64 nowMs = 0,
+        qint64 addedAtMs = 0,
+        bool forceExpired = false);
+    static int wavDurationSeconds(const QString &filePath);
+    static QVariantList computeAudioFileWaveformBars(const QString &filePath, const QString &seed, int count = 28);
+    static QVariantList parsePactlDeviceList(const QByteArray &rawOutput, bool filterMonitorSources);
     static QVariantList buildMessageListFromApi(
         const QJsonArray &rawMessagesDesc,
         const QHash<QString, QString> &contactNames,
@@ -384,7 +423,9 @@ public:
         const QHash<QString, QVariantMap> &previewCache = {},
         QStringList *missingPreviewsOut = nullptr,
         const QSet<QString> &deletedMessageGuids = {},
-        const QHash<QString, QString> &recentOutboundEffects = {});
+        const QHash<QString, QString> &recentOutboundEffects = {},
+        const QHash<QString, qint64> &pendingDeliveryAddedAtMs = {},
+        const QSet<QString> &expiredPendingDeliveryGuids = {});
 
     // Contact resolution & state
     void loadCredentials();
@@ -420,6 +461,45 @@ public:
     QString socketSid() const { return m_socketSid; }
     QString resolveCanonicalChatGuidForTest(const QString &chatGuid) const { return resolveCanonicalChatGuid(chatGuid); }
     QString resolveActiveSendChatGuidForTest(const QString &chatGuid) const { return resolveActiveSendChatGuid(chatGuid); }
+    QString currentVoiceRecordingPathForTest() const { return m_currentVoiceRecordingPath; }
+    int pendingDeliveryCountForTest() const { return m_pendingDeliveryMessages.size(); }
+    int pendingDeliveryInFlightCountForTest() const { return m_inFlightDeliveryCheckGuids.size(); }
+    quint64 pendingDeliveryCheckCompletedCountForTest() const { return m_pendingDeliveryCheckCompletedCountForTest; }
+    void checkPendingDeliveryStatusesForTest() { checkPendingDeliveryStatuses(); }
+    QStringList lastPendingDeliveryBatchForTest() const { return m_lastPendingDeliveryBatchForTest; }
+    void addPendingDeliveryForTest(const QString &msgGuid, const QString &chatGuid, qint64 addedAtMs = 0);
+    void agePendingDeliveryForTest(const QString &msgGuid, qint64 ageMs);
+    void setMessagesForTest(const QVariantList &messages) {
+        m_messages = messages;
+        emit messagesChanged();
+    }
+    void markLiveIncomingAttachmentForTest(const QString &attachmentGuid) {
+        if (!attachmentGuid.isEmpty()) m_liveIncomingAttachments.insert(attachmentGuid);
+    }
+    qint64 attachmentCooldownUntilMsForTest(const QString &attachmentGuid) const {
+        return m_missingAttachmentCooldownUntilMs.value(attachmentGuid, 0);
+    }
+    static bool hasNonEmptyWavDataChunk(const QString &filePath);
+    static bool isTrustedPasswordTransportUrl(const QUrl &url);
+    QNetworkRequest makeRequestForTest(const QString &pathAndQuery) const { return makeRequest(pathAndQuery); }
+    quint64 serverEndpointGenerationForTest() const { return m_serverEndpointGeneration; }
+    bool supportsBatchMessageGuidInQueryForTest() const { return m_supportsBatchMessageGuidInQuery; }
+    bool isExpiredPendingDeliveryForTest(const QString &msgGuid) const { return m_expiredPendingDeliveryGuids.contains(msgGuid); }
+    QJsonObject cachedMessageForTest(const QString &chatGuid, const QString &msgGuid) const {
+        return m_chatMessagesCache.value(chatGuid).value(msgGuid);
+    }
+    void setAudioDevicesForTest(const QVariantList &inputs, const QVariantList &outputs,
+                                bool inputDiscoverySucceeded = true, bool outputDiscoverySucceeded = true) {
+        m_audioInputDevices = inputs;
+        m_audioOutputDevices = outputs;
+        m_audioInputDiscoverySucceeded = inputDiscoverySucceeded;
+        m_audioOutputDiscoverySucceeded = outputDiscoverySucceeded;
+        emit audioDevicesChanged();
+    }
+    QString effectiveAudioInputDeviceForTest() const { return effectiveAudioInputDevice(); }
+    QString effectiveAudioOutputDeviceForTest() const { return effectiveAudioOutputDevice(); }
+    static bool writeConfigAtomicallyForTest(const QString &targetPath, const QJsonObject &obj,
+                                             bool simulatePrePermFail = false, bool simulatePostPermFail = false);
 
     // Headless CLI entrypoints
     int runCliStatus(bool asJson);
@@ -451,11 +531,13 @@ signals:
     void syncingHistoryChanged();
     void audioPlaybackChanged();
     void voiceRecordingChanged();
+    void audioDevicesChanged();
     void scheduledMessagesChanged();
 
     void toastMessage(const QString &text);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
     void linkPreviewUpdated(const QString &messageGuid, const QVariantMap &previewData);
+    void pendingDeliveryCheckFinishedForTest();
 
 private:
     QNetworkRequest makeRequest(const QString &pathAndQuery) const;
@@ -490,6 +572,8 @@ private:
     void rebuildSelectedChatMessages();
     void downloadAttachment(const QString &attachmentGuid, const QString &transferName, bool highPriority = false);
     void pumpAttachmentDownloadQueue();
+    void sendAttachmentInternal(const QString &chatGuid, const QString &filePath, const QString &caption, bool ownedVoiceRecording);
+    QString resolveMergedOutgoingReceiptAndPending(const QString &canonicalGuid, const QString &realGuid, const QJsonObject &fallbackObj, int *outErrCode = nullptr);
     void fetchLinkPreview(const QString &msgGuid, const QString &url);
     void processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad);
     void recordChatGroupMetadata(const QJsonObject &chatObj);
@@ -497,6 +581,27 @@ private:
     QString computeGroupMergeKey(const ChatEntry &entry) const;
     void unifySiblingChats(bool *selectedMigrated = nullptr, bool *chatsMerged = nullptr);
     void checkPendingDeliveryStatuses();
+    void clearPendingDeliveryTrackingForGuid(const QString &msgGuid, bool clearExpired = true);
+    void bumpServerEndpointGeneration();
+    void dispatchPendingDeliverySingleQueries(const QStringList &guids, quint64 genAtDispatch,
+                                              const QString &endpointAtDispatch,
+                                              const QHash<QString, quint64> &observedSeqAtDispatch,
+                                              quint64 reconcileSeqAtDispatch);
+    bool filterPendingDeliveryResponseItems(const QJsonArray &arr, const QSet<QString> &batchSet,
+                                            const QHash<QString, quint64> &observedSeqAtDispatch,
+                                            quint64 reconcileSeqAtDispatch,
+                                            QJsonArray *outNonStale, int *outMatchedCount) const;
+    void stopAudioPlaybackProcess();
+    bool startLocalAudioProcess(const QString &localFile, quint64 playbackGen);
+    bool canSeekLocalAudioPlayback() const;
+    void enforceLatestOutgoingReceiptsInTimeline();
+    void stopVoiceRecordProcess(bool waitForFlush);
+    QString finalizeCapturedVoiceWav(const QString &recPath);
+    void clearStagedVoiceMemo(bool removeFile);
+    void saveAudioDeviceConfig();
+    QString effectiveAudioInputDevice() const;
+    QString effectiveAudioOutputDevice() const;
+    static QString formatAudioDuration(int totalSeconds);
     void rebuildChatPresentation(ChatEntry &entry) const;
     void sortChats();
     bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
@@ -582,6 +687,18 @@ private:
     QHash<QString, QStringList> m_chatSiblingGuids;
     QHash<QString, QString> m_chatPreferredSendGuids;
     QHash<QString, QString> m_pendingDeliveryMessages;
+    QHash<QString, qint64> m_pendingDeliveryAddedAtMs;
+    QSet<QString> m_expiredPendingDeliveryGuids;
+    QSet<QString> m_inFlightDeliveryCheckGuids;
+    quint64 m_pendingDeliveryCheckCompletedCountForTest = 0;
+    quint64 m_deliveryObservationCounter = 0;
+    quint64 m_historyReconcileSeq = 0;
+    quint64 m_serverEndpointGeneration = 1;
+    bool m_supportsBatchMessageGuidInQuery = true;
+    QHash<QString, quint64> m_messageObservationSeq;
+    QHash<QString, quint64> m_reconcileRemovedSeqByGuid;
+    int m_pendingDeliveryRotationCursor = 0;
+    QStringList m_lastPendingDeliveryBatchForTest;
     QHash<QString, QString> m_attachmentPaths;
     QHash<QString, QString> m_recentOutboundEffects;
     QHash<QString, QHash<QString, QJsonObject>> m_chatMessagesCache;
@@ -625,7 +742,12 @@ private:
     QString m_audioDurationText = QStringLiteral("0:00");
     QTimer m_audioPlaybackTimer;
     int m_audioPlaybackElapsedMs = 0;
+    int m_audioSeekOffsetMs = 0;
     int m_audioPlaybackDurationMs = 15000;
+    quint64 m_audioPlaybackGen = 0;
+    QString m_currentAudioLocalFile;
+    QString m_currentAudioSourceUrl;
+    QPointer<QNetworkReply> m_audioDownloadReply;
     QPointer<QProcess> m_audioProcess;
 
     bool m_recordingVoice = false;
@@ -633,6 +755,18 @@ private:
     QVariantList m_voiceRecordingWaveform;
     QTimer m_voiceRecordingTimer;
     QString m_currentVoiceRecordingPath;
+    bool m_hasRecordedVoiceMemo = false;
+    int m_recordedVoiceDurationSeconds = 0;
+    QVariantList m_recordedVoiceWaveform;
+    QString m_recordedVoicePath;
+    QString m_recordedVoiceChatGuid;
+    QPointer<QProcess> m_voiceRecordProcess;
+    QVariantList m_audioInputDevices;
+    QVariantList m_audioOutputDevices;
+    bool m_audioInputDiscoverySucceeded = false;
+    bool m_audioOutputDiscoverySucceeded = false;
+    QString m_selectedAudioInputDevice;
+    QString m_selectedAudioOutputDevice;
 
     QVariantList m_scheduledMessages;
     QVariantList m_icloudNotes;
