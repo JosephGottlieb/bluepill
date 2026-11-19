@@ -1138,8 +1138,20 @@ private slots:
         const QString stateFile = tempDir.filePath(QStringLiteral("state.json"));
         const QString deletedFile = tempDir.filePath(QStringLiteral("deleted_messages.json"));
 
+        // Offline: unsend applies locally at once (with a server it waits for the Mac).
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
         Backend b(false);
         b.setStateFilePath(stateFile);
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config.json")));  // never the real config
 
         const qint64 baseTs = QDateTime::currentMSecsSinceEpoch() - 3600000LL;
         auto makeMsg = [&](const QString &guid, const QString &chatGuid, const QString &text, bool fromMe, qint64 ts) {
@@ -2349,6 +2361,598 @@ private slots:
         QVERIFY(!b.eventFilter(&dummyWin, &passRight));
     }
 
+    void testEditMessageAndTwoMinuteEditUnsendWindow() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_edit.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_edit.json")));
+        QCOMPARE(b.messageEditWindowMs(), 120000);
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}};
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto msg = [&](const char *guid, const char *text, bool fromMe, qint64 ts) {
+            return QJsonObject{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                               {QStringLiteral("isFromMe"), fromMe}, {QStringLiteral("isSent"), fromMe},
+                               {QStringLiteral("service"), QStringLiteral("iMessage")}, {QStringLiteral("dateCreated"), ts},
+                               {QStringLiteral("chats"), QJsonArray{chatObj}}};
+        };
+        b.ingestMessagesForTest(QJsonArray{msg("m-theirs", "Hi", false, now - 60000),
+                                           msg("m-old", "Old one", true, now - 10 * 60000),
+                                           msg("m-new", "Teh typo", true, now - 30000)}, true);
+        b.selectChat(chatGuid);
+        auto byGuid = [&](const QString &g) {
+            for (const QVariant &v : b.messages()) {
+                const QVariantMap m = v.toMap();
+                if (m.value(QStringLiteral("guid")).toString() == g) return m;
+            }
+            return QVariantMap();
+        };
+
+        b.editMessage(QStringLiteral("m-new"), QStringLiteral("The typo, fixed"));
+        QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("The typo, fixed"));
+        QVERIFY(byGuid(QStringLiteral("m-new")).value(QStringLiteral("isEdited")).toBool());
+
+        b.editMessage(QStringLiteral("m-old"), QStringLiteral("Too late"));      // past the window
+        QCOMPARE(byGuid(QStringLiteral("m-old")).value(QStringLiteral("text")).toString(), QStringLiteral("Old one"));
+        b.editMessage(QStringLiteral("m-theirs"), QStringLiteral("Not mine"));   // not from me
+        QCOMPARE(byGuid(QStringLiteral("m-theirs")).value(QStringLiteral("text")).toString(), QStringLiteral("Hi"));
+
+        // QML shows Edit/Unsend only for my iMessages inside the window
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *win = engine.rootObjects().first();
+        auto allowed = [&](const QVariantMap &m) {
+            QVariant r;
+            QMetaObject::invokeMethod(win, "canEditOrUnsend", Q_RETURN_ARG(QVariant, r), Q_ARG(QVariant, QVariant(m)));
+            return r.toBool();
+        };
+        QVERIFY(allowed(byGuid(QStringLiteral("m-new"))));
+        QVERIFY(!allowed(byGuid(QStringLiteral("m-old"))));
+        QVERIFY(!allowed(byGuid(QStringLiteral("m-theirs"))));
+        QVariantMap sms = byGuid(QStringLiteral("m-new"));
+        sms.insert(QStringLiteral("isIMessage"), false);
+        sms.insert(QStringLiteral("service"), QStringLiteral("SMS"));
+        QVERIFY(!allowed(sms));
+        QVariantMap pending = byGuid(QStringLiteral("m-new"));
+        pending.insert(QStringLiteral("guid"), QStringLiteral("temp-123"));
+        QVERIFY(!allowed(pending));
+
+        // Hovering doesn't open the action bar; right-click does
+        win->setProperty("hoveredActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-new"));
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
+        QMetaObject::invokeMethod(win, "clearActionMenu");
+
+        // Edit mode: Save edits the message instead of sending a new one
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("The typo, fixed")));
+        QCOMPARE(win->property("editTargetGuid").toString(), QStringLiteral("m-new"));
+        QObject *composer = win->findChild<QObject *>(QStringLiteral("composerInput"));
+        QVERIFY(composer);
+        composer->setProperty("text", QStringLiteral("Final wording"));
+        const int before = b.messages().size();
+        QMetaObject::invokeMethod(win, "sendComposerContent");
+        QCOMPARE(win->property("editTargetGuid").toString(), QString());
+        QCOMPARE(b.messages().size(), before);
+        QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("Final wording"));
+
+        // An unsent draft survives editing (saved and cancelled), and effect/schedule are hidden meanwhile
+        QObject *effectBtn = win->findChild<QObject *>(QStringLiteral("composerEffectBtn"));
+        QObject *scheduleBtn = win->findChild<QObject *>(QStringLiteral("composerScheduleBtn"));
+        QVERIFY(effectBtn && scheduleBtn);
+        QVERIFY(effectBtn->property("visible").toBool());
+        composer->setProperty("text", QStringLiteral("half-written draft"));
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("Final wording"));
+        QVERIFY(!effectBtn->property("visible").toBool());
+        QVERIFY(!scheduleBtn->property("visible").toBool());
+        // Esc cancels the edit first; a staged attachment (hidden meanwhile) survives it
+        QMetaObject::invokeMethod(win, "stageAttachment", Q_ARG(QVariant, QStringLiteral("/tmp/example.png")),
+                                  Q_ARG(QVariant, QStringLiteral("example.png")), Q_ARG(QVariant, chatGuid));
+        QMetaObject::invokeMethod(win, "handleEscapePostVoiceFallback");
+        QCOMPARE(win->property("editTargetGuid").toString(), QString());
+        QCOMPARE(win->property("stagedAttachmentPath").toString(), QStringLiteral("/tmp/example.png"));
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
+        QVERIFY(effectBtn->property("visible").toBool());
+        QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
+        composer->setProperty("text", QStringLiteral("Final wording!"));
+        QMetaObject::invokeMethod(win, "sendComposerContent");
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("half-written draft"));
+    }
+
+    void testOverlappingEditsAndNonJsonRepliesDontClobber() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        // Fake relay: edit requests wait until the test answers them, keyed by the edited text
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QString, QTcpSocket *> pendingEdits;
+        QHash<QTcpSocket *, QByteArray> buffers;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &buf = buffers[sock];
+                    buf += sock->readAll();
+                    const int headerEnd = buf.indexOf("\r\n\r\n");
+                    if (headerEnd < 0) return;
+                    const QByteArray head = buf.left(headerEnd).toLower();
+                    int len = 0;
+                    const int cl = head.indexOf("content-length:");
+                    if (cl >= 0) len = head.mid(cl + 15, head.indexOf('\r', cl) - cl - 15).trimmed().toInt();
+                    if (buf.size() < headerEnd + 4 + len) return;
+                    const QByteArray body = buf.mid(headerEnd + 4, len);
+                    const QByteArray reqLine = buf.left(buf.indexOf('\r'));
+                    buf.clear();
+                    if (reqLine.contains("/edit")) {
+                        pendingEdits.insert(QJsonDocument::fromJson(body).object().value(QStringLiteral("editedMessage")).toString(), sock);
+                        return;
+                    }
+                    const QByteArray ok = R"({"status":200,"data":[]})";
+                    sock->write("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\nContent-Length: " +
+                                QByteArray::number(ok.size()) + "\r\n\r\n" + ok);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        auto answer = [&](const QString &editedText, int status, const QByteArray &body) {
+            QTcpSocket *sock = pendingEdits.take(editedText);
+            QVERIFY(sock);
+            sock->write("HTTP/1.1 " + QByteArray::number(status) + " X\r\nConnection: close\r\nContent-Length: " +
+                        QByteArray::number(body.size()) + "\r\n\r\n" + body);
+            sock->disconnectFromHost();
+        };
+        qputenv("BLUEPILL_SERVER_URL", QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()).toUtf8());
+        qputenv("BLUEPILL_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_edits.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_edits.json")));
+        b.loadCredentials();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        auto mine = [&](const char *guid, const char *text) {
+            return QJsonObject{{QStringLiteral("guid"), QString::fromLatin1(guid)}, {QStringLiteral("text"), QString::fromUtf8(text)},
+                               {QStringLiteral("isFromMe"), true}, {QStringLiteral("isSent"), true},
+                               {QStringLiteral("service"), QStringLiteral("iMessage")}, {QStringLiteral("dateCreated"), now - 10000},
+                               {QStringLiteral("chats"), QJsonArray{QJsonObject{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("style"), 45}}}}};
+        };
+        b.ingestMessagesForTest(QJsonArray{mine("m-1", "Original"), mine("m-2", "Second original")}, true);
+        b.selectChat(chatGuid);
+        auto textOf = [&](const QString &g) {
+            for (const QVariant &v : b.messages())
+                if (v.toMap().value(QStringLiteral("guid")).toString() == g) return v.toMap().value(QStringLiteral("text")).toString();
+            return QString();
+        };
+        const QByteArray okJson = R"({"status":200,"data":{}})";
+
+        // Edits to one message go out one at a time, in order; only the newest waiting one is kept
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit A"));
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit B"));
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit C"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QVERIFY(pendingEdits.contains(QStringLiteral("Edit A")));
+        QTest::qWait(150);
+        QCOMPARE(pendingEdits.size(), 1);  // B was superseded by C, and C waits for A
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit C"));
+        int processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit A"), 200, okJson);
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QVERIFY(pendingEdits.contains(QStringLiteral("Edit C")));
+        // C fails: back to A, the last text the Mac confirmed
+        processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit C"), 502, R"({"status":502,"message":"refused"})");
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("Edit A"));
+
+        // A failure doesn't overwrite text a sync brought in meanwhile
+        b.editMessage(QStringLiteral("m-1"), QStringLiteral("Edit D"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        QJsonObject synced = mine("m-1", "From another device");
+        b.ingestMessagesForTest(QJsonArray{synced}, false);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("From another device"));
+        processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Edit D"), 502, R"({"status":502,"message":"refused"})");
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-1")), QStringLiteral("From another device"));
+
+        // A 200 that isn't JSON (proxy login page) is not a confirmation
+        b.editMessage(QStringLiteral("m-2"), QStringLiteral("Proxy edit"));
+        QTRY_COMPARE_WITH_TIMEOUT(pendingEdits.size(), 1, 3000);
+        processed = b.editRepliesProcessedForTest();
+        answer(QStringLiteral("Proxy edit"), 200, "<html><body>Sign in to continue</body></html>");
+        QTRY_COMPARE_WITH_TIMEOUT(b.editRepliesProcessedForTest(), processed + 1, 3000);
+        QCOMPARE(textOf(QStringLiteral("m-2")), QStringLiteral("Second original"));
+    }
+
+    void testLinkPreviewThumbnailMustBeAnImage() {
+        QImage img(80, 40, QImage::Format_RGB32);
+        img.fill(QColor(30, 90, 160));
+        QByteArray png;
+        QBuffer buf(&png);
+        QVERIFY(buf.open(QIODevice::WriteOnly));
+        QVERIFY(img.save(&buf, "PNG"));
+        QVERIFY(Backend::isDecodableImageData(png));
+        // An HTML error/consent page served from an og:image URL is rejected
+        QVERIFY(!Backend::isDecodableImageData(QByteArray("<!DOCTYPE html><html><head><title>Access denied</title></head>"
+                                                          "<body>Please enable cookies to continue to this site.</body></html>")));
+        QVERIFY(!Backend::isDecodableImageData(QByteArray()));
+        QVERIFY(!Backend::isDecodableImageData(png.left(20)));  // truncated
+
+        // Tiny but valid images are accepted (a 1x1 BMP is 58 bytes)
+        QImage dot(1, 1, QImage::Format_RGB888);
+        dot.fill(Qt::red);
+        QByteArray bmp;
+        QBuffer bmpBuf(&bmp);
+        QVERIFY(bmpBuf.open(QIODevice::WriteOnly));
+        QVERIFY(dot.save(&bmpBuf, "BMP"));
+        QVERIFY2(bmp.size() < 64, qPrintable(QString::number(bmp.size())));
+        QVERIFY(Backend::isDecodableImageData(bmp));
+
+        // Intact header, corrupt or missing pixel data: rejected because the image is decoded
+        QImage noisy(120, 80, QImage::Format_RGB32);
+        for (int y = 0; y < noisy.height(); ++y)
+            for (int x = 0; x < noisy.width(); ++x)
+                noisy.setPixel(x, y, qRgb((x * 37 + y * 11) % 256, (x * y) % 256, (x ^ y) % 256));
+        QByteArray noisyPng;
+        QBuffer noisyBuf(&noisyPng);
+        QVERIFY(noisyBuf.open(QIODevice::WriteOnly));
+        QVERIFY(noisy.save(&noisyBuf, "PNG"));
+        QVERIFY(Backend::isDecodableImageData(noisyPng));
+        QVERIFY(!Backend::isDecodableImageData(noisyPng.left(noisyPng.size() * 2 / 3)));
+        QByteArray corrupt = noisyPng;
+        for (int i = corrupt.size() / 3; i < corrupt.size() * 2 / 3; ++i) corrupt[i] = char(0xA5);
+        QVERIFY(!Backend::isDecodableImageData(corrupt));
+
+        // Cached thumbnails go through the same check
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString good = dir.filePath(QStringLiteral("good_thumb.jpg"));
+        const QString bad = dir.filePath(QStringLiteral("bad_thumb.jpg"));
+        { QFile f(good); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(bmp); }
+        { QFile f(bad); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(corrupt); }
+        QVERIFY(Backend::isDecodableImageFile(good));
+        QVERIFY(!Backend::isDecodableImageFile(bad));
+        QVERIFY(!Backend::isDecodableImageFile(dir.filePath(QStringLiteral("missing.jpg"))));
+    }
+
+    void testContactDetailsShowEveryMacField() {
+        Backend backend(false);
+        backend.parseContactsJson(QByteArray(R"([{
+            "id": "uid-1", "firstName": "Alex", "lastName": "Rivera", "middleName": "Q",
+            "displayName": "Alex Rivera", "nickname": "Lex", "organization": "Example Co",
+            "jobTitle": "Engineer", "department": "",
+            "phoneNumbers": [{"address": "+1 (555) 555-0100", "label": "Mobile"}, {"address": "+15555550101"}],
+            "emails": [{"address": "user@example.com", "label": "Home"}],
+            "addresses": [{"address": "1 Example St, Springfield CA 90000", "label": "Work"}],
+            "urls": [], "note": "Met at the conference", "birthday": "2020-05-04"}])"));
+
+        const QVariantMap d = backend.contactDetails(QStringLiteral("+15555550100"));
+        QVERIFY(d.value(QStringLiteral("found")).toBool());
+        QCOMPARE(d.value(QStringLiteral("firstName")).toString(), QStringLiteral("Alex"));
+        QCOMPARE(d.value(QStringLiteral("lastName")).toString(), QStringLiteral("Rivera"));
+        QCOMPARE(d.value(QStringLiteral("email")).toString(), QStringLiteral("user@example.com"));
+        QStringList labels;
+        QStringList values;
+        for (const QVariant &v : d.value(QStringLiteral("rows")).toList()) {
+            labels << v.toMap().value(QStringLiteral("label")).toString();
+            values << v.toMap().value(QStringLiteral("value")).toString();
+        }
+        QCOMPARE(labels, (QStringList{QStringLiteral("Middle name"), QStringLiteral("Nickname"), QStringLiteral("Company"),
+                                      QStringLiteral("Job title"), QStringLiteral("Phone (Mobile)"), QStringLiteral("Phone"),
+                                      QStringLiteral("Email (Home)"), QStringLiteral("Address (Work)"),
+                                      QStringLiteral("Birthday"), QStringLiteral("Note")}));
+        QVERIFY(!labels.contains(QStringLiteral("Department")));  // empty fields are skipped
+        QVERIFY(values.contains(QStringLiteral("Met at the conference")));
+        // A photo from the Mac replaces the initials
+        Backend withPhoto(false);
+        withPhoto.parseContactsJson(QByteArray(R"([{"id": "uid-9", "firstName": "Sam", "lastName": "Lee",
+            "phoneNumbers": [{"address": "+15555550123"}], "avatar": "/api/v1/contact/uid-9/avatar"}])"));
+        QCOMPARE(withPhoto.contactAvatarApiPathForTest(QStringLiteral("+1 555-555-0123")), QStringLiteral("/api/v1/contact/uid-9/avatar"));
+        QCOMPARE(withPhoto.resolveContactAvatar(QStringLiteral("+15555550123")), QString());
+        QTemporaryDir photoDir;
+        const QString photoFile = photoDir.filePath(QStringLiteral("p.img"));
+        QImage face(32, 32, QImage::Format_RGB32);
+        face.fill(Qt::darkCyan);
+        QVERIFY(face.save(photoFile, "PNG"));
+        withPhoto.applyContactAvatarForTest(QStringLiteral("/api/v1/contact/uid-9/avatar"), photoFile);
+        QCOMPARE(withPhoto.resolveContactAvatar(QStringLiteral("+15555550123")), QUrl::fromLocalFile(photoFile).toString());
+
+        // Same contact by email; unknown address isn't found
+        QVERIFY(backend.contactDetails(QStringLiteral("USER@example.com")).value(QStringLiteral("found")).toBool());
+        QVERIFY(!backend.contactDetails(QStringLiteral("+15555550199")).value(QStringLiteral("found")).toBool());
+
+        // The dialog lists the rows and fills its inputs from the contact
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &backend);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *win = engine.rootObjects().first();
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")),
+                                  Q_ARG(QVariant, QStringLiteral("Wrong Title Guess")));
+        QCOMPARE(win->property("contactModalFirstName").toString(), QStringLiteral("Alex"));
+        QCOMPARE(win->property("contactModalLastName").toString(), QStringLiteral("Rivera"));
+        QObject *rows = win->findChild<QObject *>(QStringLiteral("contactDetailRows"));
+        QVERIFY(rows);
+        QTRY_COMPARE(rows->property("count").toInt(), labels.size());
+
+        // The header name opens the dialog; there's no separate Edit Contact button
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+        QVERIFY(!qml.contains(QStringLiteral("i18n.tr(\"Edit Contact\")")));
+        QCOMPARE(qml.count(QStringLiteral("root.openContactModal(backend.selectedChatAddress, backend.selectedChatTitle)")), 1);
+    }
+
+    void testContactAvatarRetryExpiryAndPerRelayCache() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QByteArray savedHome = qgetenv("HOME");
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+            qputenv("HOME", savedHome);
+        });
+        qputenv("HOME", tempDir.path().toUtf8());  // avatar cache lives under ~/.cache
+
+        QImage face(24, 24, QImage::Format_RGB32);
+        face.fill(Qt::darkCyan);
+        QByteArray png;
+        QBuffer pngBuf(&png);
+        QVERIFY(pngBuf.open(QIODevice::WriteOnly));
+        QVERIFY(face.save(&pngBuf, "PNG"));
+
+        // Fake relay: the first avatar request fails, later ones succeed
+        int avatarRequests = 0;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QHash<QTcpSocket *, QByteArray> sockBuffers;
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    QByteArray &req = sockBuffers[sock];
+                    req += sock->readAll();
+                    if (!req.contains("\r\n\r\n")) return;
+                    QByteArray status = "200 OK", type = "application/json", body = R"({"status":200,"data":[]})";
+                    if (req.startsWith("GET /api/v1/contact/uid-9/avatar")) {
+                        ++avatarRequests;
+                        if (avatarRequests == 1) { status = "500 Error"; body = "{}"; }
+                        else { type = "image/png"; body = png; }
+                    }
+                    sock->write("HTTP/1.1 " + status + "\r\nContent-Type: " + type + "\r\nConnection: close\r\nContent-Length: " +
+                                QByteArray::number(body.size()) + "\r\n\r\n" + body);
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        const QString relay = QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort());
+        qputenv("BLUEPILL_SERVER_URL", relay.toUtf8());
+        qputenv("BLUEPILL_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_av.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_av.json")));
+        b.loadCredentials();
+        b.setAvatarRetryBaseMsForTest(50);
+        // Contacts arrive before any chat: nothing to fetch yet
+        b.parseContactsJson(QByteArray(R"([{"id": "uid-9", "firstName": "Sam", "lastName": "Lee",
+            "phoneNumbers": [{"address": "+15555550123"}], "avatar": "/api/v1/contact/uid-9/avatar"}])"));
+        QTest::qWait(200);
+        QCOMPARE(avatarRequests, 0);
+        // The chat list arrives later: its participant's photo is queued then
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550123");
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{{"guid", "av-1"}, {"text", "hi"}, {"isFromMe", false},
+            {"dateCreated", QDateTime::currentMSecsSinceEpoch()}, {"handle", QJsonObject{{"address", "+15555550123"}}},
+            {"chats", QJsonArray{QJsonObject{{"guid", chatGuid}, {"chatIdentifier", "+15555550123"}, {"style", 45}}}}}}, true);
+        // The failed first request is retried after a backoff
+        QTRY_VERIFY_WITH_TIMEOUT(!b.resolveContactAvatar(QStringLiteral("+15555550123")).isEmpty(), 5000);
+        QCOMPARE(avatarRequests, 2);
+
+        // Expired: refetched, and the current photo stays up meanwhile
+        b.expireContactAvatarsForTest();
+        b.fetchContactAvatarsForChatsForTest();
+        QVERIFY(!b.resolveContactAvatar(QStringLiteral("+15555550123")).isEmpty());
+        QTRY_COMPARE_WITH_TIMEOUT(avatarRequests, 3, 3000);
+        // Not expired: no request
+        b.fetchContactAvatarsForChatsForTest();
+        QTest::qWait(200);
+        QCOMPARE(avatarRequests, 3);
+
+        // Another relay's photo for the same contact id gets its own cache file
+        const QString path = QStringLiteral("/api/v1/contact/uid-9/avatar");
+        const QString fileA = b.contactAvatarCacheFileForTest(path);
+        qputenv("BLUEPILL_SERVER_URL", QByteArrayLiteral("https://relay-b.example.com"));
+        Backend other(false);
+        other.setStateFilePath(tempDir.filePath(QStringLiteral("state_av2.json")));
+        other.setConfigFilePath(tempDir.filePath(QStringLiteral("config_av2.json")));
+        other.loadCredentials();
+        QVERIFY(QFileInfo::exists(fileA));
+        QVERIFY(other.contactAvatarCacheFileForTest(path) != fileA);
+    }
+
+    void testContactInfoTabsListPhotosLinksAndFiles() {
+        // Never talk to a real relay from this test
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+        Backend b(false);
+        QTemporaryDir tempDir;
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_info.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_info.json")));
+        b.parseContactsJson(QByteArray(R"([{"id": "uid-1", "firstName": "Alex", "lastName": "Rivera",
+            "phoneNumbers": [{"address": "+15555550100", "label": "Mobile"}], "note": "Met at the conference"}])"));
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}, {QStringLiteral("chatIdentifier"), QStringLiteral("+15555550100")}, {QStringLiteral("style"), 45}};
+        const qint64 t = QDateTime::currentMSecsSinceEpoch() - 600000;
+        auto att = [](const char *guid, const char *name, const char *mime) {
+            return QJsonObject{{"guid", QString::fromLatin1(guid)}, {"transferName", QString::fromLatin1(name)}, {"mimeType", QString::fromLatin1(mime)}};
+        };
+        b.ingestMessagesForTest(QJsonArray{
+            QJsonObject{{"guid", "i-1"}, {"text", "look https://example.com/a and https://example.org/b"}, {"isFromMe", false},
+                        {"dateCreated", t}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-2"}, {"text", ""}, {"isFromMe", true}, {"dateCreated", t + 1000},
+                        {"attachments", QJsonArray{att("a-photo-0001", "beach.jpg", "image/jpeg")}}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-3"}, {"text", "the doc"}, {"isFromMe", false}, {"dateCreated", t + 2000},
+                        {"attachments", QJsonArray{att("a-file-0001", "plan.pdf", "application/pdf")}}, {"chats", QJsonArray{chatObj}}},
+            QJsonObject{{"guid", "i-4"}, {"text", "again https://example.com/a."}, {"isFromMe", true}, {"dateCreated", t + 3000},
+                        {"chats", QJsonArray{chatObj}}},
+            // A pending and a ready row for the same photo (different GUIDs), plus a plugin payload
+            QJsonObject{{"guid", "i-5"}, {"text", ""}, {"isFromMe", false}, {"dateCreated", t + 4000},
+                        {"attachments", QJsonArray{QJsonObject{{"guid", "at_0_dup-pending"}, {"transferName", "dup.jpg"}, {"mimeType", "image/jpeg"}, {"transferState", 0}},
+                                                   QJsonObject{{"guid", "at_0_dup-ready"}, {"transferName", "dup.jpg"}, {"mimeType", "image/jpeg"}, {"transferState", 5}},
+                                                   att("a-plugin-0001", "x.pluginPayloadAttachment", "application/octet-stream")}},
+                        {"chats", QJsonArray{chatObj}}}}, true);
+        const QString otherGuid = QStringLiteral("iMessage;-;+15555550177");
+        b.ingestMessagesForTest(QJsonArray{QJsonObject{{"guid", "o-1"}, {"text", "elsewhere https://example.net/z"}, {"isFromMe", false},
+            {"dateCreated", t}, {"chats", QJsonArray{QJsonObject{{"guid", otherGuid}, {"chatIdentifier", "+15555550177"}, {"style", 45}}}}}}, true);
+        b.selectChat(chatGuid);
+
+        const QVariantMap media = b.conversationMedia(chatGuid);
+        QCOMPARE(media.value(QStringLiteral("photos")).toList().size(), 2);  // beach + one dup.jpg
+        QCOMPARE(media.value(QStringLiteral("files")).toList().size(), 1);   // the plugin payload isn't a file
+        QCOMPARE(media.value(QStringLiteral("files")).toList().first().toMap().value(QStringLiteral("name")).toString(), QStringLiteral("plan.pdf"));
+        const QVariantList links = media.value(QStringLiteral("links")).toList();
+        QCOMPARE(links.size(), 2);  // duplicates collapse (trailing "." stripped); newest first
+        QCOMPARE(links.first().toMap().value(QStringLiteral("url")).toString(), QStringLiteral("https://example.com/a"));
+        QCOMPARE(Backend::extractFirstUrl(QStringLiteral("See https://example.com/report.")), QStringLiteral("https://example.com/report"));
+
+        Theme theme;
+        Translator translator;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &translator);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        win->resize(1200, 800);
+
+        // Clicking the name in the header opens read-only Details first (not the editor), with an Edit button
+        win->show();
+        QVERIFY(QTest::qWaitForWindowExposed(win));
+        auto *nameArea = win->findChild<QQuickItem *>(QStringLiteral("contactHeaderNameArea"));
+        QVERIFY(nameArea);
+        QTRY_VERIFY(nameArea->width() > 0 && nameArea->isVisible());
+        QObject *composer = win->findChild<QObject *>(QStringLiteral("composerInput"));
+        QVERIFY(composer);
+        QMetaObject::invokeMethod(composer, "forceActiveFocus");
+        composer->setProperty("text", QStringLiteral("draft"));
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier,
+                          nameArea->mapToScene(QPointF(nameArea->width() / 2, nameArea->height() / 2)).toPoint());
+        QTRY_VERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoTab").toInt(), 0);
+        QVERIFY(!win->property("showContactModal").toBool());
+        QObject *detailRows = win->findChild<QObject *>(QStringLiteral("contactInfoDetailRows"));
+        QVERIFY(detailRows);
+        QTRY_VERIFY(detailRows->property("count").toInt() >= 2);  // phone + note
+        QVERIFY(win->findChild<QObject *>(QStringLiteral("contactInfoEditBtn"))->property("visible").toBool());
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoPhotos"))->property("count").toInt(), 2);
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoLinks"))->property("count").toInt(), 2);
+        QTRY_COMPARE(win->findChild<QObject *>(QStringLiteral("contactInfoFiles"))->property("count").toInt(), 1);
+
+        // The card sits over the conversation, not the sidebar
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("contactInfoCard"));
+        auto *sidebar = win->findChild<QQuickItem *>(QStringLiteral("leftSidebarPane"));
+        QVERIFY(card && sidebar);
+        QVERIFY(!card->mapRectToScene(QRectF(0, 0, card->width(), card->height()))
+                     .intersects(sidebar->mapRectToScene(QRectF(0, 0, sidebar->width(), sidebar->height()))));
+
+        // The card has keyboard focus: Return doesn't send the composer's draft underneath
+        auto *infoModal = win->findChild<QQuickItem *>(QStringLiteral("contactInfoModal"));
+        QTRY_VERIFY(infoModal->hasActiveFocus());
+        const int msgCount = b.messages().size();
+        QTest::keyClick(win, Qt::Key_Return);
+        QCOMPARE(composer->property("text").toString(), QStringLiteral("draft"));
+        QCOMPARE(b.messages().size(), msgCount);
+
+        // Edit → Cancel (or Esc) backs out to the card, not all the way out
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")), Q_ARG(QVariant, QString()));
+        QVERIFY(win->property("showContactModal").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!win->property("showContactModal").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QTRY_VERIFY(infoModal->hasActiveFocus());
+        // Saving a new name shows it on the card
+        QMetaObject::invokeMethod(win, "openContactModal", Q_ARG(QVariant, QStringLiteral("+15555550100")), Q_ARG(QVariant, QString()));
+        b.saveContact(QStringLiteral("Alexandra"), QStringLiteral("Rivera"), QStringLiteral("+15555550100"), QString());
+        win->setProperty("showContactModal", false);
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoDetails").toMap().value(QStringLiteral("firstName")).toString(), QStringLiteral("Alexandra"));
+
+        // Enlarging a photo and closing it comes back to the Photos tab
+        win->setProperty("contactInfoTab", 1);
+        QMetaObject::invokeMethod(win, "openPhotoViewer", Q_ARG(QVariant, win->property("contactInfoMedia").toMap().value(QStringLiteral("photos"))), Q_ARG(QVariant, 0));
+        QVERIFY(win->property("showPhotoViewer").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!win->property("showPhotoViewer").toBool());
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoTab").toInt(), 1);
+        QTRY_VERIFY(infoModal->hasActiveFocus());
+
+        // Switching conversations reloads the card for the new chat
+        b.selectChat(otherGuid);
+        QVERIFY(win->property("showContactInfo").toBool());
+        QCOMPARE(win->property("contactInfoMedia").toMap().value(QStringLiteral("links")).toList().size(), 1);
+        QCOMPARE(win->property("contactInfoMedia").toMap().value(QStringLiteral("photos")).toList().size(), 0);
+        QVERIFY(!win->property("contactInfoDetails").toMap().value(QStringLiteral("found")).toBool());
+
+        // Esc closes the card itself last, and focus returns to the composer
+        QTest::keyClick(win, Qt::Key_Escape);
+        QVERIFY(!win->property("showContactInfo").toBool());
+    }
+
     void testQuotedReplyOpensThreadAndJumpsToOriginal() {
         const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
                                   "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
@@ -2480,57 +3084,6 @@ private slots:
         replyInput->setProperty("text", QStringLiteral("wrong chat"));
         QMetaObject::invokeMethod(win, "sendThreadReply");
         QCOMPARE(b.messages().size(), otherBefore);
-    }
-
-    void testLinkPreviewThumbnailMustBeAnImage() {
-        QImage img(80, 40, QImage::Format_RGB32);
-        img.fill(QColor(30, 90, 160));
-        QByteArray png;
-        QBuffer buf(&png);
-        QVERIFY(buf.open(QIODevice::WriteOnly));
-        QVERIFY(img.save(&buf, "PNG"));
-        QVERIFY(Backend::isDecodableImageData(png));
-        // An HTML error/consent page served from an og:image URL is rejected
-        QVERIFY(!Backend::isDecodableImageData(QByteArray("<!DOCTYPE html><html><head><title>Access denied</title></head>"
-                                                          "<body>Please enable cookies to continue to this site.</body></html>")));
-        QVERIFY(!Backend::isDecodableImageData(QByteArray()));
-        QVERIFY(!Backend::isDecodableImageData(png.left(20)));  // truncated
-
-        // Tiny but valid images are accepted (a 1x1 BMP is 58 bytes)
-        QImage dot(1, 1, QImage::Format_RGB888);
-        dot.fill(Qt::red);
-        QByteArray bmp;
-        QBuffer bmpBuf(&bmp);
-        QVERIFY(bmpBuf.open(QIODevice::WriteOnly));
-        QVERIFY(dot.save(&bmpBuf, "BMP"));
-        QVERIFY2(bmp.size() < 64, qPrintable(QString::number(bmp.size())));
-        QVERIFY(Backend::isDecodableImageData(bmp));
-
-        // Intact header, corrupt or missing pixel data: rejected because the image is decoded
-        QImage noisy(120, 80, QImage::Format_RGB32);
-        for (int y = 0; y < noisy.height(); ++y)
-            for (int x = 0; x < noisy.width(); ++x)
-                noisy.setPixel(x, y, qRgb((x * 37 + y * 11) % 256, (x * y) % 256, (x ^ y) % 256));
-        QByteArray noisyPng;
-        QBuffer noisyBuf(&noisyPng);
-        QVERIFY(noisyBuf.open(QIODevice::WriteOnly));
-        QVERIFY(noisy.save(&noisyBuf, "PNG"));
-        QVERIFY(Backend::isDecodableImageData(noisyPng));
-        QVERIFY(!Backend::isDecodableImageData(noisyPng.left(noisyPng.size() * 2 / 3)));
-        QByteArray corrupt = noisyPng;
-        for (int i = corrupt.size() / 3; i < corrupt.size() * 2 / 3; ++i) corrupt[i] = char(0xA5);
-        QVERIFY(!Backend::isDecodableImageData(corrupt));
-
-        // Cached thumbnails go through the same check
-        QTemporaryDir dir;
-        QVERIFY(dir.isValid());
-        const QString good = dir.filePath(QStringLiteral("good_thumb.jpg"));
-        const QString bad = dir.filePath(QStringLiteral("bad_thumb.jpg"));
-        { QFile f(good); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(bmp); }
-        { QFile f(bad); QVERIFY(f.open(QIODevice::WriteOnly)); f.write(corrupt); }
-        QVERIFY(Backend::isDecodableImageFile(good));
-        QVERIFY(!Backend::isDecodableImageFile(bad));
-        QVERIFY(!Backend::isDecodableImageFile(dir.filePath(QStringLiteral("missing.jpg"))));
     }
 
     void testResponsiveSplitWindowHeaderAndZeroOverlap() {
@@ -7163,6 +7716,17 @@ private slots:
     void testRebuildEchoMatchesOnlyCacheRowsAndDeleteUnsendRestoresReceipt() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
+        // Offline: unsend applies locally at once (with a server it waits for the Mac).
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_echo.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_echo.json")));
@@ -7305,6 +7869,73 @@ private slots:
         QCOMPARE(aboutSpy.count(), 0);
         QCOMPARE(b.messages().at(1).toMap().value(QStringLiteral("receiptText")).toString(), QString());
         QCOMPARE(b.messages().at(2).toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Delivered"));
+    }
+
+    void testResolvedAttachmentDoesNotResetTimeline() {
+        QTemporaryDir home;
+        QVERIFY(home.isValid());
+        const QByteArray savedHome = qgetenv("HOME");
+        qputenv("HOME", home.path().toLocal8Bit());
+        auto restoreHome = qScopeGuard([&]() { qputenv("HOME", savedHome); });
+        // No server: the resolve must come from the disk cache, not a download
+        // that an earlier test's credentials would start.
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        Backend b(false);
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
+        const QString attGuid = QStringLiteral("att-resolve-0001-image");
+        const QJsonObject chatObj{{QStringLiteral("guid"), chatGuid}};
+        const QJsonObject photo{
+            {QStringLiteral("guid"), QStringLiteral("m-resolve-photo")},
+            {QStringLiteral("text"), QString()},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("dateCreated"), nowMs - 5000},
+            {QStringLiteral("attachments"), QJsonArray{QJsonObject{
+                {QStringLiteral("guid"), attGuid},
+                {QStringLiteral("mimeType"), QStringLiteral("image/png")},
+                {QStringLiteral("transferName"), QStringLiteral("pic.png")}}}},
+            {QStringLiteral("chats"), QJsonArray{chatObj}}};
+        b.ingestMessagesForTest(QJsonArray{photo}, true);
+        b.selectChat(chatGuid);
+        QCOMPARE(b.messages().size(), 1);
+        QCOMPARE(b.cachedAttachmentUrl(attGuid), QString());
+
+        // The file is already in the cache (e.g. from an earlier session)
+        const QString cacheDir = home.path() + QStringLiteral("/.cache/imsg/attachments");
+        QVERIFY(QDir().mkpath(cacheDir));
+        const QString file = cacheDir + QLatin1Char('/') + attGuid.left(16) + QStringLiteral("_pic.png");
+        QImage img(64, 32, QImage::Format_RGB32);
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = 0; x < img.width(); ++x) img.setPixel(x, y, qRgb(x * 4, y * 8, (x * y) & 0xff));
+        QVERIFY(img.save(file));
+        QVERIFY(QFileInfo(file).size() >= 100);  // smaller cache files count as missing
+
+        QSignalSpy changedSpy(&b, &Backend::messagesChanged);
+        QSignalSpy aboutSpy(&b, &Backend::aboutToChangeMessages);
+        QSignalSpy readySpy(&b, &Backend::attachmentReady);
+        b.downloadAttachmentForTest(attGuid, QStringLiteral("pic.png"));
+
+        const QString url = QUrl::fromLocalFile(file).toString();
+        QCOMPARE(readySpy.count(), 1);
+        QCOMPARE(readySpy.at(0).at(1).toString(), url);
+        // No full timeline rebuild for a resolved image...
+        QCOMPARE(changedSpy.count(), 0);
+        QCOMPARE(aboutSpy.count(), 0);
+        // ...but the stored message and the lookup used by new delegates have it
+        const QVariantList imgs = b.messages().at(0).toMap().value(QStringLiteral("imageAttachments")).toList();
+        QVERIFY(!imgs.isEmpty());
+        QCOMPARE(imgs.at(0).toMap().value(QStringLiteral("localUrl")).toString(), url);
+        QCOMPARE(b.cachedAttachmentUrl(attGuid), url);
     }
 
     void testWriteConfigAtomicallyAndMakeRequestSecurity() {
