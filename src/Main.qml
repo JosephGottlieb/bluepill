@@ -18,6 +18,10 @@ ApplicationWindow {
     property string replyTargetGuid: ""
     property string replyTargetSender: ""
     property string replyTargetText: ""
+    property string stagedAttachmentPath: ""
+    property string stagedAttachmentName: ""
+    property string stagedAttachmentChatGuid: ""
+    property var chatAttachmentDrafts: ({})
     property var chatDrafts: ({})
     property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
@@ -27,6 +31,150 @@ ApplicationWindow {
     function clearActionMenu() {
         pinnedActionMessageGuid = ""
         hoveredActionMessageGuid = ""
+    }
+
+    function isStagedAttachmentForChat(chatGuid) {
+        if (!chatGuid || chatGuid.length === 0 || root.stagedAttachmentPath.length === 0) return false
+        if (root.stagedAttachmentChatGuid.length === 0) return false
+        return root.stagedAttachmentChatGuid === chatGuid || backend.isSameConversation(root.stagedAttachmentChatGuid, chatGuid)
+    }
+
+    function stageAttachment(attPath, attName, chatGuid) {
+        var targetGuid = (chatGuid && chatGuid.length > 0) ? chatGuid : (backend.selectedChatGuid || "")
+        if (!attPath || attPath.length === 0 || targetGuid.length === 0) return
+        root.stagedAttachmentPath = attPath
+        root.stagedAttachmentName = (attName && attName.length > 0) ? attName : attPath.split("/").pop()
+        root.stagedAttachmentChatGuid = targetGuid
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        var canonGuid = backend.resolveCanonicalChatGuid(targetGuid) || targetGuid
+        attDrafts[canonGuid] = {
+            path: root.stagedAttachmentPath,
+            name: root.stagedAttachmentName,
+            chatGuid: targetGuid
+        }
+        if (canonGuid !== targetGuid && attDrafts[targetGuid] !== undefined) {
+            delete attDrafts[targetGuid]
+        }
+        root.chatAttachmentDrafts = attDrafts
+    }
+
+    function clearStagedAttachment() {
+        var prevGuid = stagedAttachmentChatGuid
+        var curGuid = backend.selectedChatGuid || ""
+        stagedAttachmentPath = ""
+        stagedAttachmentName = ""
+        stagedAttachmentChatGuid = ""
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        var keys = Object.keys(attDrafts)
+        var changed = false
+        for (var i = 0; i < keys.length; ++i) {
+            var k = keys[i]
+            if ((prevGuid.length > 0 && (k === prevGuid || backend.isSameConversation(k, prevGuid))) ||
+                (curGuid.length > 0 && (k === curGuid || backend.isSameConversation(k, curGuid)))) {
+                delete attDrafts[k]
+                changed = true
+            }
+        }
+        if (changed) {
+            root.chatAttachmentDrafts = attDrafts
+        }
+    }
+
+    function isVoiceMemoForSelectedChat() {
+        if (!backend.selectedChatGuid || backend.selectedChatGuid.length === 0) return false
+        if (!backend.recordingVoice && !backend.hasRecordedVoiceMemo) return false
+        var recGuid = backend.recordedVoiceChatGuid || ""
+        if (recGuid.length > 0 && !backend.isSameConversation(recGuid, backend.selectedChatGuid)) {
+            return false
+        }
+        return backend.canSendRecordedVoiceMemoToSelectedChat()
+    }
+
+    function sendComposerContent() {
+        if (backend.selectedChatGuid.length === 0) return
+        if (root.stagedAttachmentPath.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+            root.stagedAttachmentPath = ""
+            root.stagedAttachmentName = ""
+            root.stagedAttachmentChatGuid = ""
+        }
+        if (root.stagedAttachmentPath.length > 0) {
+            var attPath = root.stagedAttachmentPath
+            var targetChatGuid = backend.selectedChatGuid
+            var caption = composerInput.text.trim()
+            root.clearStagedAttachment()
+            composerInput.text = ""
+            root.showEmojiPicker = false
+            root.emojiAutocompleteResults = []
+            root.replyTargetGuid = ""
+            root.replyTargetSender = ""
+            root.replyTargetText = ""
+            backend.sendAttachment(targetChatGuid, attPath, caption)
+            messageListView.scrollToBottom()
+        } else if (composerInput.text.trim().length > 0) {
+            backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
+            messageListView.scrollToBottom()
+            composerInput.text = ""
+            root.showEmojiPicker = false
+            root.emojiAutocompleteResults = []
+            root.replyTargetGuid = ""
+            root.replyTargetSender = ""
+            root.replyTargetText = ""
+        } else if (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat()) {
+            backend.sendRecordedVoiceMemo()
+            messageListView.scrollToBottom()
+        }
+    }
+
+    property bool _reconcilingAudioDevices: false
+
+    function hasAudioDeviceId(list, targetId) {
+        if (!list || list.length === 0) return false
+        var needle = targetId || ""
+        for (var i = 0; i < list.length; i++) {
+            if ((list[i].id || "") === needle) return true
+        }
+        return false
+    }
+
+    function findAudioDeviceIndex(list, targetId) {
+        if (!list || list.length === 0) return 0
+        var needle = targetId || ""
+        for (var i = 0; i < list.length; i++) {
+            if ((list[i].id || "") === needle) return i
+        }
+        for (var j = 0; j < list.length; j++) {
+            if ((list[j].id || "") === "") return j
+        }
+        return 0
+    }
+
+    function hasNonFallbackAudioDevice(list) {
+        if (!list || list.length === 0) return false
+        for (var i = 0; i < list.length; i++) {
+            if ((list[i].id || "").length > 0) return true
+        }
+        return false
+    }
+
+    function reconcileAudioDeviceSelections() {
+        if (root._reconcilingAudioDevices) return
+        root._reconcilingAudioDevices = true
+        try {
+            var inList = backend.audioInputDevices
+            if (backend.audioInputDiscoverySucceeded && root.hasNonFallbackAudioDevice(inList) &&
+                backend.selectedAudioInputDevice && backend.selectedAudioInputDevice.length > 0 &&
+                !root.hasAudioDeviceId(inList, backend.selectedAudioInputDevice)) {
+                backend.selectedAudioInputDevice = root.hasAudioDeviceId(inList, "") ? "" : (inList[0].id || "")
+            }
+            var outList = backend.audioOutputDevices
+            if (backend.audioOutputDiscoverySucceeded && root.hasNonFallbackAudioDevice(outList) &&
+                backend.selectedAudioOutputDevice && backend.selectedAudioOutputDevice.length > 0 &&
+                !root.hasAudioDeviceId(outList, backend.selectedAudioOutputDevice)) {
+                backend.selectedAudioOutputDevice = root.hasAudioDeviceId(outList, "") ? "" : (outList[0].id || "")
+            }
+        } finally {
+            root._reconcilingAudioDevices = false
+        }
     }
 
     property string activeScreenEffect: ""
@@ -222,6 +370,7 @@ ApplicationWindow {
 
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
+            root.reconcileAudioDeviceSelections()
             root.loadPrimaryServerFields(backend.serverUrl)
             secondaryServerUrlInput.text = backend.secondaryServerUrl
             serverPasswordInput.text = backend.serverPassword
@@ -261,6 +410,7 @@ ApplicationWindow {
         root.showContactModal = false
         root.showNewChatModal = false
         root.showEmojiPicker = false
+        root.reconcileAudioDeviceSelections()
         root.loadPrimaryServerFields(backend.serverUrl)
         secondaryServerUrlInput.text = backend.secondaryServerUrl
         serverPasswordInput.text = backend.serverPassword
@@ -321,6 +471,7 @@ ApplicationWindow {
                     name: it.name || ("Photo " + (i + 1)),
                     localUrl: it.localUrl || "",
                     previewUrl: it.previewUrl || "",
+                    sourceUrl: it.sourceUrl || "",
                     isCloudEvicted: !!it.isCloudEvicted,
                     canUnpurge: it.canUnpurge !== false,
                     canRequestAttachment: !it.isCloudEvicted || it.canUnpurge !== false
@@ -571,12 +722,38 @@ ApplicationWindow {
         return (drafts[chatGuid] !== undefined) ? drafts[chatGuid] : ""
     }
 
+    function resolveSavedAttachmentForChat(chatGuid) {
+        if (!chatGuid || chatGuid.length === 0) return null
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        if (attDrafts[chatGuid] !== undefined && attDrafts[chatGuid] && attDrafts[chatGuid].path) {
+            return attDrafts[chatGuid]
+        }
+        var keys = Object.keys(attDrafts)
+        for (var i = 0; i < keys.length; ++i) {
+            var k = keys[i]
+            var entry = attDrafts[k]
+            if (k !== "" && k !== chatGuid && entry && entry.path && backend.isSameConversation(k, chatGuid)) {
+                var migrated = {
+                    path: entry.path,
+                    name: entry.name || entry.path.split("/").pop(),
+                    chatGuid: chatGuid
+                }
+                attDrafts[chatGuid] = migrated
+                delete attDrafts[k]
+                root.chatAttachmentDrafts = attDrafts
+                return migrated
+            }
+        }
+        return null
+    }
+
     Component.onCompleted: {
         var initialGuid = backend.selectedChatGuid || ""
         if (initialGuid.length > 0) {
             root.lastDraftChatGuid = initialGuid
         }
         backend.registerWindow(root)
+        root.reconcileAudioDeviceSelections()
         var currentGuid = backend.selectedChatGuid || ""
         if (currentGuid.length > 0) {
             root.lastDraftChatGuid = currentGuid
@@ -590,6 +767,9 @@ ApplicationWindow {
 
     Connections {
         target: backend
+        function onAudioDevicesChanged() {
+            root.reconcileAudioDeviceSelections()
+        }
         function onToastMessage(text) {
             root.activeToastText = text
             toastTimer.restart()
@@ -615,12 +795,39 @@ ApplicationWindow {
                     if (canonPrev !== root.lastDraftChatGuid && drafts[root.lastDraftChatGuid] !== undefined) delete drafts[root.lastDraftChatGuid]
                 }
                 root.chatDrafts = drafts
+
+                var attDrafts = root.chatAttachmentDrafts || ({})
+                if (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(root.lastDraftChatGuid)) {
+                    var targetKey = (sameConv && newGuid.length > 0) ? newGuid : canonPrev
+                    attDrafts[targetKey] = {
+                        path: root.stagedAttachmentPath,
+                        name: root.stagedAttachmentName,
+                        chatGuid: targetKey
+                    }
+                    if (targetKey !== root.lastDraftChatGuid && attDrafts[root.lastDraftChatGuid] !== undefined) delete attDrafts[root.lastDraftChatGuid]
+                    if (targetKey !== canonPrev && attDrafts[canonPrev] !== undefined) delete attDrafts[canonPrev]
+                    root.chatAttachmentDrafts = attDrafts
+                }
             }
             if (root.lastDraftChatGuid !== newGuid) {
                 root.lastDraftChatGuid = newGuid
                 var savedDraft = root.resolveSavedDraftForChat(newGuid)
                 if (composerInput.text !== savedDraft) {
                     composerInput.text = savedDraft
+                }
+                if (sameConv && newGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(newGuid)) {
+                    root.stagedAttachmentChatGuid = newGuid
+                } else {
+                    var savedAtt = root.resolveSavedAttachmentForChat(newGuid)
+                    if (savedAtt && savedAtt.path && savedAtt.path.length > 0) {
+                        root.stagedAttachmentPath = savedAtt.path
+                        root.stagedAttachmentName = savedAtt.name || savedAtt.path.split("/").pop()
+                        root.stagedAttachmentChatGuid = newGuid
+                    } else {
+                        root.stagedAttachmentPath = ""
+                        root.stagedAttachmentName = ""
+                        root.stagedAttachmentChatGuid = ""
+                    }
                 }
             }
         }
@@ -640,6 +847,8 @@ ApplicationWindow {
                         guid: item.guid,
                         name: item.name,
                         localUrl: localUrl,
+                        previewUrl: item.previewUrl || "",
+                        sourceUrl: item.sourceUrl || "",
                         isCloudEvicted: false,
                         canUnpurge: item.canUnpurge !== false,
                         canRequestAttachment: true
@@ -684,6 +893,8 @@ ApplicationWindow {
                         guid: item.guid,
                         name: item.name,
                         localUrl: nextUrl,
+                        previewUrl: item.previewUrl || "",
+                        sourceUrl: item.sourceUrl || "",
                         isCloudEvicted: nextEvicted,
                         canUnpurge: nextCanUnpurge,
                         canRequestAttachment: nextCanReq
@@ -974,6 +1185,22 @@ ApplicationWindow {
             backend.clearSelectedChat()
         }
     }
+    function handleEscapePostVoiceFallback() {
+        if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+            root.clearStagedAttachment()
+            root.showToast("✕ " + i18n.tr("Attachment cancelled"))
+        } else if (root.replyTargetGuid !== "") {
+            root.replyTargetGuid = ""
+            root.replyTargetSender = ""
+            root.replyTargetText = ""
+        } else if (searchInput.text !== "") {
+            searchInput.text = ""
+            backend.setSearchQuery("")
+            composerInput.forceActiveFocus()
+        } else if (backend.selectedChatGuid.length > 0) {
+            backend.clearSelectedChat()
+        }
+    }
     Shortcut {
         sequence: "Escape"
         onActivated: {
@@ -981,6 +1208,22 @@ ApplicationWindow {
                 root.closePhotoViewer()
             } else if (chatContextMenuPopup.visible) {
                 chatContextMenuPopup.visible = false
+            } else if (effectMenuPopup.visible) {
+                effectMenuPopup.visible = false
+            } else if (scheduleMenuPopup.visible) {
+                scheduleMenuPopup.visible = false
+            } else if (renameChatPopup.visible) {
+                renameChatPopup.visible = false
+            } else if (icloudNotesPopup.visible) {
+                icloudNotesPopup.close()
+            } else if (icloudCalendarPopup.visible) {
+                icloudCalendarPopup.close()
+            } else if (icloudPhotosPopup.visible) {
+                icloudPhotosPopup.close()
+            } else if (audioInputDeviceCombo.popup.visible) {
+                audioInputDeviceCombo.popup.close()
+            } else if (audioOutputDeviceCombo.popup.visible) {
+                audioOutputDeviceCombo.popup.close()
             } else if (root.showServerConfigModal) {
                 root.showServerConfigModal = false
             } else if (root.showDeleteChatModal) {
@@ -1000,16 +1243,15 @@ ApplicationWindow {
                 root.emojiShortcodeStart = -1
             } else if (root.activeActionMessageGuid !== "") {
                 root.clearActionMenu()
-            } else if (root.replyTargetGuid !== "") {
-                root.replyTargetGuid = ""
-                root.replyTargetSender = ""
-                root.replyTargetText = ""
-            } else if (searchInput.text !== "") {
-                searchInput.text = ""
-                backend.setSearchQuery("")
-                composerInput.forceActiveFocus()
-            } else if (backend.selectedChatGuid.length > 0) {
-                backend.clearSelectedChat()
+            } else if (backend.recordingVoice || backend.hasRecordedVoiceMemo) {
+                if (root.isVoiceMemoForSelectedChat()) {
+                    backend.cancelVoiceRecording()
+                    root.showToast("✕ " + i18n.tr("Voice memo cancelled"))
+                } else {
+                    root.handleEscapePostVoiceFallback()
+                }
+            } else {
+                root.handleEscapePostVoiceFallback()
             }
         }
     }
@@ -2088,6 +2330,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
 
                 Rectangle {
@@ -2677,6 +2920,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
 
                 // Active Chat Header (dynamically adapts between 1-row wide layout and 2-row split-screen layout so contact name/metadata and action buttons never overlap or clip)
@@ -3079,7 +3323,8 @@ ApplicationWindow {
 
                     function isNearBottom() {
                         if (atYEnd || count <= 0) return true
-                        var maxEnd = originY + contentHeight - height
+                        var minY = originY - topMargin
+                        var maxEnd = Math.max(minY, originY + contentHeight + bottomMargin - height)
                         return contentY >= maxEnd - 24
                     }
 
@@ -3091,6 +3336,9 @@ ApplicationWindow {
                             savedAnchorOffset = 0
                             return
                         }
+                        if (height <= 0 || width <= 0) {
+                            return
+                        }
                         if (restoringScrollPosition && !stickToBottom && (savedAnchorGuid.length > 0 || savedAnchorIndex >= 0)) {
                             return
                         }
@@ -3098,10 +3346,24 @@ ApplicationWindow {
                         savedContentY = contentY - originY
                         savedContentHeight = contentHeight
                         savedCount = count
-                        var probeY = contentY + Math.min(80, Math.max(46, height * 0.22))
-                        var idx = indexAt(width * 0.5, probeY)
-                        if (idx < 0) {
-                            idx = indexAt(width * 0.5, contentY + height * 0.5)
+                        var xFracs = [0.5, 0.25, 0.75, 0.15, 0.85]
+                        var yOffsets = [
+                            Math.min(height - 8, Math.max(8, topMargin + 8)),
+                            Math.min(height - 8, Math.max(8, topMargin + 28)),
+                            Math.min(height - 8, Math.max(8, Math.min(80, Math.max(46, height * 0.22)))),
+                            Math.min(height - 8, Math.max(8, height * 0.5)),
+                            Math.min(height - 8, Math.max(8, height * 0.75))
+                        ]
+                        var idx = -1
+                        for (var yi = 0; yi < yOffsets.length && idx < 0; ++yi) {
+                            var py = contentY + yOffsets[yi]
+                            for (var xi = 0; xi < xFracs.length; ++xi) {
+                                var cand = indexAt(width * xFracs[xi], py)
+                                if (cand >= 0) {
+                                    idx = cand
+                                    break
+                                }
+                            }
                         }
                         if (idx < 0 && count > 0) {
                             idx = Math.min(count - 1, Math.max(0, Math.floor((contentY - originY) / Math.max(40, contentHeight / count))))
@@ -3138,13 +3400,24 @@ ApplicationWindow {
                             targetIdx = Math.min(savedAnchorIndex, count - 1)
                         }
                         if (targetIdx >= 0 && targetIdx < count) {
-                            positionViewAtIndex(targetIdx, ListView.Beginning)
                             var item = itemAtIndex(targetIdx)
+                            if (!item) {
+                                positionViewAtIndex(targetIdx, ListView.Beginning)
+                                item = itemAtIndex(targetIdx)
+                            }
                             if (item) {
                                 var desiredY = item.y - savedAnchorOffset
                                 var minY = originY - topMargin
                                 var maxY = Math.max(minY, originY + contentHeight + bottomMargin - height)
-                                contentY = Math.max(minY, Math.min(maxY, desiredY))
+                                var clampedY = Math.max(minY, Math.min(maxY, desiredY))
+                                if (Math.abs(contentY - clampedY) > 1.0) {
+                                    contentY = clampedY
+                                }
+                                if (restoringScrollPosition && Math.abs(contentY - clampedY) <= 1.0 && restorePassesRemaining < 4) {
+                                    restoringScrollPosition = false
+                                    restorePassesRemaining = 0
+                                    scrollRestoreTimer.stop()
+                                }
                             } else if (count === savedCount && savedContentHeight > 0) {
                                 contentY = originY + savedContentY
                             }
@@ -3302,7 +3575,7 @@ ApplicationWindow {
                     }
 
                     onCountChanged: {
-                        if (stickToBottom) {
+                        if (stickToBottom && !restoringScrollPosition) {
                             scrollToBottom()
                         }
                     }
@@ -4100,7 +4373,9 @@ ApplicationWindow {
                                                             resolvedList.push({
                                                                 guid: eg,
                                                                 name: entry.name || ("Photo " + (k + 1)),
-                                                                localUrl: msgDelegate.resolveAttachmentUrl(eg, entry.localUrl || "")
+                                                                localUrl: msgDelegate.resolveAttachmentUrl(eg, entry.localUrl || ""),
+                                                                previewUrl: entry.previewUrl || "",
+                                                                sourceUrl: entry.sourceUrl || ""
                                                             })
                                                         }
                                                         root.openPhotoViewer(resolvedList, index)
@@ -4793,6 +5068,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
 
                 // Emoji :shortcode: Live Autocomplete Bar above Composer
@@ -5013,6 +5289,299 @@ ApplicationWindow {
                     }
                 }
 
+                // Staged Pasted Image / Attachment Bar
+                Rectangle {
+                    id: stagedAttachmentBar
+                    objectName: "stagedAttachmentBar"
+                    visible: backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 64
+                    color: theme.darkBackground
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width
+                        height: 1
+                        color: theme.lighterBackground
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 10
+
+                        Rectangle {
+                            width: 46
+                            height: 46
+                            radius: 6
+                            clip: true
+                            color: theme.background
+                            border.width: 1
+                            border.color: theme.accent
+
+                            Image {
+                                anchors.fill: parent
+                                fillMode: Image.PreserveAspectCrop
+                                source: root.stagedAttachmentPath.length > 0 ? ("file://" + root.stagedAttachmentPath) : ""
+                                asynchronous: true
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                Layout.fillWidth: true
+                                text: root.stagedAttachmentName.length > 0 ? root.stagedAttachmentName : i18n.tr("Pasted Image")
+                                font.pixelSize: theme.fontSize - 1
+                                font.bold: true
+                                color: theme.brightForeground
+                                elide: Text.ElideMiddle
+                            }
+                            Text {
+                                Layout.fillWidth: true
+                                text: i18n.tr("Staged attachment · type optional caption or press Enter to send")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.darkForeground
+                                elide: Text.ElideRight
+                            }
+                        }
+
+                        Rectangle {
+                            objectName: "stagedAttachmentCancelBtn"
+                            Layout.preferredWidth: 78
+                            Layout.preferredHeight: 32
+                            radius: 6
+                            color: stagedCancelMouse.containsMouse ? theme.lighterBackground : theme.background
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✕ " + i18n.tr("Cancel")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                id: stagedCancelMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.clearStagedAttachment()
+                            }
+                        }
+
+                        Rectangle {
+                            objectName: "stagedAttachmentSendBtn"
+                            Layout.preferredWidth: 74
+                            Layout.preferredHeight: 32
+                            radius: 6
+                            color: theme.accent
+                            Text {
+                                anchors.centerIn: parent
+                                text: i18n.tr("Send") + " ↑"
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: "#ffffff"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.sendComposerContent()
+                            }
+                        }
+                    }
+                }
+
+                // Voice Memo Recording & Pre-Send Playback Preview Bar
+                Rectangle {
+                    id: voiceMemoBar
+                    objectName: "voiceMemoBar"
+                    visible: backend.selectedChatGuid.length > 0 && (backend.recordingVoice || backend.hasRecordedVoiceMemo) && root.isVoiceMemoForSelectedChat()
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 56
+                    color: backend.recordingVoice ? Qt.rgba(0.90, 0.22, 0.27, 0.14) : theme.darkBackground
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width
+                        height: 1
+                        color: backend.recordingVoice ? "#e63946" : theme.accent
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 10
+
+                        // Pulsing dot when recording, or Play/Pause button when staged for preview
+                        Rectangle {
+                            visible: backend.recordingVoice
+                            width: 12
+                            height: 12
+                            radius: 6
+                            color: "#e63946"
+                            opacity: 1.0
+                            SequentialAnimation on opacity {
+                                running: backend.recordingVoice
+                                loops: Animation.Infinite
+                                NumberAnimation { to: 0.25; duration: 550 }
+                                NumberAnimation { to: 1.0; duration: 550 }
+                            }
+                        }
+
+                        Rectangle {
+                            objectName: "voiceMemoPreviewPlayBtn"
+                            visible: !backend.recordingVoice && backend.hasRecordedVoiceMemo
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
+                            radius: 17
+                            color: theme.accent
+                            readonly property bool previewPlaying: backend.playingAudioGuid === "voice-memo-preview" && backend.audioPlaying
+                            Text {
+                                anchors.centerIn: parent
+                                text: parent.previewPlaying ? "⏸" : "▶"
+                                font.pixelSize: theme.fontSize
+                                color: "#ffffff"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.togglePreviewRecordedVoiceMemo()
+                            }
+                        }
+
+                        Text {
+                            text: {
+                                var secs = backend.recordingVoice ? backend.voiceRecordingSeconds : backend.recordedVoiceDurationSeconds
+                                var timeStr = Math.floor(secs / 60) + ":" + ("0" + (secs % 60)).slice(-2)
+                                if (backend.recordingVoice) {
+                                    return i18n.tr("Recording") + " " + timeStr
+                                }
+                                if (backend.playingAudioGuid === "voice-memo-preview") {
+                                    return i18n.tr("Preview") + " " + backend.audioDurationText
+                                }
+                                return i18n.tr("Preview") + " " + timeStr
+                            }
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: backend.recordingVoice ? "#ff6b6b" : theme.brightForeground
+                        }
+
+                        // Live / Recorded Waveform Bars
+                        Item {
+                            Layout.fillWidth: true
+                            height: 24
+                            Row {
+                                id: composerWaveRow
+                                anchors.fill: parent
+                                spacing: 2
+                                Repeater {
+                                    model: backend.recordingVoice ? backend.voiceRecordingWaveform : backend.recordedVoiceWaveform
+                                    delegate: Rectangle {
+                                        required property var modelData
+                                        required property int index
+                                        width: Math.max(2, Math.floor((composerWaveRow.width - (27 * 2)) / 28))
+                                        height: Math.max(4, Math.round(22 * Number(modelData)))
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        radius: 1
+                                        readonly property bool barActive: !backend.recordingVoice &&
+                                                                        backend.playingAudioGuid === "voice-memo-preview" &&
+                                                                        (index / 28.0) <= backend.audioProgress
+                                        color: backend.recordingVoice
+                                               ? "#ff6b6b"
+                                               : (barActive ? theme.accent : theme.muted)
+                                    }
+                                }
+                            }
+                        }
+
+                        // Cancel / Discard Button (active during both recording and preview)
+                        Rectangle {
+                            objectName: "voiceMemoCancelBtn"
+                            Layout.preferredWidth: 84
+                            Layout.preferredHeight: 34
+                            radius: 6
+                            color: vmCancelMouse.containsMouse ? theme.lighterBackground : theme.background
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✕ " + i18n.tr("Cancel")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                id: vmCancelMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.cancelVoiceRecording()
+                                    root.showToast("✕ " + i18n.tr("Voice memo cancelled"))
+                                }
+                            }
+                        }
+
+                        // Stop & Preview Button (shown while recording)
+                        Rectangle {
+                            objectName: "voiceMemoStopPreviewBtn"
+                            visible: backend.recordingVoice
+                            Layout.preferredWidth: 96
+                            Layout.preferredHeight: 34
+                            radius: 6
+                            color: vmStopMouse.containsMouse ? theme.lighterBackground : theme.background
+                            border.width: 1
+                            border.color: theme.accent
+                            Text {
+                                anchors.centerIn: parent
+                                text: "⏹ " + i18n.tr("Preview")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.brightForeground
+                            }
+                            MouseArea {
+                                id: vmStopMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.stopVoiceRecordingForPreview()
+                            }
+                        }
+
+                        // Send Voice Memo Button (shown while recording and when staged for preview)
+                        Rectangle {
+                            objectName: "voiceMemoSendBtn"
+                            Layout.preferredWidth: 80
+                            Layout.preferredHeight: 34
+                            radius: 6
+                            color: theme.accent
+                            Text {
+                                anchors.centerIn: parent
+                                text: i18n.tr("Send") + " ↑"
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: "#ffffff"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    if (!root.isVoiceMemoForSelectedChat()) return
+                                    if (backend.recordingVoice) {
+                                        backend.stopAndSendVoiceRecording()
+                                    } else if (backend.canSendRecordedVoiceMemoToSelectedChat()) {
+                                        backend.sendRecordedVoiceMemo()
+                                    }
+                                    messageListView.scrollToBottom()
+                                }
+                            }
+                        }
+                    }
+
+                }
+
                 // Bottom Message Composer Bar
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0
@@ -5107,8 +5676,11 @@ ApplicationWindow {
                                         ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Insert)) {
                                         var pastedPath = backend.pasteClipboardImageToTempFile()
                                         if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
-                                            backend.sendAttachment(backend.selectedChatGuid, pastedPath, composerInput.text.trim())
-                                            composerInput.text = ""
+                                            root.stagedAttachmentPath = pastedPath
+                                            root.stagedAttachmentName = pastedPath.split("/").pop()
+                                            root.stagedAttachmentChatGuid = backend.selectedChatGuid
+                                            root.stageAttachment(pastedPath, root.stagedAttachmentName, backend.selectedChatGuid)
+                                            root.showToast("📎 " + i18n.tr("Image staged — press Enter or Send"))
                                             event.accepted = true
                                             return
                                         }
@@ -5235,16 +5807,7 @@ ApplicationWindow {
                                         root.applyEmojiAutocomplete(root.emojiAutocompleteResults[root.selectedEmojiIndex].emoji, false)
                                     } else {
                                         event.accepted = true
-                                        if (composerInput.text.trim().length > 0) {
-                                            backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
-                                            messageListView.scrollToBottom()
-                                            composerInput.text = ""
-                                            root.showEmojiPicker = false
-                                            root.emojiAutocompleteResults = []
-                                            root.replyTargetGuid = ""
-                                            root.replyTargetSender = ""
-                                            root.replyTargetText = ""
-                                        }
+                                        root.sendComposerContent()
                                     }
                                 }
                             }
@@ -5275,8 +5838,7 @@ ApplicationWindow {
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     if (backend.recordingVoice) {
-                                        backend.stopAndSendVoiceRecording();
-                                        root.showToast("✓ Sent voice memo");
+                                        backend.stopVoiceRecordingForPreview();
                                     } else {
                                         backend.startVoiceRecording();
                                     }
@@ -5284,7 +5846,7 @@ ApplicationWindow {
                             }
 
                             ToolTip.visible: voiceBtnMouse.containsMouse
-                            ToolTip.text: backend.recordingVoice ? i18n.tr("Stop & Send Voice Memo") : i18n.tr("Record Voice Memo")
+                            ToolTip.text: backend.recordingVoice ? i18n.tr("Stop & Preview Voice Memo") : i18n.tr("Record Voice Memo")
                             ToolTip.delay: 400
                         }
 
@@ -5393,10 +5955,11 @@ ApplicationWindow {
                             Layout.preferredHeight: 44
                             Layout.alignment: Qt.AlignVCenter
                             radius: theme.radius
-                            color: composerInput.text.trim().length > 0
+                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat())
+                            color: canSendNow
                                    ? (backend.selectedChatService !== "iMessage" ? "#1B6E38" : theme.accent)
                                    : theme.lighterBackground
-                            border.width: (composerInput.text.trim().length > 0 && backend.selectedChatService !== "iMessage") ? 1 : 0
+                            border.width: (canSendNow && backend.selectedChatService !== "iMessage") ? 1 : 0
                             border.color: "#268C48"
 
                             Text {
@@ -5404,22 +5967,13 @@ ApplicationWindow {
                                 text: i18n.tr("Send") + " ↑"
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
-                                color: composerInput.text.trim().length > 0 ? "#ffffff" : theme.darkForeground
+                                color: parent.canSendNow ? "#ffffff" : theme.darkForeground
                             }
 
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    if (composerInput.text.trim().length > 0) {
-                                        backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
-                                        messageListView.scrollToBottom()
-                                        composerInput.text = ""
-                                        root.replyTargetGuid = ""
-                                        root.replyTargetSender = ""
-                                        root.replyTargetText = ""
-                                    }
-                                }
+                                onClicked: root.sendComposerContent()
                             }
                         }
                     }
@@ -6042,7 +6596,7 @@ ApplicationWindow {
         focus: true
         anchors.centerIn: parent
         property bool isFullScreen: false
-        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(880, Math.max(560, root.width - 80))
+        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(960, Math.max(580, root.width - 80))
         height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
         readonly property bool compactNotesLayout: width < 760
         property int notesPage: 0
@@ -6197,7 +6751,7 @@ ApplicationWindow {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
                 Text {
                     text: "📝 " + i18n.tr("iCloud & Local Hub Notes")
                     font.pixelSize: theme.fontSize + 2
@@ -6205,6 +6759,7 @@ ApplicationWindow {
                     color: theme.brightForeground
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 40
                 }
                 Text {
                     visible: icloudNotesPopup.filteredNotes.length > 0
@@ -6213,6 +6768,7 @@ ApplicationWindow {
                     color: theme.darkForeground
                 }
                 Text {
+                    visible: icloudNotesPopup.width >= 660
                     text: i18n.tr("Per page:")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
@@ -6220,7 +6776,7 @@ ApplicationWindow {
                 ComboBox {
                     id: notesPageSizeSelector
                     objectName: "notesPageSizeSelector"
-                    Layout.preferredWidth: 76
+                    Layout.preferredWidth: 74
                     model: [10, 20, 50, 100]
                     currentIndex: 1
                     onActivated: {
@@ -6230,7 +6786,9 @@ ApplicationWindow {
                     }
                 }
                 Button {
-                    text: "+ " + i18n.tr("New Note")
+                    text: icloudNotesPopup.width < 660 ? "+" : ("+ " + i18n.tr("New Note"))
+                    leftPadding: 8
+                    rightPadding: 8
                     onClicked: {
                         icloudNotesPopup.selectedNoteId = ""
                         icloudNotesPopup.selectedNoteSyncSource = "local_hub"
@@ -6254,11 +6812,17 @@ ApplicationWindow {
                 Button {
                     id: notesFullScreenBtn
                     objectName: "notesFullScreenBtn"
-                    text: icloudNotesPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    leftPadding: 8
+                    rightPadding: 8
+                    text: icloudNotesPopup.width < 660
+                          ? (icloudNotesPopup.isFullScreen ? "🗗" : "⛶")
+                          : (icloudNotesPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen")))
                     onClicked: icloudNotesPopup.isFullScreen = !icloudNotesPopup.isFullScreen
                 }
                 Button {
                     text: "✕"
+                    leftPadding: 8
+                    rightPadding: 8
                     onClicked: icloudNotesPopup.close()
                 }
             }
@@ -6269,9 +6833,9 @@ ApplicationWindow {
                 spacing: 14
 
                 ColumnLayout {
-                    Layout.preferredWidth: icloudNotesPopup.compactNotesLayout ? Math.floor(icloudNotesPopup.width * 0.40) : Math.max(290, Math.floor(icloudNotesPopup.width * 0.36))
-                    Layout.minimumWidth: 230
-                    Layout.maximumWidth: Math.floor(icloudNotesPopup.width * 0.45)
+                    Layout.preferredWidth: Math.min(280, Math.max(200, Math.round(icloudNotesPopup.width * 0.34)))
+                    Layout.minimumWidth: 200
+                    Layout.maximumWidth: 300
                     Layout.fillHeight: true
                     spacing: 8
 
@@ -6401,6 +6965,7 @@ ApplicationWindow {
                     id: noteSideDetailPane
                     objectName: "noteSideDetailPane"
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 0
                     Layout.fillHeight: true
                     color: theme.background
                     radius: 8
@@ -6410,22 +6975,22 @@ ApplicationWindow {
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 14
+                        anchors.margins: 12
                         spacing: 10
 
                         RowLayout {
                             Layout.fillWidth: true
-                            spacing: 8
+                            spacing: 6
 
                             Text {
                                 id: notePopupHeadlineText
                                 objectName: "notePopupHeadlineText"
                                 Layout.fillWidth: true
                                 Layout.preferredWidth: 0
-                                Layout.minimumWidth: 60
+                                Layout.minimumWidth: 40
                                 text: noteTitleInput.text.trim().length > 0 ? noteTitleInput.text.trim() : i18n.tr("Untitled Note")
                                 font.bold: true
-                                font.pixelSize: theme.fontSize + 3
+                                font.pixelSize: theme.fontSize + 2
                                 color: theme.brightForeground
                                 maximumLineCount: 1
                                 elide: Text.ElideRight
@@ -6433,9 +6998,9 @@ ApplicationWindow {
 
                             Rectangle {
                                 height: 24
-                                width: sideSyncBadgeTxt.implicitWidth + 14
-                                Layout.preferredWidth: sideSyncBadgeTxt.implicitWidth + 14
-                                Layout.minimumWidth: sideSyncBadgeTxt.implicitWidth + 14
+                                width: sideSyncBadgeTxt.implicitWidth + 12
+                                Layout.preferredWidth: sideSyncBadgeTxt.implicitWidth + 12
+                                Layout.minimumWidth: sideSyncBadgeTxt.implicitWidth + 12
                                 Layout.preferredHeight: 24
                                 Layout.alignment: Qt.AlignVCenter
                                 radius: 12
@@ -6457,11 +7022,13 @@ ApplicationWindow {
                             Button {
                                 id: notePopOutBtn
                                 objectName: "notePopOutBtn"
-                                Layout.preferredWidth: implicitWidth
-                                Layout.minimumWidth: implicitWidth
                                 Layout.alignment: Qt.AlignVCenter
-                                rightPadding: 10
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
                                 leftPadding: 10
+                                rightPadding: 10
+                                font.pixelSize: theme.fontSize - 2
                                 text: "⤢ " + i18n.tr("Pop Out")
                                 enabled: icloudNotesPopup.selectedNoteId !== "" || noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0
                                 onClicked: icloudNotesPopup.popOutCurrentNote()
@@ -6718,6 +7285,12 @@ ApplicationWindow {
                             spacing: 6
 
                             Button {
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
+                                leftPadding: 8
+                                rightPadding: 8
+                                font.pixelSize: theme.fontSize - 2
                                 text: "💾 " + i18n.tr("Save")
                                 onClicked: {
                                     var isCopy = false
@@ -6807,7 +7380,13 @@ ApplicationWindow {
                             }
 
                             Button {
-                                text: "📤 " + i18n.tr("Send to Chat")
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
+                                leftPadding: 8
+                                rightPadding: 8
+                                font.pixelSize: theme.fontSize - 2
+                                text: noteSideDetailPane.width < 460 ? ("📤 " + i18n.tr("Send")) : ("📤 " + i18n.tr("Send to Chat"))
                                 enabled: backend.selectedChatGuid !== "" && (noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0)
                                 onClicked: {
                                     var textToSend = noteTitleInput.text.trim()
@@ -6820,6 +7399,12 @@ ApplicationWindow {
                             }
 
                             Button {
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
+                                leftPadding: 8
+                                rightPadding: 8
+                                font.pixelSize: theme.fontSize - 2
                                 text: "📋 " + i18n.tr("Copy")
                                 enabled: noteTitleInput.text.trim().length > 0 || noteBodyInput.text.trim().length > 0
                                 onClicked: {
@@ -6834,6 +7419,14 @@ ApplicationWindow {
                             Item { Layout.fillWidth: true }
 
                             Button {
+                                id: noteDeleteBtn
+                                objectName: "noteDeleteBtn"
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
+                                leftPadding: 8
+                                rightPadding: 8
+                                font.pixelSize: theme.fontSize - 2
                                 text: "🗑 " + i18n.tr("Delete")
                                 enabled: icloudNotesPopup.selectedNoteId !== ""
                                 onClicked: {
@@ -6873,6 +7466,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
             }
 
@@ -6948,7 +7542,7 @@ ApplicationWindow {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
                 Text {
                     text: "📅 " + i18n.tr("iCloud & Local Hub Calendar")
                     font.pixelSize: theme.fontSize + 3
@@ -6956,8 +7550,10 @@ ApplicationWindow {
                     color: theme.brightForeground
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 40
                 }
                 Text {
+                    visible: icloudCalendarPopup.width >= 640
                     text: i18n.tr("Per page:")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
@@ -6965,7 +7561,7 @@ ApplicationWindow {
                 ComboBox {
                     id: eventsPageSizeSelector
                     objectName: "eventsPageSizeSelector"
-                    Layout.preferredWidth: 76
+                    Layout.preferredWidth: 74
                     model: [15, 25, 50, 100]
                     currentIndex: 1
                     onActivated: {
@@ -6977,11 +7573,17 @@ ApplicationWindow {
                 Button {
                     id: calendarFullScreenBtn
                     objectName: "calendarFullScreenBtn"
-                    text: icloudCalendarPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    leftPadding: 8
+                    rightPadding: 8
+                    text: icloudCalendarPopup.width < 640
+                          ? (icloudCalendarPopup.isFullScreen ? "🗗" : "⛶")
+                          : (icloudCalendarPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen")))
                     onClicked: icloudCalendarPopup.isFullScreen = !icloudCalendarPopup.isFullScreen
                 }
                 Button {
                     text: "✕"
+                    leftPadding: 8
+                    rightPadding: 8
                     onClicked: icloudCalendarPopup.close()
                 }
             }
@@ -7181,7 +7783,7 @@ ApplicationWindow {
         focus: true
         anchors.centerIn: parent
         property bool isFullScreen: false
-        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(880, Math.max(540, root.width - 80))
+        width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(960, Math.max(560, root.width - 80))
         height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
         onOpened: {
@@ -7225,14 +7827,15 @@ ApplicationWindow {
 
             RowLayout {
                 Layout.fillWidth: true
-                spacing: 8
+                spacing: 6
                 Text {
-                    text: "☁️ " + i18n.tr("iCloud & iMessage Photos")
+                    text: "☁️ " + i18n.tr("iCloud Photos")
                     font.pixelSize: theme.fontSize + 2
                     font.bold: true
                     color: theme.brightForeground
                     elide: Text.ElideRight
                     Layout.fillWidth: true
+                    Layout.minimumWidth: 40
                 }
                 Text {
                     visible: backend.icloudPhotosTotal > 0 || backend.icloudPhotos.length > 0
@@ -7241,6 +7844,7 @@ ApplicationWindow {
                     color: theme.darkForeground
                 }
                 Text {
+                    visible: icloudPhotosPopup.width >= 680
                     text: i18n.tr("Per page:")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
@@ -7248,7 +7852,7 @@ ApplicationWindow {
                 ComboBox {
                     id: photosPageSizeSelector
                     objectName: "photosPageSizeSelector"
-                    Layout.preferredWidth: 78
+                    Layout.preferredWidth: 72
                     model: [24, 48, 60, 120, 240]
                     currentIndex: {
                         var idx = model.indexOf(backend.icloudPhotosPageSize)
@@ -7261,9 +7865,11 @@ ApplicationWindow {
                     }
                 }
                 Button {
+                    leftPadding: 8
+                    rightPadding: 8
                     text: backend.icloudPhotosSyncing
-                          ? ("⏳ " + i18n.tr("Syncing..."))
-                          : ("⬇ " + i18n.tr("Sync All"))
+                          ? (icloudPhotosPopup.width < 680 ? "⏳" : ("⏳ " + i18n.tr("Syncing...")))
+                          : (icloudPhotosPopup.width < 680 ? ("⬇ " + i18n.tr("Sync")) : ("⬇ " + i18n.tr("Sync All")))
                     enabled: !backend.icloudPhotosSyncing
                     onClicked: {
                         if (backend.icloudPhotosSyncing) return
@@ -7271,16 +7877,24 @@ ApplicationWindow {
                     }
                 }
                 Button {
-                    text: "🔄 " + i18n.tr("Refresh")
+                    leftPadding: 8
+                    rightPadding: 8
+                    text: icloudPhotosPopup.width < 680 ? "🔄" : ("🔄 " + i18n.tr("Refresh"))
                     onClicked: backend.fetchIcloudPhotos(backend.icloudPhotosPage, false, true)
                 }
                 Button {
                     id: photosFullScreenBtn
                     objectName: "photosFullScreenBtn"
-                    text: icloudPhotosPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen"))
+                    leftPadding: 8
+                    rightPadding: 8
+                    text: icloudPhotosPopup.width < 680
+                          ? (icloudPhotosPopup.isFullScreen ? "🗗" : "⛶")
+                          : (icloudPhotosPopup.isFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen")))
                     onClicked: icloudPhotosPopup.isFullScreen = !icloudPhotosPopup.isFullScreen
                 }
                 Button {
+                    leftPadding: 8
+                    rightPadding: 8
                     text: "✕"
                     onClicked: icloudPhotosPopup.close()
                 }
@@ -7293,8 +7907,10 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
-                cellWidth: 156
-                cellHeight: 210
+                rightMargin: 12
+                readonly property int gridCols: Math.max(2, Math.floor(Math.max(180, width - 14) / 182))
+                cellWidth: Math.max(172, Math.floor(Math.max(180, width - 14) / gridCols))
+                cellHeight: 234
                 model: backend.icloudPhotos
                 ScrollBar.vertical: ScrollBar {
                     id: photosGridScrollBar
@@ -7310,8 +7926,9 @@ ApplicationWindow {
                 }
 
                 delegate: Rectangle {
-                    width: 146
-                    height: 200
+                    width: Math.max(162, photosGridView.cellWidth - 10)
+                    height: 224
+                    clip: true
                     radius: 8
                     color: theme.background
                     border.color: Qt.rgba(1, 1, 1, 0.1)
@@ -7333,7 +7950,7 @@ ApplicationWindow {
 
                         Rectangle {
                             Layout.fillWidth: true
-                            Layout.preferredHeight: modelData.isPortrait ? 132 : 104
+                            Layout.preferredHeight: modelData.isPortrait ? 124 : 102
                             radius: 6
                             color: theme.darkBackground
                             clip: true
@@ -7453,7 +8070,10 @@ ApplicationWindow {
                                             icloudPhotosPopup.openImageGalleryFromPhotos(index)
                                         }
                                     } else if (modelData.guid && modelData.isCloudEvicted && modelData.canUnpurge !== false) {
+                                        root.showToast("☁ " + i18n.tr("Requesting iCloud download..."))
                                         backend.downloadCloudAttachment(modelData.guid)
+                                    } else if (modelData.isCloudEvicted) {
+                                        root.showToast("☁ " + i18n.tr("Stored in iCloud Only — unpurge unavailable on server"))
                                     }
                                 }
                             }
@@ -7473,6 +8093,13 @@ ApplicationWindow {
 
                             Button {
                                 Layout.fillWidth: true
+                                Layout.minimumWidth: 0
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
+                                leftPadding: 4
+                                rightPadding: 4
+                                font.pixelSize: theme.fontSize - 3
                                 enabled: !modelData.isCloudEvicted || modelData.canUnpurge !== false
                                 text: {
                                     var isVid = Boolean(modelData.isVideo) || modelData.mediaType === "video"
@@ -7488,7 +8115,11 @@ ApplicationWindow {
                                     if (!modelData.guid) return
                                     var isVid = Boolean(modelData.isVideo) || modelData.mediaType === "video"
                                     if (modelData.isCloudEvicted) {
-                                        if (modelData.canUnpurge === false) return
+                                        if (modelData.canUnpurge === false) {
+                                            root.showToast("☁ " + i18n.tr("Stored in iCloud Only — unpurge unavailable on server"))
+                                            return
+                                        }
+                                        root.showToast("☁ " + i18n.tr("Requesting iCloud download..."))
                                         backend.downloadCloudAttachment(modelData.guid)
                                     } else if (isVid) {
                                         backend.openAttachment(modelData.guid, modelData.name || "video.mov")
@@ -7499,8 +8130,20 @@ ApplicationWindow {
                             }
 
                             Button {
-                                text: "📤"
+                                objectName: "photoCardSendBtn"
+                                visible: !modelData.isCloudEvicted
+                                implicitHeight: 30
+                                topPadding: 4
+                                bottomPadding: 4
+                                leftPadding: 6
+                                rightPadding: 6
+                                font.pixelSize: theme.fontSize - 2
+                                text: "📤 Send"
                                 enabled: backend.selectedChatGuid !== "" && !!modelData.guid && !modelData.isCloudEvicted
+                                ToolTip.visible: hovered && backend.selectedChatGuid !== ""
+                                ToolTip.text: modelData.isCloudEvicted
+                                              ? i18n.tr("Download from iCloud before sending")
+                                              : (i18n.tr("Send to ") + (backend.selectedChatTitle || i18n.tr("active chat")))
                                 onClicked: {
                                     if (modelData.guid && !modelData.isCloudEvicted) {
                                         backend.shareIcloudPhotoToChat(backend.selectedChatGuid, modelData.guid, modelData.name || "photo.jpg")
@@ -7510,6 +8153,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
             }
 
@@ -7770,6 +8414,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
 
                 Rectangle {
@@ -8853,6 +9498,98 @@ ApplicationWindow {
                             }
                         }
                     }
+
+                    Text {
+                        text: i18n.tr("Audio Devices (Voice Memos & Alerts)")
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: theme.darkForeground
+                        Layout.topMargin: 4
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 3
+                            Text {
+                                text: i18n.tr("Microphone Input")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.darkForeground
+                            }
+                            ComboBox {
+                                id: audioInputDeviceCombo
+                                objectName: "audioInputDeviceCombo"
+                                Layout.fillWidth: true
+                                model: backend.audioInputDevices
+                                textRole: "label"
+                                valueRole: "id"
+                                currentIndex: root.findAudioDeviceIndex(backend.audioInputDevices, backend.selectedAudioInputDevice)
+                                onActivated: {
+                                    if (currentIndex >= 0 && currentIndex < backend.audioInputDevices.length) {
+                                        backend.selectedAudioInputDevice = backend.audioInputDevices[currentIndex].id || ""
+                                    }
+                                }
+                            }
+                        }
+
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 3
+                            Text {
+                                text: i18n.tr("Speaker / Output")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.darkForeground
+                            }
+                            ComboBox {
+                                id: audioOutputDeviceCombo
+                                objectName: "audioOutputDeviceCombo"
+                                Layout.fillWidth: true
+                                model: backend.audioOutputDevices
+                                textRole: "label"
+                                valueRole: "id"
+                                currentIndex: root.findAudioDeviceIndex(backend.audioOutputDevices, backend.selectedAudioOutputDevice)
+                                onActivated: {
+                                    if (currentIndex >= 0 && currentIndex < backend.audioOutputDevices.length) {
+                                        backend.selectedAudioOutputDevice = backend.audioOutputDevices[currentIndex].id || ""
+                                    }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            objectName: "refreshAudioDevicesBtn"
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
+                            Layout.alignment: Qt.AlignBottom
+                            radius: 6
+                            color: refreshAudioMouse.containsMouse ? theme.selection : theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: "↻"
+                                font.pixelSize: theme.fontSize + 1
+                                color: theme.brightForeground
+                            }
+                            ToolTip.visible: refreshAudioMouse.containsMouse
+                            ToolTip.text: i18n.tr("Refresh Audio Devices")
+                            ToolTip.delay: 300
+                            MouseArea {
+                                id: refreshAudioMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    backend.refreshAudioDevices()
+                                    root.reconcileAudioDeviceSelections()
+                                    root.showToast("↻ " + i18n.tr("Audio devices refreshed"))
+                                }
+                            }
+                        }
+                    }
                 }
 
                 RowLayout {
@@ -9335,6 +10072,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
             }
         }
@@ -9358,7 +10096,7 @@ ApplicationWindow {
 
         readonly property var currentPhoto: (root.photoViewerItems && root.photoViewerIndex >= 0 && root.photoViewerIndex < root.photoViewerItems.length)
                                             ? root.photoViewerItems[root.photoViewerIndex]
-                                            : ({ guid: "", name: "", localUrl: "", previewUrl: "", isCloudEvicted: false, canUnpurge: true, canRequestAttachment: true })
+                                            : ({ guid: "", name: "", localUrl: "", previewUrl: "", sourceUrl: "", isCloudEvicted: false, canUnpurge: true, canRequestAttachment: true })
 
         Connections {
             target: backend
@@ -9398,8 +10136,8 @@ ApplicationWindow {
             id: photoViewerCard
             objectName: "photoViewerCard"
             anchors.centerIn: parent
-            width: root.photoViewerFullScreen ? parent.width : Math.min(820, Math.max(480, root.width - 90))
-            height: root.photoViewerFullScreen ? parent.height : Math.min(580, Math.max(380, root.height - 90))
+            width: root.photoViewerFullScreen ? parent.width : Math.min(1040, Math.max(Math.min(360, parent.width - 20), root.width - 80))
+            height: root.photoViewerFullScreen ? parent.height : Math.min(720, Math.max(Math.min(340, parent.height - 20), root.height - 80))
             radius: root.photoViewerFullScreen ? 0 : 12
             color: theme.darkBackground
             border.width: root.photoViewerFullScreen ? 0 : 1
@@ -9408,7 +10146,7 @@ ApplicationWindow {
 
             MouseArea { anchors.fill: parent }
 
-        // Top Header Bar (Filename, Index Counter, Zoom Controls, Close Button)
+        // Top Header Bar (Filename, Index Counter, Zoom Controls, Send/Copy, Close Button)
         Rectangle {
             id: photoViewerTopBar
             anchors.top: parent.top
@@ -9417,28 +10155,30 @@ ApplicationWindow {
             height: 50
             color: "#cc131620"
             z: 5
+            readonly property bool compactTopBar: photoViewerCard.width < 720
 
             MouseArea { anchors.fill: parent }
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 20
-                anchors.rightMargin: 20
-                spacing: 12
+                anchors.leftMargin: 12
+                anchors.rightMargin: 12
+                spacing: 6
 
                 Text {
-                    text: "📷  " + (photoViewerModal.currentPhoto.name || i18n.tr("Photo"))
+                    text: "📷 " + (photoViewerModal.currentPhoto.name || i18n.tr("Photo"))
                     font.pixelSize: theme.fontSize + 1
                     font.bold: true
                     color: theme.brightForeground
                     elide: Text.ElideMiddle
-                    Layout.maximumWidth: 380
+                    Layout.fillWidth: true
+                    Layout.minimumWidth: 40
                 }
 
                 Rectangle {
                     visible: root.photoViewerItems.length > 1
                     height: 24
-                    implicitWidth: viewerCounterTxt.implicitWidth + 16
+                    implicitWidth: viewerCounterTxt.implicitWidth + 14
                     radius: 12
                     color: theme.selection
                     border.width: 1
@@ -9453,12 +10193,10 @@ ApplicationWindow {
                     }
                 }
 
-                Item { Layout.fillWidth: true }
-
                 // Zoom Out (-)
                 Rectangle {
-                    height: 32
-                    width: 34
+                    height: 30
+                    width: 30
                     radius: 7
                     color: zoomOutMouse.containsMouse ? theme.selection : theme.lighterBackground
                     border.width: 1
@@ -9481,8 +10219,8 @@ ApplicationWindow {
 
                 // Zoom Reset Pill (100%)
                 Rectangle {
-                    height: 32
-                    implicitWidth: zoomPctTxt.implicitWidth + 18
+                    height: 30
+                    implicitWidth: zoomPctTxt.implicitWidth + 14
                     radius: 7
                     color: zoomResetMouse.containsMouse ? theme.selection : theme.lighterBackground
                     border.width: 1
@@ -9510,8 +10248,8 @@ ApplicationWindow {
 
                 // Zoom In (+)
                 Rectangle {
-                    height: 32
-                    width: 34
+                    height: 30
+                    width: 30
                     radius: 7
                     color: zoomInMouse.containsMouse ? theme.selection : theme.lighterBackground
                     border.width: 1
@@ -9532,10 +10270,58 @@ ApplicationWindow {
                     }
                 }
 
+                // Send to Active Chat Button
+                Rectangle {
+                    id: photoViewerSendBtn
+                    objectName: "photoViewerSendBtn"
+                    visible: backend.selectedChatGuid.length > 0 && ((!!photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) || (!!photoViewerModal.currentPhoto.localUrl && photoViewerModal.currentPhoto.localUrl.length > 0))
+                    height: 30
+                    implicitWidth: sendViewerTxt.implicitWidth + 16
+                    radius: 7
+                    color: sendViewerMouse.containsMouse ? theme.accent : theme.selection
+                    border.width: 1
+                    border.color: theme.accent
+                    Text {
+                        id: sendViewerTxt
+                        anchors.centerIn: parent
+                        text: photoViewerTopBar.compactTopBar ? "📤" : ("📤 " + i18n.tr("Send"))
+                        font.pixelSize: theme.fontSize - 2
+                        font.bold: true
+                        color: theme.brightForeground
+                    }
+                    ToolTip.visible: sendViewerMouse.containsMouse
+                    ToolTip.text: i18n.tr("Send to ") + (backend.selectedChatTitle || i18n.tr("active chat"))
+                    MouseArea {
+                        id: sendViewerMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var cp = photoViewerModal.currentPhoto
+                            if (!cp || backend.selectedChatGuid.length === 0) return
+                            if (cp.localUrl && cp.localUrl.length > 0) {
+                                var lp = cp.localUrl
+                                if (lp.indexOf("file://") === 0) {
+                                    lp = decodeURIComponent(lp.slice(7))
+                                }
+                                if (lp.indexOf("/") === 0) {
+                                    backend.sendAttachment(backend.selectedChatGuid, lp)
+                                    root.closePhotoViewer()
+                                    return
+                                }
+                            }
+                            if (cp.guid && cp.guid.length > 0 && !cp.isCloudEvicted) {
+                                backend.shareIcloudPhotoToChat(backend.selectedChatGuid, cp.guid, cp.name || "photo.jpg")
+                                root.closePhotoViewer()
+                            }
+                        }
+                    }
+                }
+
                 // Copy Image Button (Ctrl+C)
                 Rectangle {
-                    height: 32
-                    implicitWidth: copyViewerTxt.implicitWidth + 20
+                    height: 30
+                    implicitWidth: copyViewerTxt.implicitWidth + 16
                     radius: 7
                     color: copyViewerMouse.containsMouse ? theme.selection : theme.lighterBackground
                     border.width: 1
@@ -9543,11 +10329,13 @@ ApplicationWindow {
                     Text {
                         id: copyViewerTxt
                         anchors.centerIn: parent
-                        text: "󰆏  " + i18n.tr("Copy Image")
+                        text: photoViewerTopBar.compactTopBar ? "󰆏" : ("󰆏 " + i18n.tr("Copy"))
                         font.pixelSize: theme.fontSize - 2
                         font.bold: true
                         color: copyViewerMouse.containsMouse ? theme.accent : theme.brightForeground
                     }
+                    ToolTip.visible: copyViewerMouse.containsMouse
+                    ToolTip.text: i18n.tr("Copy Image (Ctrl+C)")
                     MouseArea {
                         id: copyViewerMouse
                         anchors.fill: parent
@@ -9566,8 +10354,8 @@ ApplicationWindow {
                 Rectangle {
                     id: photoViewerFullScreenBtn
                     objectName: "photoViewerFullScreenBtn"
-                    height: 32
-                    implicitWidth: fsViewerTxt.implicitWidth + 20
+                    height: 30
+                    implicitWidth: fsViewerTxt.implicitWidth + 16
                     radius: 7
                     color: fsViewerMouse.containsMouse ? theme.selection : theme.lighterBackground
                     border.width: 1
@@ -9575,7 +10363,9 @@ ApplicationWindow {
                     Text {
                         id: fsViewerTxt
                         anchors.centerIn: parent
-                        text: root.photoViewerFullScreen ? ("🗗  " + i18n.tr("Compact")) : ("⛶  " + i18n.tr("Full Screen"))
+                        text: photoViewerTopBar.compactTopBar
+                              ? (root.photoViewerFullScreen ? "🗗" : "⛶")
+                              : (root.photoViewerFullScreen ? ("🗗 " + i18n.tr("Compact")) : ("⛶ " + i18n.tr("Full Screen")))
                         font.pixelSize: theme.fontSize - 2
                         font.bold: true
                         color: root.photoViewerFullScreen ? theme.accent : theme.brightForeground
@@ -9591,8 +10381,8 @@ ApplicationWindow {
 
                 // Close Button (Esc)
                 Rectangle {
-                    height: 32
-                    implicitWidth: closeViewerTxt.implicitWidth + 22
+                    height: 30
+                    implicitWidth: closeViewerTxt.implicitWidth + 16
                     radius: 7
                     color: closeViewerMouse.containsMouse ? "#c53b53" : theme.lighterBackground
                     border.width: 1
@@ -9600,7 +10390,7 @@ ApplicationWindow {
                     Text {
                         id: closeViewerTxt
                         anchors.centerIn: parent
-                        text: "✕  " + i18n.tr("Close (Esc)")
+                        text: photoViewerTopBar.compactTopBar ? "✕" : ("✕ " + i18n.tr("Close (Esc)"))
                         font.pixelSize: theme.fontSize - 2
                         font.bold: true
                         color: closeViewerMouse.containsMouse ? "#ffffff" : theme.brightForeground
@@ -9623,8 +10413,55 @@ ApplicationWindow {
             anchors.bottom: photoThumbBar.visible ? photoThumbBar.top : parent.bottom
             anchors.left: parent.left
             anchors.right: parent.right
-            anchors.margins: 16
+            anchors.margins: 8
             clip: true
+
+            MouseArea {
+                id: imageCanvasMouse
+                anchors.fill: parent
+                cursorShape: root.photoViewerZoom > 1.0 ? (dragging ? Qt.ClosedHandCursor : Qt.OpenHandCursor) : Qt.PointingHandCursor
+                property real lastX: 0
+                property real lastY: 0
+                property bool dragging: false
+
+                onPressed: (mouse) => {
+                    if (root.photoViewerZoom > 1.0) {
+                        dragging = true
+                        lastX = mouse.x
+                        lastY = mouse.y
+                    }
+                }
+                onPositionChanged: (mouse) => {
+                    if (dragging && root.photoViewerZoom > 1.0) {
+                        var dx = mouse.x - lastX
+                        var dy = mouse.y - lastY
+                        lastX = mouse.x
+                        lastY = mouse.y
+                        var maxPanX = Math.max(120, fullPhotoImage.width * root.photoViewerZoom * 0.5)
+                        var maxPanY = Math.max(120, fullPhotoImage.height * root.photoViewerZoom * 0.5)
+                        root.photoViewerPanX = Math.max(-maxPanX, Math.min(maxPanX, root.photoViewerPanX + dx))
+                        root.photoViewerPanY = Math.max(-maxPanY, Math.min(maxPanY, root.photoViewerPanY + dy))
+                    }
+                }
+                onReleased: dragging = false
+                onCanceled: dragging = false
+                onDoubleClicked: {
+                    if (root.photoViewerZoom > 1.0) {
+                        root.photoViewerZoom = 1.0
+                        root.photoViewerPanX = 0
+                        root.photoViewerPanY = 0
+                    } else {
+                        root.photoViewerZoom = 2.0
+                    }
+                }
+                onWheel: (wheel) => {
+                    if (wheel.angleDelta.y > 0) {
+                        root.zoomPhotoViewer(0.2)
+                    } else if (wheel.angleDelta.y < 0) {
+                        root.zoomPhotoViewer(-0.2)
+                    }
+                }
+            }
 
             Image {
                 id: fullPhotoImage
@@ -9632,9 +10469,9 @@ ApplicationWindow {
                 anchors.centerIn: parent
                 anchors.horizontalCenterOffset: root.photoViewerPanX
                 anchors.verticalCenterOffset: root.photoViewerPanY
-                width: Math.max(120, parent.width - (root.photoViewerItems.length > 1 ? 120 : 24))
-                height: Math.max(120, parent.height - 16)
-                source: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
+                width: Math.max(80, parent.width - (root.photoViewerItems.length > 1 ? 116 : 16))
+                height: Math.max(80, parent.height - 8)
+                source: photoViewerModal.currentPhoto.localUrl || photoViewerModal.currentPhoto.previewUrl || photoViewerModal.currentPhoto.sourceUrl || ((photoViewerModal.currentPhoto.guid && !photoViewerModal.currentPhoto.isCloudEvicted) ? backend.attachmentDownloadUrl(photoViewerModal.currentPhoto.guid) : "")
                 asynchronous: true
                 cache: true
                 autoTransform: true
@@ -9643,46 +10480,6 @@ ApplicationWindow {
                 fillMode: Image.PreserveAspectFit
                 scale: root.photoViewerZoom
                 visible: status === Image.Ready
-
-                MouseArea {
-                    id: imageCanvasMouse
-                    anchors.fill: parent
-                    cursorShape: root.photoViewerZoom > 1.0 ? Qt.OpenHandCursor : Qt.PointingHandCursor
-                    property real lastX: 0
-                    property real lastY: 0
-                    property bool dragging: false
-
-                    onPressed: (mouse) => {
-                        if (root.photoViewerZoom > 1.0) {
-                            dragging = true
-                            lastX = mouse.x
-                            lastY = mouse.y
-                        }
-                    }
-                    onPositionChanged: (mouse) => {
-                        if (dragging && root.photoViewerZoom > 1.0) {
-                            root.photoViewerPanX += (mouse.x - lastX) * root.photoViewerZoom
-                            root.photoViewerPanY += (mouse.y - lastY) * root.photoViewerZoom
-                        }
-                    }
-                    onReleased: dragging = false
-                    onDoubleClicked: {
-                        if (root.photoViewerZoom > 1.0) {
-                            root.photoViewerZoom = 1.0
-                            root.photoViewerPanX = 0
-                            root.photoViewerPanY = 0
-                        } else {
-                            root.photoViewerZoom = 2.0
-                        }
-                    }
-                    onWheel: (wheel) => {
-                        if (wheel.angleDelta.y > 0) {
-                            root.zoomPhotoViewer(0.2)
-                        } else if (wheel.angleDelta.y < 0) {
-                            root.zoomPhotoViewer(-0.2)
-                        }
-                    }
-                }
             }
 
             // Loading / Downloading fallback state
@@ -9834,7 +10631,7 @@ ApplicationWindow {
                     Image {
                         anchors.fill: parent
                         anchors.margins: 2
-                        source: modelData.localUrl || modelData.previewUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
+                        source: modelData.localUrl || modelData.previewUrl || modelData.sourceUrl || ((modelData.guid && !modelData.isCloudEvicted) ? backend.attachmentDownloadUrl(modelData.guid) : "")
                         asynchronous: true
                         cache: true
                         autoTransform: true
@@ -10168,6 +10965,7 @@ ApplicationWindow {
                             }
                         }
                     }
+
                 }
 
                 // Close button
