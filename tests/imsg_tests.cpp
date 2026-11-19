@@ -3740,6 +3740,14 @@ private slots:
         QVERIFY(viewer);
         QTRY_VERIFY(viewer->property("visible").toBool());
         QCOMPARE(viewer->property("currentPhoto").toMap().value(QStringLiteral("mimeType")).toString(), QStringLiteral("image/gif"));
+        QObject *fullAnimated = win->findChild<QObject *>(QStringLiteral("fullPhotoAnimated"));
+        QVERIFY(fullAnimated);
+        QVERIFY(!fullAnimated->property("source").toUrl().isEmpty());
+
+        // Closing the viewer drops the GIF so its decoded frames aren't kept
+        QMetaObject::invokeMethod(win, "closePhotoViewer");
+        QTRY_VERIFY(!viewer->property("visible").toBool());
+        QVERIFY(fullAnimated->property("source").toUrl().isEmpty());
     }
 
     void testOrphanSmsVerificationCodeWithoutChatJoin() {

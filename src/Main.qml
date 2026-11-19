@@ -11550,7 +11550,8 @@ ApplicationWindow {
                 objectName: "fullPhotoAnimated"
                 anchors.fill: fullPhotoImage
                 anchors.centerIn: undefined
-                source: parent.fullPhotoIsAnimated ? parent.fullPhotoSource : ""
+                // Cleared on close: with cache on, every decoded frame stays in memory while a source is set
+                source: root.showPhotoViewer && parent.fullPhotoIsAnimated ? parent.fullPhotoSource : ""
                 asynchronous: true
                 cache: true
                 smooth: true
