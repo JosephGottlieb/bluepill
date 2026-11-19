@@ -28,6 +28,11 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 - **Server URL defaults match the relay, with a separate Port field:** A server URL without a scheme now resolves to `http://` (the relay has no TLS unless started with `--tls-cert`/`--tls-key`). Settings has a separate **Port** field that shows the default `1235` greyed out, and a port typed into the URL field (`host:8080`) moves into it. When no port is given, `1235` is used for both `http://` and `https://` (enter `443` for a reverse proxy). Saved configs and env-var URLs are never rewritten, and a saved URL without a port shows its effective port (443/80) so re-saving keeps it.
 
 ### Fixed
+- **The pinned row shows your Mac's pinned conversations:**
+  - **What changed:** it reads the Mac's pins (`GET /api/v1/pinned`) in the Mac's order, instead of showing the four most recent chats when nothing was pinned locally.
+  - **Right-click:** on a pinned contact it opens the conversation menu instead of silently pinning that chat, which used to hide the other three.
+  - **Pin / Unpin:** the menu has **Pin** / **Unpin**. Unpinning a Mac pin hides it here and survives restarts, and pinning any chat adds it after the Mac's pins.
+  - **With nothing pinned,** the row is hidden.
 - **Unsend works:** the client now tells the Mac which chat the message is in. Previously the Messages helper got an empty chat, so nothing was unsent, yet the message vanished locally and was deleted from the Mac. The message is now removed only after the Mac confirms (a helper that times out without confirming leaves it in place). Otherwise a toast says why, such as the Private API helper not being connected.
 - **Edit and Unsend are offered only within 2 minutes of sending,** and only for your own iMessages. The buttons disappear once a message is older than that.
 - **`bluepill-server` edit/unsend endpoints report failures:** they look up the message's chat in `chat.db` when none is given. They answer `503` when the Messages helper isn't connected, `502` when it refuses, and `404` for an unknown message, instead of always answering `200`.

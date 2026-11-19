@@ -2201,7 +2201,9 @@ ApplicationWindow {
                                         cursorShape: Qt.PointingHandCursor
                                         onClicked: function(mouse) {
                                             if (mouse.button === Qt.RightButton) {
-                                                backend.togglePinChat(modelData.guid)
+                                                // Same menu as the chat list (with Unpin)
+                                                var p = pinTileMouse.mapToItem(root.contentItem, mouse.x, mouse.y)
+                                                chatContextMenuPopup.openForChat(modelData, p.x, p.y)
                                             } else {
                                                 var win = root
                                                 var pinGuid = modelData.guid
@@ -10712,6 +10714,8 @@ ApplicationWindow {
         property int targetUnreadCount: 0
         property bool targetIsMuted: false
         property bool targetIsGroup: false
+        // Live: a Mac-pin refresh while the menu is open updates the label it acts on
+        property bool targetIsPinned: (void(backend.pinnedChats), backend.isChatPinned(targetChatGuid))
         property real menuX: 100
         property real menuY: 100
 
@@ -10723,7 +10727,7 @@ ApplicationWindow {
             targetIsMuted = chatObj.isMuted || false
             targetIsGroup = chatObj.isGroup || false
             menuX = Math.min(Math.max(12, gx), root.width - 252)
-            menuY = Math.min(Math.max(12, gy), root.height - 230)
+            menuY = Math.min(Math.max(12, gy), root.height - 266)
             visible = true
         }
 
@@ -10812,6 +10816,36 @@ ApplicationWindow {
                             if (g.length > 0) {
                                 backend.toggleChatMute(g)
                             }
+                        }
+                    }
+                }
+
+                // Pin / Unpin (pins from the Mac show first in the sidebar row)
+                Rectangle {
+                    objectName: "ctxPinItem"
+                    Layout.fillWidth: true
+                    height: 32
+                    radius: 6
+                    color: ctxPinMouse.containsMouse ? theme.selection : "transparent"
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: 10
+                        text: chatContextMenuPopup.targetIsPinned
+                              ? ("󰐄  " + i18n.tr("Unpin"))
+                              : ("󰐃  " + i18n.tr("Pin"))
+                        font.pixelSize: theme.fontSize - 1
+                        color: theme.brightForeground
+                    }
+                    MouseArea {
+                        id: ctxPinMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            var g = chatContextMenuPopup.targetChatGuid
+                            chatContextMenuPopup.visible = false
+                            if (g.length > 0) backend.togglePinChat(g)
                         }
                     }
                 }
