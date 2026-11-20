@@ -265,11 +265,22 @@ jobs:
           arch: 'win64_msvc2022_64'
           modules: 'qtimageformats'
 
-      - name: Configure & Build (CMake + MSVC)
+      - name: Configure & Build (CMake + MSVC + Ninja)
         shell: pwsh
         run: |
-          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
-          cmake --build build --config Release --parallel
+          if (-not (Get-Command ninja -ErrorAction SilentlyContinue)) {
+              $vsNinja = Join-Path $env:DevEnvDir "CommonExtensions\Microsoft\CMake\Ninja\ninja.exe"
+              if (Test-Path $vsNinja) {
+                  $env:Path = (Split-Path $vsNinja) + ";" + $env:Path
+              } else {
+                  choco install ninja -y --no-progress
+                  $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+              }
+          }
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cmake --build build --parallel
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Run Unit Tests (Offscreen QPA)
         shell: pwsh
@@ -280,20 +291,26 @@ jobs:
               choco install imagemagick -y --no-progress
               $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
           }
-          ctest --test-dir build -C Release --output-on-failure
+          ctest --test-dir build --output-on-failure
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Deploy Qt6 Runtime & Build Inno Setup Installer
         shell: pwsh
         run: |
           $ver = (Select-String -Path CMakeLists.txt -Pattern 'project\(bluepill VERSION ([0-9.]+)').Matches[0].Groups[1].Value
           New-Item -ItemType Directory -Force -Path build-win-dist | Out-Null
-          Copy-Item build\Release\bluepill.exe build-win-dist\bluepill.exe
-          $windeploy = Join-Path $env:Qt6_DIR "bin\windeployqt6.exe"
+          Copy-Item build\bluepill.exe build-win-dist\bluepill.exe
+          $windeploy = Join-Path $env:QT_ROOT_DIR "bin\windeployqt6.exe"
           if (-not (Test-Path $windeploy)) {
-              $windeploy = Join-Path $env:Qt6_DIR "bin\windeployqt.exe"
+              $windeploy = Join-Path $env:QT_ROOT_DIR "bin\windeployqt.exe"
           }
           & $windeploy --release --qmldir src --no-translations build-win-dist\bluepill.exe
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:VCToolsRedistDir -and (Test-Path $env:VCToolsRedistDir)) {
+              Get-ChildItem -Path $env:VCToolsRedistDir -Filter "*.dll" -Recurse | Where-Object { $_.DirectoryName -match "\\x64\\Microsoft\.VC.*CRT$" } | ForEach-Object {
+                  Copy-Item $_.FullName build-win-dist\ -Force
+              }
+          }
 
           $env:QT_QPA_PLATFORM = "offscreen"
           & build-win-dist\bluepill.exe --version
