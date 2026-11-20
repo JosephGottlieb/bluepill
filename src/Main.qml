@@ -681,7 +681,9 @@ ApplicationWindow {
         running: true
         repeat: false
         onTriggered: {
-            if (backend.needsSetup) {
+            if (backend.needsSetup && !root.showServerConfigModal && !root.showContactInfo
+                    && !root.showPhotoViewer && !root.showContactModal
+                    && !root.showShortcutsModal && !root.showNewChatModal) {
                 root.openServerConfigModal()
             }
         }

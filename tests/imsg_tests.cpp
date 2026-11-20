@@ -2947,6 +2947,8 @@ private slots:
         QTemporaryDir tempDir;
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_info.json")));
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_info.json")));
+        // Avoid triggering the 50ms startup setup modal over the contact info card
+        b.saveServerConfig(QStringLiteral("user@relay.example.invalid"), QString(), QString());
         b.parseContactsJson(QByteArray(R"([{"id": "uid-1", "firstName": "Alex", "lastName": "Rivera",
             "phoneNumbers": [{"address": "+15555550100", "label": "Mobile"}], "note": "Met at the conference"}])"));
         const QString chatGuid = QStringLiteral("iMessage;-;+15555550100");
@@ -2997,7 +2999,9 @@ private slots:
 
         // Clicking the name in the header opens read-only Details first (not the editor), with an Edit button
         win->show();
+        win->requestActivate();
         QVERIFY(QTest::qWaitForWindowExposed(win));
+        QVERIFY(QTest::qWaitForWindowActive(win));
         auto *nameArea = win->findChild<QQuickItem *>(QStringLiteral("contactHeaderNameArea"));
         QVERIFY(nameArea);
         QTRY_VERIFY(nameArea->width() > 0 && nameArea->isVisible());
@@ -3489,7 +3493,9 @@ private slots:
         win->setWidth(960);
         win->setHeight(640);
         win->show();
+        win->requestActivate();
         QVERIFY(QTest::qWaitForWindowExposed(win));
+        QVERIFY(QTest::qWaitForWindowActive(win));
         QCoreApplication::processEvents();
 
         QQuickItem *listView = win->findChild<QQuickItem *>(QStringLiteral("messageTimelineListView"));
@@ -3654,7 +3660,9 @@ private slots:
         win->setWidth(960);
         win->setHeight(640);
         win->show();
+        win->requestActivate();
         QVERIFY(QTest::qWaitForWindowExposed(win));
+        QVERIFY(QTest::qWaitForWindowActive(win));
         QCoreApplication::processEvents();
 
         std::function<QQuickItem *(QQuickItem *, const QString &)> findVisualItem = [&](QQuickItem *item, const QString &objName) -> QQuickItem * {
@@ -3762,7 +3770,9 @@ private slots:
         win->setWidth(1200);
         win->setHeight(2400);  // tall enough that every delegate is instantiated
         win->show();
+        win->requestActivate();
         QVERIFY(QTest::qWaitForWindowExposed(win));
+        QVERIFY(QTest::qWaitForWindowActive(win));
 
         b.selectChat(QStringLiteral("iMessage;-;+15555550100"));  // the message list only shows for a selected chat
         QCoreApplication::processEvents();
