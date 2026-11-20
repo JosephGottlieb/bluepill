@@ -11142,6 +11142,77 @@ private slots:
         QCOMPARE(t2.themeMode(), QStringLiteral("system"));
     }
 
+    void testCloudOnboardingAndLiveDemoControls() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QByteArray prevHome = qgetenv("HOME");
+        const QByteArray prevBpUrl = qgetenv("BLUEPILL_SERVER_URL");
+        const QByteArray prevBpPass = qgetenv("BLUEPILL_PASSWORD");
+        const QByteArray prevImsgUrl = qgetenv("IMSG_SERVER_URL");
+        const QByteArray prevImsgPass = qgetenv("IMSG_PASSWORD");
+        const QByteArray prevBbUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevBbPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qputenv("HOME", tempDir.path().toUtf8());
+        qunsetenv("BLUEPILL_SERVER_URL");
+        qunsetenv("BLUEPILL_PASSWORD");
+        qunsetenv("IMSG_SERVER_URL");
+        qunsetenv("IMSG_PASSWORD");
+        qunsetenv("BLUEBUBBLES_URL");
+        qunsetenv("BLUEBUBBLES_PASSWORD");
+
+        const QString cfgPath = tempDir.filePath(QStringLiteral("config_cloud.json"));
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_cloud.json")));
+        b.setConfigFilePath(cfgPath);
+        QCOMPARE(b.needsSetup(), true);
+
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QObject *root = engine.rootObjects().first();
+        QObject *cloudCard = root->findChild<QObject *>(QStringLiteral("cloudOnboardingCard"));
+        QObject *signInBtn = root->findChild<QObject *>(QStringLiteral("cloudSignInBtn"));
+        QObject *demoBtn = root->findChild<QObject *>(QStringLiteral("tryLiveDemoBtn"));
+        QObject *welcomeSignInBtn = root->findChild<QObject *>(QStringLiteral("welcomeCloudSignInBtn"));
+        QObject *welcomeDemoBtn = root->findChild<QObject *>(QStringLiteral("welcomeTryDemoBtn"));
+        QObject *urlIn = root->findChild<QObject *>(QStringLiteral("serverUrlInput"));
+        QObject *portIn = root->findChild<QObject *>(QStringLiteral("serverPortInput"));
+        QObject *passIn = root->findChild<QObject *>(QStringLiteral("serverPasswordInput"));
+        QVERIFY(cloudCard && signInBtn && demoBtn && welcomeSignInBtn && welcomeDemoBtn);
+        QVERIFY(urlIn && portIn && passIn);
+
+        // Pasting BluePill Cloud URL without explicit port auto-selects 443 on save
+        urlIn->setProperty("text", QStringLiteral("https://api.bluepill.nertwork.com/t/alice"));
+        portIn->setProperty("text", QString());
+        passIn->setProperty("text", QStringLiteral("secret-relay-pw"));
+        QVariant savedOk;
+        QMetaObject::invokeMethod(root, "savePrimaryServerSettings", Q_RETURN_ARG(QVariant, savedOk));
+        QCOMPARE(savedOk.toBool(), true);
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://api.bluepill.nertwork.com:443/t/alice"));
+        QCOMPARE(b.needsSetup(), false);
+
+        // Clicking Try Live Demo (connectToLiveDemo) fills /demo + password "demo" and saves immediately
+        QMetaObject::invokeMethod(root, "connectToLiveDemo");
+        QCoreApplication::processEvents();
+        QCOMPARE(b.serverUrl(), QStringLiteral("https://api.bluepill.nertwork.com:443/demo"));
+        QCOMPARE(b.serverPassword(), QStringLiteral("demo"));
+        QCOMPARE(b.needsSetup(), false);
+
+        if (!prevHome.isEmpty()) qputenv("HOME", prevHome); else qunsetenv("HOME");
+        if (!prevBpUrl.isEmpty()) qputenv("BLUEPILL_SERVER_URL", prevBpUrl);
+        if (!prevBpPass.isEmpty()) qputenv("BLUEPILL_PASSWORD", prevBpPass);
+        if (!prevImsgUrl.isEmpty()) qputenv("IMSG_SERVER_URL", prevImsgUrl);
+        if (!prevImsgPass.isEmpty()) qputenv("IMSG_PASSWORD", prevImsgPass);
+        if (!prevBbUrl.isEmpty()) qputenv("BLUEBUBBLES_URL", prevBbUrl);
+        if (!prevBbPass.isEmpty()) qputenv("BLUEBUBBLES_PASSWORD", prevBbPass);
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

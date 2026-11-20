@@ -487,7 +487,7 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         m_contactsRefreshTimer.start();
     } else if (autoStart) {
         m_connected = false;
-        m_serverStatus = QStringLiteral("Disconnected · Missing BlueBubbles credentials");
+        m_serverStatus = QStringLiteral("Disconnected · Missing BluePill credentials");
         emit statusChanged();
     }
 }
@@ -2288,6 +2288,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     m_candidateUrlIndex = 0;
     m_consecutiveFailures = 0;
 
+    m_demoMode = false;
     emit configChanged();
     emit statusChanged();
     if (m_configFilePath.trimmed().isEmpty()) {
@@ -2303,7 +2304,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
         }
 #endif
     }
-    emit toastMessage(QStringLiteral("✓ Saved BluePill / BlueBubbles server configuration"));
+    emit toastMessage(QStringLiteral("✓ Saved BluePill Server configuration"));
 
     if (!m_demoMode && !m_serverUrl.isEmpty() && !m_password.isEmpty()) {
         checkServerAndLoad();
@@ -3627,7 +3628,7 @@ void Backend::refreshAll() {
     if (m_serverUrl.isEmpty() || m_password.isEmpty()) {
         loadCredentials();
         if (m_serverUrl.isEmpty() || m_password.isEmpty()) {
-            m_serverStatus = QStringLiteral("Missing BlueBubbles credentials");
+            m_serverStatus = QStringLiteral("Missing BluePill credentials");
             emit statusChanged();
             return;
         }
@@ -11878,7 +11879,7 @@ void Backend::loadDemoData() {
             {QStringLiteral("url"), QStringLiteral("https://github.com/nertwork/bluepill")},
             {QStringLiteral("domain"), QStringLiteral("github.com")},
             {QStringLiteral("title"), QStringLiteral("nertwork/bluepill — BluePill Native Linux Qt6/QML iMessage, RCS & SMS Client & macOS Relay")},
-            {QStringLiteral("description"), QStringLiteral("Fast C++20 and Qt6/QML desktop & CLI client backed by BlueBubbles Private API and Socket.IO v4 push.")},
+            {QStringLiteral("description"), QStringLiteral("Fast C++20 and Qt6/QML desktop & CLI client backed by BluePill Cloud, macOS Private API, and Socket.IO v4 push.")},
             {QStringLiteral("thumbnail"), QString()},
             {QStringLiteral("isYouTube"), false}
         });
@@ -11950,7 +11951,7 @@ void Backend::loadDemoData() {
 
 int Backend::runCliStatus(bool asJson) {
     if (m_serverUrl.isEmpty() || m_password.isEmpty()) {
-        std::cerr << "{\"error\":\"Missing BlueBubbles credentials\"}\n";
+        std::cerr << "{\"error\":\"Missing BluePill credentials\"}\n";
         return 1;
     }
     QEventLoop loop;

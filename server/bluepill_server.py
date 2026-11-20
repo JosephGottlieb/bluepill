@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.5)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.6)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, built-in Cloud Relay WebSocket tunnel,
@@ -20,6 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 import fcntl
+import getpass
 import glob
 import hashlib
 import io
@@ -54,7 +55,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
@@ -8156,6 +8157,18 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     .toast.success { border-left-color: var(--bp-green); }
     .toast.error { border-left-color: var(--bp-red); }
+    @media (min-width: 960px) {
+      .webclient-shell {
+        max-width: 1180px;
+        width: calc(100% - 32px);
+        margin: 16px auto 24px;
+        height: calc(100vh - 40px);
+        min-height: 620px;
+        border-radius: 16px;
+        border: 1px solid var(--wc-border);
+        box-shadow: 0 24px 64px rgba(0, 0, 0, 0.35);
+      }
+    }
     @media (max-width: 820px) {
       .wc-main { flex-direction: column; }
       .wc-sidebar { width: 100%; max-height: 240px; border-right: none; border-bottom: 1px solid var(--wc-border); }
@@ -8170,7 +8183,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.5</span>
+      <span class="pill pill-blue">v1.2.6</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -14813,6 +14826,7 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
         assert res_obj.get("id") == "selftest-req-1" and res_obj.get("status") == 200, f"Bad tunnel http_res: {res_obj}"
         res_body = json.loads(base64.b64decode(res_obj["body_b64"]).decode("utf-8"))
         assert res_body.get("data") == "pong", f"Unexpected ping response via tunnel: {res_body}"
+        assert "max-width: 1180px" in WEB_UI_HTML, "Missing desktop-window max-width constraint in WEB_UI_HTML"
     finally:
         shutil.rmtree(relay_tmp_dir, ignore_errors=True)
 
@@ -14926,14 +14940,15 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
             print(f"BluePill Cloud Relay disabled (saved {saved_path}).")
         return 0
 
-    token = str(
+    is_login_cmd = getattr(args, "command", "") == "login"
+    explicit_token = str(
         getattr(args, "token", "")
         or getattr(args, "relay_token", "")
         or os.environ.get("BLUEPILL_RELAY_TOKEN")
         or os.environ.get("BLUEPILL_TUNNEL_TOKEN")
-        or existing.get("token")
         or ""
     ).strip()
+    token = explicit_token or str(existing.get("token") or "").strip()
     url = str(
         getattr(args, "url", "")
         or getattr(args, "relay_url", "")
@@ -14942,9 +14957,41 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
         or existing.get("url")
         or DEFAULT_CLOUD_RELAY_URL
     ).strip()
+    relay_pw = str(getattr(args, "relay_password", "") or "").strip()
+
+    interactive = sys.stdin.isatty() and not getattr(args, "json", False)
+    if is_login_cmd and not getattr(args, "json", False):
+        print("BluePill Cloud Login — https://bluepill.nertwork.com/portal")
+        if interactive and sys.platform == "darwin":
+            try:
+                ans = input("Open https://bluepill.nertwork.com/portal in your browser? [Y/n]: ").strip().lower()
+                if ans in ("", "y", "yes"):
+                    subprocess.run(["open", "https://bluepill.nertwork.com/portal"], check=False)
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return 1
+
+    if interactive and (not token or (is_login_cmd and not explicit_token)):
+        hint = " (leave blank to keep existing)" if token else ""
+        try:
+            entered_tok = input(f"Cloud Relay Token{hint}: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        if entered_tok:
+            token = entered_tok
+
+    if interactive and not relay_pw and (is_login_cmd or not token):
+        try:
+            entered_pw = getpass.getpass("Relay API Password (leave blank to keep existing): ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            return 1
+        if entered_pw:
+            relay_pw = entered_pw
 
     if not token:
-        msg = "Missing --token (or BLUEPILL_RELAY_TOKEN). Get one at https://bluepill.nertwork.com/signup"
+        msg = "Missing --token (or BLUEPILL_RELAY_TOKEN). Sign in at https://bluepill.nertwork.com/portal"
         if args.json:
             print(json.dumps({"status": "error", "error": msg}))
         else:
@@ -14953,7 +15000,6 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
 
     saved_path = save_relay_config({"enabled": True, "url": url, "token": token}, cfg_path)
     pw_updated = False
-    relay_pw = str(getattr(args, "relay_password", "") or "").strip()
     if relay_pw:
         save_server_password(relay_pw)
         engine.password = relay_pw
@@ -14998,6 +15044,7 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
         if pw_updated:
             print("  Relay API password updated in ~/.config/bluepill/server.json (mode 0600)")
         print(f"  Check: {'PASS' if check_ok else 'FAIL'} — {check_detail}")
+        print("Next step: run 'brew services restart bluepill' (or 'brew services start bluepill').")
     return 0 if check_ok else 1
 
 
@@ -15078,7 +15125,7 @@ def main() -> int:
         "command",
         nargs="?",
         default="serve",
-        help="serve | relay-setup | relay-status | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
+        help="serve | login | relay-setup | relay-status | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
     )
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
@@ -15133,6 +15180,7 @@ def main() -> int:
             "logs",
             "stdio",
             "sync-icloud-photos",
+            "login",
             "relay-setup",
             "relay-status",
             "version",
@@ -15197,7 +15245,7 @@ def main() -> int:
     if args.selftest or args.command == "selftest":
         return run_selftest(engine)
 
-    if args.command == "relay-setup":
+    if args.command in ("login", "relay-setup"):
         return run_relay_setup_cli(args, engine)
 
     if args.command == "relay-status":

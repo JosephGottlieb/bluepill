@@ -4,6 +4,17 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+## [1.2.6] - 2026-11-19
+
+### Added
+- **Streamlined BluePill Cloud Onboarding (`https://bluepill.nertwork.com`):**
+  - **Desktop Client (`src/Main.qml`, `src/backend.cpp`):** Added **BluePill Cloud (Recommended)** quick-connect card in Settings → Server & Sync and the unconfigured welcome screen with **"Sign in at bluepill.nertwork.com →"** (`https://bluepill.nertwork.com/portal`), 1-click **"Try Live Demo"** (`https://api.bluepill.nertwork.com/demo` + `demo`), and default Server URL placeholder `https://api.bluepill.nertwork.com/t/your-name`, while keeping local macOS Relay (`http://mac-ip:1235`) and Direct SSH (`ssh://...`) supported.
+  - **`bluepill-server login` & Homebrew Caveats (`server/bluepill_server.py`, `Formula/bluepill.rb`):** Added interactive `bluepill-server login` command that opens `https://bluepill.nertwork.com/portal`, prompts for Cloud Relay Token + Relay API Password, writes `0600` config files, runs an immediate live handshake against `wss://api.bluepill.nertwork.com/tunnel/connect`, and prompts `brew services restart bluepill`.
+  - **Local `/web` Desktop Window Frame (`server/bluepill_server.py`):** Constrained `.webclient-shell` to a centered `max-width: 1180px` desktop-window frame on wide landscape viewports (`min-width: 960px`) matching `https://bluepill.nertwork.com/demo`.
+
+### Changed
+- **Client UI Copy Cleanup:** Updated user-facing labels, placeholders, and error/status messages in `src/Main.qml` and `src/backend.cpp` from legacy `"BlueBubbles"` wording to **BluePill Cloud / BluePill Server** while preserving 100% protocol and `X-BlueBubbles-Auth` header compatibility.
+
 ## [1.2.5] - 2026-11-19
 
 ### Added

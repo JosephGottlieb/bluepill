@@ -58,17 +58,13 @@
 
 ## Quick Start Installation
 
-### 1. macOS Relay Setup (`bluepill-server` via Homebrew + Built-In Cloud Relay)
+### 1. macOS Relay Setup (`bluepill-server` via Homebrew + BluePill Cloud)
 
 On any Mac signed into your Apple ID (`Messages.app`):
 
 ```bash
-brew tap nertwork/tap
 brew install nertwork/tap/bluepill
-
-# Optional (Zero Port-Forwarding): Connect to BluePill Cloud Relay
-# Claim a free beta token at https://bluepill.nertwork.com/signup
-bluepill-server relay-setup --token <YOUR_TUNNEL_TOKEN>
+bluepill-server login   # Opens https://bluepill.nertwork.com/portal to link your Mac
 brew services start bluepill
 ```
 
@@ -76,7 +72,7 @@ brew services start bluepill
   - Cloud Relay Status: `bluepill-server relay-status`
   - Health / Info API: `curl -s http://127.0.0.1:1235/api/v1/server/info`
   - Built-In Web UI: Open `http://127.0.0.1:1235/web` (or your hosted Cloud Relay Web UI at `https://bluepill.nertwork.com/t/<slug>/web`).
-  - Try instantly without a Mac: **[Live Interactive Demo](https://bluepill.nertwork.com/demo)**.
+  - Try instantly without a Mac: **[Live Interactive Demo](https://bluepill.nertwork.com/demo)** or click **"Try Live Demo"** inside the desktop client.
 - **100% Legacy BlueBubbles Compatible:** Already running `BlueBubbles.app` (`v1.9.x`)? `BluePill` connects to existing BlueBubbles servers out of the box with zero server changes required.
 
 ### 2. Desktop Client & CLI Setup (Linux & Windows)
@@ -87,7 +83,7 @@ brew services start bluepill
 - **Windows (`x86_64` `.exe`):** Download `BluePill-Setup-<version>-win64.exe` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)**
 
 ```bash
-# Launch the GUI (press Ctrl+, to open Settings)
+# Launch the GUI — click "Sign in at bluepill.nertwork.com →" (default) or "Try Live Demo"
 bluepill
 # Or launch the Built-In Web UI in your default browser
 bluepill --webui
@@ -158,7 +154,7 @@ bluepill --webui
 | :--- | :--- | :--- | :--- | :--- |
 | **BluePill Desktop & CLI (`bluepill`)** | Arch/Omarchy, Debian/Ubuntu, Fedora/RHEL | `x86_64`, `aarch64` (ARM64) | Wayland (Hyprland, Sway, KDE, GNOME) & X11 · Qt 6.8+ / C++20 · PipeWire | **AUR:** `yay -S bluepill`<br>**Packages:** `.deb` & `.rpm` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
 | **BluePill Windows Client (`bluepill.exe`)** | Windows 10 / 11 | `x86_64` | Native Qt 6.8 MSVC + Inno Setup Installer | **Installer:** `BluePill-Setup-*.exe` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
-| **BluePill macOS Relay Daemon (`bluepill-server`)** | macOS Sequoia (`15.x`), Sonoma (`14.x`), Ventura (`13.x`), Tahoe (`26.x`) | `arm64` (Apple Silicon) & `x86_64` (Intel / KVM Virtual Machines) | Python 3.11+ · SQLite 3 WAL · Built-in Cloud Relay (`wss://`) · `IMCore` or `osascript` | **Homebrew:** `brew install nertwork/tap/bluepill`<br>**Cloud Relay:** `bluepill-server relay-setup` |
+| **BluePill macOS Relay Daemon (`bluepill-server`)** | macOS Sequoia (`15.x`), Sonoma (`14.x`), Ventura (`13.x`), Tahoe (`26.x`) | `arm64` (Apple Silicon) & `x86_64` (Intel / KVM Virtual Machines) | Python 3.11+ · SQLite 3 WAL · Built-in Cloud Relay (`wss://`) · `IMCore` or `osascript` | **Homebrew:** `brew install nertwork/tap/bluepill`<br>**Cloud Login:** `bluepill-server login` |
 | **BluePill Web Client (`/web` & Cloud Portal)** | Cross-Platform (Linux, macOS, Windows, iOS, Android) | Any | Liquid Glass / Matrix / Light UI · Zero External CDN · Socket.IO | Built into `bluepill-server` (`/web`) & **[bluepill.nertwork.com](https://bluepill.nertwork.com/demo)** |
 
 ---

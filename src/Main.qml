@@ -620,7 +620,16 @@ ApplicationWindow {
 
     // One save path for every Save/Return action: an invalid non-empty port keeps
     // Settings open instead of silently falling back to 1235.
+    function applyCloudDefaultPortIfNeeded() {
+        var trimmed = serverUrlInput.text.trim()
+        if (serverPortInput.text.trim().length === 0
+                && /^https:\/\/(?:api\.)?bluepill\.nertwork\.com(?:\/|$)/i.test(trimmed)) {
+            serverPortInput.text = "443"
+        }
+    }
     function savePrimaryServerSettings() {
+        root.carryOverPrimaryServerPort()
+        root.applyCloudDefaultPortIfNeeded()
         var portText = serverPortInput.text.trim()
         if (portText.length > 0 && !primaryServerFields.isSshUrl) {
             var p = Number(portText)
@@ -634,6 +643,13 @@ ApplicationWindow {
         backend.saveServerConfig(root.composedPrimaryServerUrl(), secondaryServerUrlInput.text, serverPasswordInput.text)
         root.showServerConfigModal = false
         return true
+    }
+    function connectToLiveDemo() {
+        root.loadPrimaryServerFields("https://api.bluepill.nertwork.com/demo")
+        secondaryServerUrlInput.text = ""
+        serverPasswordInput.text = "demo"
+        root.primaryServerFieldsEdited = true
+        root.savePrimaryServerSettings()
     }
 
     // Primary server URL is edited as two fields: URL (no port) + Port.
@@ -659,6 +675,8 @@ ApplicationWindow {
         if (parts.port && parts.port.length > 0) {
             serverUrlInput.text = parts.url
             serverPortInput.text = parts.port
+        } else {
+            root.applyCloudDefaultPortIfNeeded()
         }
     }
     function composedPrimaryServerUrl() {
@@ -1734,7 +1752,7 @@ ApplicationWindow {
                                     objectName: "topStatusPillText"
                                     text: {
                                         var statusMatch = (backend.serverStatus || "").match(/v\d+\.\d+(?:\.\d+)?/i)
-                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.5")
+                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.6")
                                         var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
                                         var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
                                         return host.length > 0 ? (st + " · " + host) : st
@@ -2844,8 +2862,8 @@ ApplicationWindow {
                 Layout.fillHeight: true
                 spacing: 0
 
-                // Shown when no conversation is open. Everything the old Home page
-                // offered lives in the top bar, the chat list, or Settings.
+                // Shown when no conversation is open. Shows BluePill Cloud onboarding when
+                // unconfigured, or a short conversation prompt once connected.
                 Rectangle {
                     id: homePagePane
                     objectName: "noConversationPane"
@@ -2856,7 +2874,102 @@ ApplicationWindow {
 
                     ColumnLayout {
                         anchors.centerIn: parent
+                        width: Math.min(440, parent.width - 48)
+                        spacing: 12
+                        visible: backend.needsSetup
+
+                        Text {
+                            Layout.alignment: Qt.AlignHCenter
+                            text: "☁️ " + i18n.tr("Connect to BluePill Cloud")
+                            font.pixelSize: theme.fontSize + 4
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: i18n.tr("Sign in at bluepill.nertwork.com to copy your Relay URL & password, or explore the live interactive demo.")
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.darkForeground
+                            wrapMode: Text.WordWrap
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 4
+                            spacing: 10
+                            Rectangle {
+                                objectName: "welcomeCloudSignInBtn"
+                                Layout.fillWidth: true
+                                height: 38
+                                radius: 8
+                                color: theme.accent
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Sign in at bluepill.nertwork.com →")
+                                    font.pixelSize: theme.fontSize - 1
+                                    font.bold: true
+                                    color: theme.onAccent
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
+                                        root.openServerConfigModal()
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                objectName: "welcomeTryDemoBtn"
+                                Layout.preferredWidth: welcomeDemoTxt.implicitWidth + 28
+                                height: 38
+                                radius: 8
+                                color: Qt.rgba(48/255, 209/255, 88/255, 0.16)
+                                border.width: 1
+                                border.color: theme.green
+                                Text {
+                                    id: welcomeDemoTxt
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Try Live Demo")
+                                    font.pixelSize: theme.fontSize - 1
+                                    font.bold: true
+                                    color: theme.green
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.connectToLiveDemo()
+                                }
+                            }
+                        }
+                        Rectangle {
+                            objectName: "welcomeOpenSettingsBtn"
+                            Layout.alignment: Qt.AlignHCenter
+                            height: 30
+                            implicitWidth: welcomeSettingsTxt.implicitWidth + 24
+                            radius: 6
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: welcomeSettingsTxt
+                                anchors.centerIn: parent
+                                text: "⚙ " + i18n.tr("Local Mac / SSH Settings")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.openServerConfigModal()
+                            }
+                        }
+                    }
+
+                    ColumnLayout {
+                        anchors.centerIn: parent
                         spacing: 10
+                        visible: !backend.needsSetup
                         Text {
                             Layout.alignment: Qt.AlignHCenter
                             text: i18n.tr("Select a conversation")
@@ -9294,7 +9407,7 @@ ApplicationWindow {
                 }
 
                 Text {
-                    text: i18n.tr("Save or edit contact info synced across the fleet and BlueBubbles.")
+                    text: i18n.tr("Save or edit contact info synced across the fleet and BluePill Server.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                 }
@@ -9519,7 +9632,7 @@ ApplicationWindow {
         }
     }
 
-    // BlueBubbles Server Configuration Modal Overlay (Ctrl+, / First-Run Setup)
+    // BluePill Server Configuration Modal Overlay (Ctrl+, / First-Run Setup)
     Rectangle {
         id: serverConfigPopup
         objectName: "serverConfigPopup"
@@ -9621,7 +9734,7 @@ ApplicationWindow {
                                 Text {
                                     id: settingsClientVersionText
                                     objectName: "settingsClientVersionText"
-                                    text: "BluePill v" + (Qt.application.version || "1.2.5")
+                                    text: "BluePill v" + (Qt.application.version || "1.2.6")
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.accent
@@ -9711,11 +9824,95 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 12
 
+                // BluePill Cloud Default Onboarding Card
+                Rectangle {
+                    id: cloudOnboardingCard
+                    objectName: "cloudOnboardingCard"
+                    Layout.fillWidth: true
+                    implicitHeight: cloudCardCol.implicitHeight + 20
+                    radius: 8
+                    color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
+                    border.width: 1
+                    border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.38)
+
+                    ColumnLayout {
+                        id: cloudCardCol
+                        anchors.fill: parent
+                        anchors.margins: 10
+                        spacing: 8
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "☁️ " + i18n.tr("BluePill Cloud (Recommended)")
+                            font.pixelSize: theme.fontSize - 1
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Sign in at bluepill.nertwork.com to copy your Relay URL & password, or connect to the live demo in one click.")
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.foreground
+                            wrapMode: Text.WordWrap
+                        }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                id: cloudSignInBtn
+                                objectName: "cloudSignInBtn"
+                                Layout.fillWidth: true
+                                height: 34
+                                radius: 7
+                                color: theme.accent
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Sign in at bluepill.nertwork.com →")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.onAccent
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
+                                        root.showToast("🌐 " + i18n.tr("Opening bluepill.nertwork.com/portal in browser"))
+                                    }
+                                }
+                            }
+                            Rectangle {
+                                id: tryLiveDemoBtn
+                                objectName: "tryLiveDemoBtn"
+                                Layout.preferredWidth: tryDemoTxt.implicitWidth + 24
+                                height: 34
+                                radius: 7
+                                color: Qt.rgba(48/255, 209/255, 88/255, 0.16)
+                                border.width: 1
+                                border.color: theme.green
+                                Text {
+                                    id: tryDemoTxt
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Try Live Demo")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.green
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: root.connectToLiveDemo()
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Text {
                     Layout.fillWidth: true
                     text: Qt.platform.os === "windows"
-                        ? i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved to %APPDATA%\\bluepill\\config.json.")
-                        : i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
+                        ? i18n.tr("Or enter a self-hosted BluePill macOS Relay (http://mac-ip:1235), HTTPS reverse proxy, or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved to %APPDATA%\\bluepill\\config.json.")
+                        : i18n.tr("Or enter a self-hosted BluePill macOS Relay (http://mac-ip:1235), HTTPS reverse proxy, or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap
@@ -9947,7 +10144,7 @@ ApplicationWindow {
                                     root.savePrimaryServerSettings()
                                 }
                                 Text {
-                                    text: "mac-relay.example.com  (or https://relay.example.com)"
+                                    text: "https://api.bluepill.nertwork.com/t/your-name"
                                     color: theme.darkForeground
                                     visible: !serverUrlInput.text && !serverUrlInput.activeFocus
                                     anchors.verticalCenter: parent.verticalCenter
@@ -10119,7 +10316,7 @@ ApplicationWindow {
                                 Text {
                                     text: backend.hasPasswordConfigured
                                           ? i18n.tr("•••••••• (Configured — leave blank to keep existing)")
-                                          : i18n.tr("Enter BlueBubbles Server Password / API Key")
+                                          : i18n.tr("Enter BluePill Cloud / Server Password")
                                     color: theme.darkForeground
                                     visible: !serverPasswordInput.text && !serverPasswordInput.activeFocus
                                     anchors.verticalCenter: parent.verticalCenter
