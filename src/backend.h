@@ -282,6 +282,7 @@ public:
     Q_INVOKABLE void previewNotificationSound(const QString &preset = QString());
     Q_INVOKABLE void sendTestNotification();
     static QString ensureNotificationSoundFile(const QString &preset);
+    static QString findBundledOrSystemExecutable(const QString &baseName);
     void setStateFilePath(const QString &path);
     void setConfigFilePath(const QString &path);
     QString configFilePath() const;
@@ -739,7 +740,6 @@ private:
     bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
     void notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview);
     void showDesktopNotification(const QString &title, const QString &body);
-    static QString findBundledOrSystemExecutable(const QString &baseName);
     static QString defaultBluepillConfigPath();
     void playNotificationSound(const QString &presetOverride = QString(), bool forcePreview = false);
     void handleNetworkFailure(const QString &context);
