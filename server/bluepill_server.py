@@ -14,6 +14,7 @@ Supported & Tested Platforms:
 from __future__ import annotations
 
 import argparse
+import ast
 import base64
 import collections
 from concurrent.futures import ThreadPoolExecutor
@@ -43,6 +44,7 @@ import sqlite3
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -57,6 +59,8 @@ from typing import Any, Deque, Dict, List, Optional, Tuple
 
 VERSION = "1.2.6"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
+DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
+UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
 _VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".avi", ".mkv", ".3gp")
@@ -575,6 +579,20 @@ class BluePillEngine:
         self.enable_calendar: bool = True
         self.enable_photos: bool = True
         self.enable_wav_caf_conversion: bool = True
+        self._auto_update_pref: Optional[bool] = None
+        self._relay_config_path_override: Optional[str] = None
+        self._updates_feed_url: str = os.environ.get("BLUEPILL_UPDATES_FEED_URL", DEFAULT_UPDATES_FEED_URL).strip() or DEFAULT_UPDATES_FEED_URL
+        self._update_lock = threading.Lock()
+        self._update_state: Dict[str, Any] = {
+            "latest_version": VERSION,
+            "update_available": False,
+            "release_url": f"https://github.com/nertwork/bluepill/releases/tag/v{VERSION}",
+            "checksums_url": f"https://github.com/nertwork/bluepill/releases/download/v{VERSION}/SHA256SUMS.txt",
+            "method": "",
+            "applying": False,
+            "last_error": "",
+            "checked_at": "",
+        }
         self.pinned_chat_guids: List[str] = []
         self.muted_chat_guids: set[str] = set()
         self.archived_chat_guids: set[str] = set()
@@ -619,6 +637,7 @@ class BluePillEngine:
             self._start_wal_watcher()
             self._start_photos_watcher()
             self._start_scheduler_loop()
+            self._start_update_checker_loop()
 
     @staticmethod
     def _parse_bool_flag(val: Any, default: bool = True) -> bool:
@@ -642,8 +661,14 @@ class BluePillEngine:
                     self.enable_notes = self._parse_bool_flag(data.get("enableNotes"), True)
                     self.enable_calendar = self._parse_bool_flag(data.get("enableCalendar"), True)
                     self.enable_photos = self._parse_bool_flag(data.get("enablePhotos"), True)
+                    if "autoUpdateCheck" in data:
+                        self._auto_update_pref = self._parse_bool_flag(data.get("autoUpdateCheck"), True)
+                    elif "auto_update_check" in data:
+                        self._auto_update_pref = self._parse_bool_flag(data.get("auto_update_check"), True)
             except Exception:
                 pass
+        if "BLUEPILL_AUTO_UPDATE_CHECK" in os.environ:
+            self._auto_update_pref = self._parse_bool_flag(os.environ.get("BLUEPILL_AUTO_UPDATE_CHECK"), True)
         if "BLUEPILL_ENABLE_NOTES" in os.environ:
             self.enable_notes = self._parse_bool_flag(os.environ.get("BLUEPILL_ENABLE_NOTES"), self.enable_notes)
         if "BLUEPILL_ENABLE_CALENDAR" in os.environ:
@@ -7833,6 +7858,220 @@ class BluePillEngine:
             return self.download_cloud_attachment(str(params.get("guid") or params.get("attachmentGuid") or ""))
         raise ValueError(f"Unknown RPC method: {method}")
 
+    @staticmethod
+    def _parse_semver(ver: str) -> Tuple[int, ...]:
+        cleaned = str(ver or "").strip()
+        if cleaned.lower().startswith("v"):
+            cleaned = cleaned[1:]
+        core = cleaned.split("-", 1)[0].split("+", 1)[0]
+        parts: List[int] = []
+        for seg in core.split("."):
+            m = re.match(r"^(\d+)", seg.strip())
+            if not m:
+                return (0, 0, 0)
+            parts.append(int(m.group(1)))
+        while len(parts) < 3:
+            parts.append(0)
+        return tuple(parts)
+
+    def _is_cloud_relay_logged_in(self) -> bool:
+        cfg = load_relay_config(self._relay_config_path_override)
+        env_tok = str(
+            os.environ.get("BLUEPILL_RELAY_TOKEN") or os.environ.get("BLUEPILL_TUNNEL_TOKEN") or ""
+        ).strip()
+        tok = env_tok or (str(cfg.get("token") or "").strip() if cfg.get("enabled") else "")
+        if not tok:
+            return False
+        raw_url = str(
+            os.environ.get("BLUEPILL_RELAY_URL")
+            or os.environ.get("BLUEPILL_TUNNEL_URL")
+            or cfg.get("url")
+            or ""
+        ).strip()
+        if not raw_url:
+            return False
+        host = (urllib.parse.urlparse(raw_url).hostname or "").strip().lower()
+        return host == "bluepill.nertwork.com" or host.endswith(".bluepill.nertwork.com")
+
+    def _detect_update_method(self) -> str:
+        brew_bin = shutil.which("brew")
+        if brew_bin:
+            try:
+                proc = subprocess.run(
+                    [brew_bin, "list", "--versions", "bluepill"],
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                    check=False,
+                )
+                if proc.returncode == 0 and "bluepill" in (proc.stdout or ""):
+                    return "homebrew"
+            except Exception:
+                pass
+        return "standalone"
+
+    def get_update_status(self) -> Dict[str, Any]:
+        cloud_logged_in = self._is_cloud_relay_logged_in()
+        auto_enabled = bool(cloud_logged_in and (self._auto_update_pref is not False))
+        with self._update_lock:
+            snap = dict(self._update_state)
+        if not snap.get("method"):
+            snap["method"] = self._detect_update_method()
+            with self._update_lock:
+                if not self._update_state.get("method"):
+                    self._update_state["method"] = snap["method"]
+        return {
+            "cloud_logged_in": cloud_logged_in,
+            "auto_update_enabled": auto_enabled,
+            "current_version": VERSION,
+            "latest_version": snap.get("latest_version") or VERSION,
+            "update_available": bool(cloud_logged_in and snap.get("update_available")),
+            "method": snap.get("method") or "standalone",
+            "release_url": snap.get("release_url") or f"https://github.com/nertwork/bluepill/releases/tag/v{VERSION}",
+            "checksums_url": snap.get("checksums_url") or f"https://github.com/nertwork/bluepill/releases/download/v{VERSION}/SHA256SUMS.txt",
+            "applying": bool(snap.get("applying")),
+            "last_error": str(snap.get("last_error") or ""),
+            "checked_at": str(snap.get("checked_at") or ""),
+        }
+
+    def check_for_updates(self) -> Dict[str, Any]:
+        if not self._is_cloud_relay_logged_in():
+            raise PermissionError("Cloud Managed Updates require BluePill Cloud login")
+        req = urllib.request.Request(
+            self._updates_feed_url,
+            headers={"User-Agent": f"bluepill-server/{VERSION}", "Accept": "application/json"},
+            method="GET",
+        )
+        with urllib.request.urlopen(req, timeout=8.0) as resp:
+            payload = json.loads(resp.read().decode("utf-8"))
+        latest = str(payload.get("version") or VERSION).strip().lstrip("vV")
+        rel_url = str(payload.get("release_url") or f"https://github.com/nertwork/bluepill/releases/tag/v{latest}").strip()
+        chk_url = str(payload.get("checksums_url") or f"https://github.com/nertwork/bluepill/releases/download/v{latest}/SHA256SUMS.txt").strip()
+        avail = self._parse_semver(latest) > self._parse_semver(VERSION)
+        method = self._detect_update_method()
+        checked_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        with self._update_lock:
+            self._update_state.update(
+                {
+                    "latest_version": latest,
+                    "update_available": avail,
+                    "release_url": rel_url,
+                    "checksums_url": chk_url,
+                    "method": method,
+                    "last_error": "",
+                    "checked_at": checked_at,
+                }
+            )
+        return self.get_update_status()
+
+    def _run_server_update_worker(self, method: str, target_version: str, checksums_url: str) -> None:
+        try:
+            if method == "homebrew":
+                brew_bin = shutil.which("brew") or "/opt/homebrew/bin/brew"
+                if not os.path.exists(brew_bin) and os.path.exists("/usr/local/bin/brew"):
+                    brew_bin = "/usr/local/bin/brew"
+                subprocess.run([brew_bin, "update"], check=True, timeout=180)
+                subprocess.run([brew_bin, "upgrade", "nertwork/tap/bluepill"], check=True, timeout=300)
+                subprocess.run([brew_bin, "services", "restart", "bluepill"], check=True, timeout=60)
+            else:
+                ver = str(target_version or VERSION).lstrip("vV")
+                chk_url = checksums_url or f"https://github.com/nertwork/bluepill/releases/download/v{ver}/SHA256SUMS.txt"
+                bottle_name = f"bluepill-{ver}.all.bottle.tar.gz"
+                bottle_url = f"https://github.com/nertwork/bluepill/releases/download/v{ver}/{bottle_name}"
+                with urllib.request.urlopen(urllib.request.Request(chk_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=15.0) as r:
+                    sums_txt = r.read().decode("utf-8", errors="replace")
+                expected_sha = ""
+                for line in sums_txt.splitlines():
+                    parts = line.strip().split()
+                    if len(parts) >= 2 and os.path.basename(parts[1]) == bottle_name:
+                        expected_sha = parts[0].lower()
+                        break
+                if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+                    raise RuntimeError(f"Checksum for {bottle_name} missing from SHA256SUMS.txt")
+                with urllib.request.urlopen(urllib.request.Request(bottle_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=60.0) as r:
+                    bottle_bytes = r.read()
+                actual_sha = hashlib.sha256(bottle_bytes).hexdigest().lower()
+                if actual_sha != expected_sha:
+                    raise RuntimeError(f"SHA256 mismatch for {bottle_name}: {actual_sha} != {expected_sha}")
+                extracted_src: Optional[bytes] = None
+                with tarfile.open(fileobj=io.BytesIO(bottle_bytes), mode="r:gz") as tf:
+                    for member in tf.getmembers():
+                        if member.isfile() and member.name.endswith("/bin/bluepill-server"):
+                            fobj = tf.extractfile(member)
+                            if fobj is not None:
+                                extracted_src = fobj.read()
+                            break
+                if not extracted_src:
+                    raise RuntimeError(f"bluepill-server missing from {bottle_name}")
+                ast.parse(extracted_src.decode("utf-8"))
+                target_path = os.path.realpath(__file__)
+                tmp_path = f"{target_path}.update.{os.getpid()}"
+                with open(tmp_path, "wb") as out_f:
+                    out_f.write(extracted_src)
+                os.chmod(tmp_path, 0o755)
+                os.replace(tmp_path, target_path)
+                if sys.platform == "darwin":
+                    subprocess.run(
+                        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.nertwork.bluepill-server"],
+                        check=False,
+                        timeout=15,
+                    )
+        except Exception as exc:
+            self.logger.error("[updates] Server update failed: %s", exc)
+            with self._update_lock:
+                self._update_state["last_error"] = str(exc)
+        finally:
+            with self._update_lock:
+                self._update_state["applying"] = False
+
+    def apply_server_update(self, confirm: bool = False, spawn_worker: bool = True) -> Dict[str, Any]:
+        if not self._is_cloud_relay_logged_in():
+            raise PermissionError("Cloud Managed Updates require BluePill Cloud login")
+        if confirm is not True:
+            raise ValueError('Explicit confirmation required ({"confirm": true})')
+        status = self.get_update_status()
+        method = str(status.get("method") or "standalone")
+        target_version = str(status.get("latest_version") or VERSION)
+        with self._update_lock:
+            if self._update_state.get("applying"):
+                return {
+                    "started": False,
+                    "already_applying": True,
+                    "method": method,
+                    "target_version": target_version,
+                }
+            self._update_state["applying"] = True
+            self._update_state["last_error"] = ""
+        if spawn_worker:
+            threading.Thread(
+                target=self._run_server_update_worker,
+                args=(method, target_version, str(status.get("checksums_url") or "")),
+                name="bp-server-updater",
+                daemon=True,
+            ).start()
+        return {
+            "started": True,
+            "method": method,
+            "target_version": target_version,
+        }
+
+    def _start_update_checker_loop(self) -> None:
+        def _worker() -> None:
+            if self._stop_event.wait(15.0):
+                return
+            while not self._stop_event.is_set():
+                try:
+                    if self._is_cloud_relay_logged_in() and (self._auto_update_pref is not False):
+                        self.check_for_updates()
+                except Exception as exc:
+                    self.logger.debug("[updates] background update check skipped/failed: %s", exc)
+                    with self._update_lock:
+                        self._update_state["last_error"] = str(exc)
+                if self._stop_event.wait(UPDATE_CHECK_INTERVAL_SECONDS):
+                    break
+
+        threading.Thread(target=_worker, name="bp-update-checker", daemon=True).start()
+
 
 BluePillBackend = BluePillEngine
 
@@ -10877,6 +11116,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             self._send_json(200, self.engine.get_server_info())
             return
 
+        if path == "/api/v1/server/update/status":
+            self._send_json(200, self.engine.get_update_status())
+            return
+
         if path == "/api/v1/server/logs":
             qs = urllib.parse.parse_qs(parsed.query)
             lines = int((qs.get("lines") or ["200"])[0] or 200)
@@ -11383,6 +11626,25 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                 return
             att_guid = urllib.parse.unquote(m_att_dl.group(1))
             self._send_json(200, self.engine.download_cloud_attachment(att_guid))
+            return
+
+        if path == "/api/v1/server/update/check":
+            try:
+                self._send_json(200, self.engine.check_for_updates())
+            except PermissionError as exc:
+                self._send_json(403, self.engine.get_update_status(), str(exc))
+            except Exception as exc:
+                self._send_json(502, self.engine.get_update_status(), str(exc))
+            return
+
+        if path == "/api/v1/server/update/apply":
+            try:
+                res = self.engine.apply_server_update(confirm=(body.get("confirm") is True))
+                self._send_json(200, res, "Update started")
+            except PermissionError as exc:
+                self._send_json(403, self.engine.get_update_status(), str(exc))
+            except ValueError as exc:
+                self._send_json(400, {"confirmed": False}, str(exc))
             return
 
         if path == "/rpc":
@@ -14830,6 +15092,61 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
     finally:
         shutil.rmtree(relay_tmp_dir, ignore_errors=True)
 
+    # Cloud Managed Updates gating & semver verification self-test
+    assert BluePillEngine._parse_semver("v1.2.7") > BluePillEngine._parse_semver("1.2.6")
+    assert BluePillEngine._parse_semver("1.10.0") > BluePillEngine._parse_semver("1.2.6")
+    assert BluePillEngine._parse_semver("1.2.6") == BluePillEngine._parse_semver("v1.2.6")
+    upd_tmp = tempfile.mkdtemp(prefix="bp_upd_selftest_")
+    try:
+        upd_relay_cfg = os.path.join(upd_tmp, "relay.json")
+        save_relay_config({"enabled": False, "url": DEFAULT_CLOUD_RELAY_URL, "token": ""}, path=upd_relay_cfg)
+        upd_eng = BluePillEngine(db_path="/nonexistent/upd_test.db", password="upd-pw", enable_background_daemons=False)
+        upd_eng._relay_config_path_override = upd_relay_cfg
+        assert upd_eng.get_update_status()["cloud_logged_in"] is False
+
+        BluePillHTTPHandler.engine = upd_eng
+        upd_srv = FastThreadingHTTPServer(("127.0.0.1", 0), BluePillHTTPHandler)
+        upd_port = upd_srv.server_address[1]
+        threading.Thread(target=upd_srv.serve_forever, daemon=True).start()
+        try:
+            # 1. Self-hosted / logged-out: check and apply must return 403
+            for ep, payload in (("/api/v1/server/update/check", {}), ("/api/v1/server/update/apply", {"confirm": True})):
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{upd_port}{ep}?password=upd-pw",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    urllib.request.urlopen(req, timeout=5.0)
+                    raise AssertionError(f"Expected 403 on {ep} when not Cloud-logged-in")
+                except urllib.error.HTTPError as err:
+                    assert err.code == 403, f"Expected 403 on {ep}, got {err.code}"
+
+            # 2. Cloud-logged-in but confirm=False: apply must return 400
+            save_relay_config(
+                {"enabled": True, "url": DEFAULT_CLOUD_RELAY_URL, "token": "bp_upd_tok_123456"},
+                path=upd_relay_cfg,
+            )
+            assert upd_eng.get_update_status()["cloud_logged_in"] is True
+            req_noconfirm = urllib.request.Request(
+                f"http://127.0.0.1:{upd_port}/api/v1/server/update/apply?password=upd-pw",
+                data=json.dumps({"confirm": False}).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            try:
+                urllib.request.urlopen(req_noconfirm, timeout=5.0)
+                raise AssertionError("Expected 400 when confirm is false")
+            except urllib.error.HTTPError as err:
+                assert err.code == 400, f"Expected 400 for confirm=false, got {err.code}"
+        finally:
+            upd_srv.shutdown()
+            upd_srv.server_close()
+            shutil.rmtree(upd_eng._config_dir, ignore_errors=True)
+    finally:
+        shutil.rmtree(upd_tmp, ignore_errors=True)
+
     info = engine.get_server_info()
     print(
         json.dumps(
@@ -15116,6 +15433,72 @@ def run_relay_status_cli(args: argparse.Namespace, engine: BluePillEngine) -> in
     return 0
 
 
+def run_update_status_cli(args: argparse.Namespace, engine: BluePillEngine) -> int:
+    if not getattr(args, "no_check", False) and engine._is_cloud_relay_logged_in():
+        try:
+            engine.check_for_updates()
+        except Exception as exc:
+            with engine._update_lock:
+                engine._update_state["last_error"] = str(exc)
+    st = engine.get_update_status()
+    if args.json:
+        print(json.dumps(st, indent=2))
+    else:
+        print(f"BluePill Cloud Managed Updates (v{VERSION})")
+        print(f"  Cloud Logged In:    {st['cloud_logged_in']}")
+        print(f"  Auto-Check Enabled: {st['auto_update_enabled']}")
+        print(f"  Install Method:     {st['method']}")
+        print(f"  Current Version:    {st['current_version']}")
+        print(f"  Latest Version:     {st['latest_version']}")
+        print(f"  Update Available:   {st['update_available']}")
+        if st.get("last_error"):
+            print(f"  Last Error:         {st['last_error']}")
+    return 0
+
+
+def run_update_apply_cli(args: argparse.Namespace, engine: BluePillEngine) -> int:
+    if not engine._is_cloud_relay_logged_in():
+        msg = "Cloud Managed Updates require BluePill Cloud login (run 'bluepill-server login' first)."
+        if args.json:
+            print(json.dumps({"status": "error", "error": msg, "cloud_logged_in": False}))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 2
+    if not getattr(args, "confirm", False):
+        msg = "Explicit confirmation required: pass --confirm to apply the server update."
+        if args.json:
+            print(json.dumps({"status": "error", "error": msg, "confirmed": False}))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 2
+    try:
+        engine.check_for_updates()
+    except Exception as exc:
+        if args.json:
+            print(json.dumps({"status": "error", "error": str(exc)}))
+        else:
+            print(f"Error checking latest version: {exc}", file=sys.stderr)
+        return 1
+    st = engine.get_update_status()
+    method = str(st.get("method") or "standalone")
+    target = str(st.get("latest_version") or VERSION)
+    if not args.json:
+        print(f"Applying BluePill Server update ({VERSION} -> {target} via {method})...")
+    engine._run_server_update_worker(method, target, str(st.get("checksums_url") or ""))
+    err = engine.get_update_status().get("last_error")
+    if err:
+        if args.json:
+            print(json.dumps({"status": "error", "error": err}))
+        else:
+            print(f"Update failed: {err}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps({"status": "ok", "method": method, "target_version": target}))
+    else:
+        print(f"Update to v{target} complete.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
@@ -15125,7 +15508,7 @@ def main() -> int:
         "command",
         nargs="?",
         default="serve",
-        help="serve | login | relay-setup | relay-status | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
+        help="serve | login | relay-setup | relay-status | update-status | update | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
     )
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "127.0.0.1"))
     parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
@@ -15140,7 +15523,8 @@ def main() -> int:
     parser.add_argument("--relay-password", default="", help="Optional API password to save into server.json during 'relay-setup'")
     parser.add_argument("--disable", action="store_true", help="Disable Cloud Relay in ~/.config/bluepill/relay.json during 'relay-setup'")
     parser.add_argument("--no-relay", action="store_true", help="Run 'serve' in local-only mode without Cloud Relay")
-    parser.add_argument("--no-check", action="store_true", help="Skip live WebSocket check during 'relay-setup'")
+    parser.add_argument("--no-check", action="store_true", help="Skip live WebSocket/feed check during 'relay-setup' or 'update-status'")
+    parser.add_argument("--confirm", action="store_true", help="Confirm applying server update for 'update' command")
     parser.add_argument("--insecure-relay-tls", action="store_true", help="Disable TLS verification for Cloud Relay WebSocket (testing only)")
     parser.add_argument("-n", "--lines", type=int, default=100, help="Number of log lines to display for 'logs'")
     parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
@@ -15183,6 +15567,8 @@ def main() -> int:
             "login",
             "relay-setup",
             "relay-status",
+            "update-status",
+            "update",
             "version",
         )
     )
@@ -15250,6 +15636,12 @@ def main() -> int:
 
     if args.command == "relay-status":
         return run_relay_status_cli(args, engine)
+
+    if args.command == "update-status":
+        return run_update_status_cli(args, engine)
+
+    if args.command == "update":
+        return run_update_apply_cli(args, engine)
 
     if args.command == "logs":
         return run_logs(engine, args.lines, args.json)

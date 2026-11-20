@@ -35,6 +35,12 @@ class Bluepill < Formula
            (Opens https://bluepill.nertwork.com/portal to link your Mac to BluePill Cloud)
         2. brew services start bluepill
 
+      Cloud Managed Updates (BluePill Cloud Perk):
+        When linked to BluePill Cloud, background stable update checks run
+        automatically and require explicit confirmation in the UI or via:
+          bluepill-server update-status
+          bluepill-server update --confirm
+
       Local-Only / iCloud Hub Preflight:
         Verify Full Disk Access for Messages, Notes, Calendar, and Photos:
           bluepill-server preflight

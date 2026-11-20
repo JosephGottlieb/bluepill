@@ -480,11 +480,19 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         onOmarchyChanged();
     });
 
+    m_cloudUpdateTimer.setInterval(6 * 3600 * 1000);
+    connect(&m_cloudUpdateTimer, &QTimer::timeout, this, [this]() {
+        checkForCloudUpdates(false);
+    });
+
     if (autoStart && !m_serverUrl.isEmpty() && !m_password.isEmpty()) {
         refreshAll();
         m_pollTimer.start();
         m_relativeTimeTimer.start();
         m_contactsRefreshTimer.start();
+        if (cloudLoggedIn() && m_autoUpdateCheckEnabled) {
+            m_cloudUpdateTimer.start();
+        }
     } else if (autoStart) {
         m_connected = false;
         m_serverStatus = QStringLiteral("Disconnected · Missing BluePill credentials");
@@ -1703,6 +1711,13 @@ void Backend::checkServerAndLoad() {
         if (!m_pollTimer.isActive()) m_pollTimer.start();
         if (!m_relativeTimeTimer.isActive()) m_relativeTimeTimer.start();
         if (!m_contactsRefreshTimer.isActive()) m_contactsRefreshTimer.start();
+        if (m_autoStart && cloudLoggedIn() && m_autoUpdateCheckEnabled) {
+            if (!m_cloudUpdateTimer.isActive()) m_cloudUpdateTimer.start();
+            if (!m_initialCloudUpdateChecked) {
+                m_initialCloudUpdateChecked = true;
+                QTimer::singleShot(1500, this, [this]() { checkForCloudUpdates(false); });
+            }
+        }
     }
 }
 
@@ -1812,6 +1827,268 @@ void Backend::openWebUi() {
     const QString urlStr = webUiUrl();
     QDesktopServices::openUrl(QUrl(urlStr));
     emit toastMessage(QStringLiteral("🌐 Opening BluePill Web UI (%1)").arg(urlStr));
+}
+
+bool Backend::cloudLoggedIn() const {
+    if (m_demoMode || m_password.isEmpty()) return false;
+    const QString rawUrl = configuredServerUrl().trimmed();
+    if (rawUrl.isEmpty()) return false;
+    const QUrl u(rawUrl);
+    if (!u.isValid()) return false;
+    const QString host = u.host().trimmed().toLower();
+    const bool isCloudHost = (host == QStringLiteral("bluepill.nertwork.com") ||
+                              host.endsWith(QStringLiteral(".bluepill.nertwork.com")));
+    if (!isCloudHost) return false;
+    const QString path = u.path().trimmed();
+    if (path == QStringLiteral("/demo") || path.startsWith(QStringLiteral("/demo/"))) {
+        return false;
+    }
+    return true;
+}
+
+int Backend::compareSemver(const QString &a, const QString &b) {
+    auto parseParts = [](const QString &raw) {
+        QString s = raw.trimmed();
+        if (s.startsWith(QLatin1Char('v'), Qt::CaseInsensitive)) s = s.mid(1);
+        const int dashIdx = s.indexOf(QLatin1Char('-'));
+        if (dashIdx >= 0) s = s.left(dashIdx);
+        const QStringList segs = s.split(QLatin1Char('.'));
+        QList<int> out;
+        for (const QString &seg : segs) {
+            bool ok = false;
+            const int v = seg.trimmed().toInt(&ok);
+            out.append(ok ? v : 0);
+        }
+        while (out.size() < 3) out.append(0);
+        return out;
+    };
+    const QList<int> pa = parseParts(a);
+    const QList<int> pb = parseParts(b);
+    const int n = std::max(pa.size(), pb.size());
+    for (int i = 0; i < n; ++i) {
+        const int va = i < pa.size() ? pa.at(i) : 0;
+        const int vb = i < pb.size() ? pb.at(i) : 0;
+        if (va < vb) return -1;
+        if (va > vb) return 1;
+    }
+    return 0;
+}
+
+void Backend::setAutoUpdateCheckEnabled(bool enabled) {
+    if (m_autoUpdateCheckEnabled == enabled) return;
+    m_autoUpdateCheckEnabled = enabled;
+
+    const QString cfgPath = configFilePath();
+    QJsonObject cfgObj;
+    QFile existingFile(cfgPath);
+    if (existingFile.exists() && existingFile.open(QIODevice::ReadOnly)) {
+        cfgObj = QJsonDocument::fromJson(existingFile.readAll()).object();
+        existingFile.close();
+    }
+    cfgObj.insert(QStringLiteral("autoUpdateCheck"), m_autoUpdateCheckEnabled);
+    writeConfigAtomically(cfgPath, cfgObj);
+
+    if (m_autoStart && cloudLoggedIn() && m_autoUpdateCheckEnabled) {
+        if (!m_cloudUpdateTimer.isActive()) m_cloudUpdateTimer.start();
+    } else {
+        m_cloudUpdateTimer.stop();
+    }
+    emit configChanged();
+    emit updateStateChanged();
+}
+
+void Backend::checkForUpdatesNow() {
+    if (!cloudLoggedIn()) {
+        m_updateStatusText = QStringLiteral("Sign in at bluepill.nertwork.com to enable Cloud Managed Updates.");
+        emit updateStateChanged();
+        emit toastMessage(m_updateStatusText);
+        return;
+    }
+    checkForCloudUpdates(true);
+}
+
+void Backend::checkForCloudUpdates(bool manual) {
+    if (!cloudLoggedIn()) {
+        m_clientUpdateAvailable = false;
+        m_serverUpdateAvailable = false;
+        emit updateStateChanged();
+        return;
+    }
+    if (!manual && !m_autoUpdateCheckEnabled) {
+        return;
+    }
+
+    m_updateChecking = true;
+    m_updateStatusText = QStringLiteral("Checking BluePill Cloud for stable updates...");
+    emit updateStateChanged();
+
+    const quint64 epGen = m_serverEndpointGeneration;
+    const QString feedUrlStr = m_updatesFeedUrlOverride.isEmpty()
+                                   ? QStringLiteral("https://api.bluepill.nertwork.com/api/v1/updates/latest")
+                                   : m_updatesFeedUrlOverride;
+    QNetworkRequest feedReq{QUrl(feedUrlStr)};
+    feedReq.setTransferTimeout(8000);
+    feedReq.setRawHeader("Accept", "application/json");
+    if (feedReq.url().scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0) {
+        QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
+        ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
+        feedReq.setSslConfiguration(ssl);
+    }
+    QNetworkReply *feedReply = m_nam.get(feedReq);
+    connect(feedReply, &QNetworkReply::finished, this, [this, feedReply, epGen, manual]() {
+        feedReply->deleteLater();
+        if (epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
+            m_updateChecking = false;
+            emit updateStateChanged();
+            return;
+        }
+        if (feedReply->error() == QNetworkReply::NoError) {
+            const QJsonObject obj = QJsonDocument::fromJson(feedReply->readAll()).object();
+            const QString latest = obj.value(QStringLiteral("version")).toString().trimmed();
+            const QString relUrl = obj.value(QStringLiteral("release_url")).toString().trimmed();
+            const QJsonObject assets = obj.value(QStringLiteral("assets")).toObject();
+            if (!latest.isEmpty()) {
+                m_clientLatestVersion = latest;
+                m_clientUpdateUrl = relUrl.isEmpty()
+                                        ? QStringLiteral("https://github.com/nertwork/bluepill/releases/tag/v%1").arg(latest)
+                                        : relUrl;
+                m_clientWinInstallerUrl = assets.value(QStringLiteral("windows")).toString().trimmed();
+                m_clientDebUrl = assets.value(QStringLiteral("deb")).toString().trimmed();
+                m_clientRpmUrl = assets.value(QStringLiteral("rpm")).toString().trimmed();
+                m_clientArchUrl = assets.value(QStringLiteral("arch")).toString().trimmed();
+                const QString cur = QCoreApplication::applicationVersion().trimmed();
+                m_clientUpdateAvailable = !cur.isEmpty() && compareSemver(latest, cur) > 0;
+            }
+        }
+
+        // Now check connected Mac server update status through Cloud Relay
+        const QString srvPath = manual ? QStringLiteral("/api/v1/server/update/check")
+                                       : QStringLiteral("/api/v1/server/update/status");
+        QNetworkRequest srvReq = makeRequest(srvPath);
+        if (!srvReq.url().isValid()) {
+            m_updateChecking = false;
+            emit updateStateChanged();
+            return;
+        }
+        QNetworkReply *srvReply = manual ? m_nam.post(srvReq, QByteArray("{}")) : m_nam.get(srvReq);
+        connect(srvReply, &QNetworkReply::finished, this, [this, srvReply, epGen]() {
+            srvReply->deleteLater();
+            m_updateChecking = false;
+            if (epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
+                emit updateStateChanged();
+                return;
+            }
+            if (srvReply->error() == QNetworkReply::NoError) {
+                const QJsonObject root = QJsonDocument::fromJson(srvReply->readAll()).object();
+                const QJsonObject data = root.value(QStringLiteral("data")).toObject();
+                m_serverCurrentVersion = data.value(QStringLiteral("current_version")).toString().trimmed();
+                m_serverLatestVersion = data.value(QStringLiteral("latest_version")).toString().trimmed();
+                m_serverUpdateAvailable = data.value(QStringLiteral("update_available")).toBool(false);
+                m_serverUpdateMethod = data.value(QStringLiteral("method")).toString(QStringLiteral("homebrew"));
+                m_updateApplying = data.value(QStringLiteral("applying")).toBool(false);
+            }
+            if (anyUpdateAvailable()) {
+                m_updateStatusText = QStringLiteral("Stable update ready — review and confirm below.");
+            } else {
+                m_updateStatusText = QStringLiteral("Up to date.");
+            }
+            emit updateStateChanged();
+        });
+    });
+}
+
+void Backend::confirmClientUpdate() {
+    if (!cloudLoggedIn() || !m_clientUpdateAvailable) {
+        return;
+    }
+#ifdef Q_OS_WIN
+    const QString winUrl = m_clientWinInstallerUrl.isEmpty()
+                               ? QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v%1/BluePill-Setup-%1-win64.exe").arg(m_clientLatestVersion)
+                               : m_clientWinInstallerUrl;
+    QNetworkRequest req{QUrl(winUrl)};
+    req.setTransferTimeout(120000);
+    req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+    QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
+    ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
+    req.setSslConfiguration(ssl);
+    m_updateApplying = true;
+    m_updateStatusText = QStringLiteral("Downloading BluePill-Setup-%1-win64.exe...").arg(m_clientLatestVersion);
+    emit updateStateChanged();
+
+    QNetworkReply *reply = m_nam.get(req);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        m_updateApplying = false;
+        if (reply->error() != QNetworkReply::NoError) {
+            m_updateStatusText = QStringLiteral("Download failed: %1").arg(reply->errorString());
+            emit updateStateChanged();
+            return;
+        }
+        const QByteArray bytes = reply->readAll();
+        if (bytes.size() < 1024) {
+            m_updateStatusText = QStringLiteral("Downloaded installer was invalid.");
+            emit updateStateChanged();
+            return;
+        }
+        const QString outPath = QDir::temp().filePath(QStringLiteral("BluePill-Setup-%1-win64.exe").arg(m_clientLatestVersion));
+        QFile f(outPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            m_updateStatusText = QStringLiteral("Failed to write installer to temp directory.");
+            emit updateStateChanged();
+            return;
+        }
+        f.write(bytes);
+        f.close();
+        QProcess::startDetached(outPath, {});
+        m_updateStatusText = QStringLiteral("Launched BluePill v%1 installer.").arg(m_clientLatestVersion);
+        emit updateStateChanged();
+    });
+#else
+    const QString targetUrl = m_clientUpdateUrl.isEmpty()
+                                  ? QStringLiteral("https://github.com/nertwork/bluepill/releases/tag/v%1").arg(m_clientLatestVersion)
+                                  : m_clientUpdateUrl;
+    QString cmd = QStringLiteral("yay -S bluepill");
+    if (QFileInfo::exists(QStringLiteral("/etc/debian_version")) && !m_clientDebUrl.isEmpty()) {
+        cmd = QStringLiteral("curl -fsSL %1 -o /tmp/bluepill.deb && sudo apt install -y /tmp/bluepill.deb").arg(m_clientDebUrl);
+    } else if (QFileInfo::exists(QStringLiteral("/etc/fedora-release")) && !m_clientRpmUrl.isEmpty()) {
+        cmd = QStringLiteral("sudo dnf install -y %1").arg(m_clientRpmUrl);
+    }
+    copyToClipboard(cmd, QStringLiteral("upgrade command"));
+    QDesktopServices::openUrl(QUrl(targetUrl));
+    m_updateStatusText = QStringLiteral("Opened v%1 release page & copied upgrade command.").arg(m_clientLatestVersion);
+    emit updateStateChanged();
+#endif
+}
+
+bool Backend::confirmServerUpdate(bool confirmed) {
+    if (!confirmed || !cloudLoggedIn()) {
+        return false;
+    }
+    QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/server/update/apply"));
+    if (!req.url().isValid()) {
+        return false;
+    }
+    m_updateApplying = true;
+    m_updateStatusText = QStringLiteral("Updating Mac server via %1...").arg(m_serverUpdateMethod);
+    emit updateStateChanged();
+
+    const QByteArray payload = QJsonDocument(QJsonObject{{QStringLiteral("confirm"), true}}).toJson(QJsonDocument::Compact);
+    QNetworkReply *reply = m_nam.post(req, payload);
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            m_updateApplying = false;
+            m_updateStatusText = QStringLiteral("Mac server update request failed: %1").arg(reply->errorString());
+            emit updateStateChanged();
+            return;
+        }
+        m_updateStatusText = QStringLiteral("Mac server update started (%1). Relay will restart cleanly.").arg(m_serverUpdateMethod);
+        m_serverUpdateAvailable = false;
+        m_updateApplying = false;
+        emit updateStateChanged();
+        emit toastMessage(QStringLiteral("✓ Mac server update started"));
+    });
+    return true;
 }
 
 // http://host[:port] with IPv6 literals bracketed.
@@ -2228,6 +2505,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     cfgObj.insert(QStringLiteral("tlsVerified"), true);
     cfgObj.insert(QStringLiteral("authMethod"), QStringLiteral("tls-apikey"));
     cfgObj.insert(QStringLiteral("themeMode"), m_themeMode);
+    cfgObj.insert(QStringLiteral("autoUpdateCheck"), m_autoUpdateCheckEnabled);
 
     if (!writeConfigAtomically(cfgPath, cfgObj)) {
         emit toastMessage(QStringLiteral("⚠ Failed to save server configuration"));
@@ -2289,7 +2567,15 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     m_consecutiveFailures = 0;
 
     m_demoMode = false;
+    m_clientUpdateAvailable = false;
+    m_serverUpdateAvailable = false;
+    m_updateStatusText.clear();
+    m_initialCloudUpdateChecked = false;
+    if (!m_autoStart || !cloudLoggedIn() || !m_autoUpdateCheckEnabled) {
+        m_cloudUpdateTimer.stop();
+    }
     emit configChanged();
+    emit updateStateChanged();
     emit statusChanged();
     if (m_configFilePath.trimmed().isEmpty()) {
         const QString bpCfg = defaultBluepillConfigPath();
@@ -2370,6 +2656,9 @@ void Backend::loadCredentials() {
             }
             if (envThemeMode.isEmpty() && obj.contains(QStringLiteral("themeMode"))) {
                 m_themeMode = Theme::normalizeThemeMode(obj.value(QStringLiteral("themeMode")).toString());
+            }
+            if (obj.contains(QStringLiteral("autoUpdateCheck"))) {
+                m_autoUpdateCheckEnabled = obj.value(QStringLiteral("autoUpdateCheck")).toBool(true);
             }
 #ifndef Q_OS_WIN
             QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);

@@ -11213,6 +11213,85 @@ private slots:
         if (!prevBbPass.isEmpty()) qputenv("BLUEBUBBLES_PASSWORD", prevBbPass);
     }
 
+    void testCloudManagedUpdatesGatingAndConfirmation() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        const QByteArray prevHome = qgetenv("HOME");
+        const QByteArray prevBpUrl = qgetenv("BLUEPILL_SERVER_URL");
+        const QByteArray prevBpPass = qgetenv("BLUEPILL_PASSWORD");
+        const QByteArray prevImsgUrl = qgetenv("IMSG_SERVER_URL");
+        const QByteArray prevImsgPass = qgetenv("IMSG_PASSWORD");
+        const QByteArray prevBbUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevBbPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        qputenv("HOME", tempDir.path().toUtf8());
+        qunsetenv("BLUEPILL_SERVER_URL");
+        qunsetenv("BLUEPILL_PASSWORD");
+        qunsetenv("IMSG_SERVER_URL");
+        qunsetenv("IMSG_PASSWORD");
+        qunsetenv("BLUEBUBBLES_URL");
+        qunsetenv("BLUEBUBBLES_PASSWORD");
+        const QString cfgPath = tempDir.filePath(QStringLiteral("config_upd.json"));
+
+        // Semver comparisons
+        QCOMPARE(Backend::compareSemver(QStringLiteral("1.2.7"), QStringLiteral("1.2.6")), 1);
+        QCOMPARE(Backend::compareSemver(QStringLiteral("v1.10.0"), QStringLiteral("1.2.6")), 1);
+        QCOMPARE(Backend::compareSemver(QStringLiteral("v1.2.6"), QStringLiteral("1.2.6")), 0);
+        QCOMPARE(Backend::compareSemver(QStringLiteral("1.2.5"), QStringLiteral("1.2.6")), -1);
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_upd.json")));
+        b.setConfigFilePath(cfgPath);
+
+        // 1. Local/LAN server -> cloudLoggedIn must be false, confirmServerUpdate must fail
+        b.saveServerConfig(QStringLiteral("http://192.168.1.50:1235"), QString(), QStringLiteral("local-pw"));
+        QCOMPARE(b.cloudLoggedIn(), false);
+        QCOMPARE(b.confirmServerUpdate(true), false);
+
+        // 2. Demo endpoint (/demo) -> cloudLoggedIn must be false
+        b.saveServerConfig(QStringLiteral("https://api.bluepill.nertwork.com:443/demo"), QString(), QStringLiteral("demo"));
+        QCOMPARE(b.cloudLoggedIn(), false);
+        QCOMPARE(b.confirmServerUpdate(true), false);
+
+        // 3. BluePill Cloud tenant -> cloudLoggedIn must be true; unconfirmed apply must be rejected
+        b.saveServerConfig(QStringLiteral("https://api.bluepill.nertwork.com:443/t/foo"), QString(), QStringLiteral("cloud-pw"));
+        QCOMPARE(b.cloudLoggedIn(), true);
+        QCOMPARE(b.confirmServerUpdate(false), false);
+
+        // Toggle autoUpdateCheckEnabled and verify persistence in config.json
+        b.setAutoUpdateCheckEnabled(false);
+        QCOMPARE(b.autoUpdateCheckEnabled(), false);
+        Backend bReload(false);
+        bReload.setConfigFilePath(cfgPath);
+        QCOMPARE(bReload.cloudLoggedIn(), true);
+        QCOMPARE(bReload.autoUpdateCheckEnabled(), false);
+
+        // Verify QML Cloud Managed Updates controls exist
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &bReload);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *root = engine.rootObjects().first();
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("topBarUpdatePill")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("cloudUpdateModal")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("confirmClientUpdateBtn")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("confirmServerUpdateBtn")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("cloudUpdatesSettingsBox")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("toggleAutoUpdateCheckBtn")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("checkUpdatesNowBtn")) != nullptr);
+
+        if (!prevHome.isEmpty()) qputenv("HOME", prevHome); else qunsetenv("HOME");
+        if (!prevBpUrl.isEmpty()) qputenv("BLUEPILL_SERVER_URL", prevBpUrl);
+        if (!prevBpPass.isEmpty()) qputenv("BLUEPILL_PASSWORD", prevBpPass);
+        if (!prevImsgUrl.isEmpty()) qputenv("IMSG_SERVER_URL", prevImsgUrl);
+        if (!prevImsgPass.isEmpty()) qputenv("IMSG_PASSWORD", prevImsgPass);
+        if (!prevBbUrl.isEmpty()) qputenv("BLUEBUBBLES_URL", prevBbUrl);
+        if (!prevBbPass.isEmpty()) qputenv("BLUEBUBBLES_PASSWORD", prevBbPass);
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

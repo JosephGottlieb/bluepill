@@ -70,6 +70,7 @@ brew services start bluepill
 
 - **Verify Relay, Cloud Relay & Web UI:**
   - Cloud Relay Status: `bluepill-server relay-status`
+  - Cloud Managed Updates (BluePill Cloud Perk): `bluepill-server update-status` / `bluepill-server update --confirm` (or 1-click confirmation inside the desktop client UI — strictly gated to signed-in `bluepill.nertwork.com` users; never phones home when self-hosted offline)
   - Health / Info API: `curl -s http://127.0.0.1:1235/api/v1/server/info`
   - Built-In Web UI: Open `http://127.0.0.1:1235/web` (or your hosted Cloud Relay Web UI at `https://bluepill.nertwork.com/t/<slug>/web`).
   - Try instantly without a Mac: **[Live Interactive Demo](https://bluepill.nertwork.com/demo)** or click **"Try Live Demo"** inside the desktop client.

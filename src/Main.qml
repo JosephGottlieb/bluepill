@@ -603,6 +603,7 @@ ApplicationWindow {
     property bool showDeleteChatModal: false
     property bool showServerConfigModal: false
     property bool showServerPassword: false
+    property bool showUpdateModal: false
 
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
@@ -1768,6 +1769,42 @@ ApplicationWindow {
                             hoverEnabled: true
                             cursorShape: Qt.PointingHandCursor
                             onClicked: root.openServerConfigModal()
+                        }
+                    }
+
+                    Rectangle {
+                        id: topBarUpdatePill
+                        objectName: "topBarUpdatePill"
+                        visible: backend.cloudLoggedIn && backend.anyUpdateAvailable
+                        height: 26
+                        radius: 13
+                        implicitWidth: topUpdatePillRow.implicitWidth + 18
+                        color: topUpdatePillMouse.containsMouse
+                               ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.28)
+                               : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.16)
+                        border.width: 1
+                        border.color: theme.accent
+                        ToolTip.visible: topUpdatePillMouse.containsMouse
+                        ToolTip.text: i18n.tr("BluePill Cloud Managed Update ready — click to review & confirm")
+                        ToolTip.delay: 250
+
+                        RowLayout {
+                            id: topUpdatePillRow
+                            anchors.centerIn: parent
+                            spacing: 5
+                            Text {
+                                text: "↑ " + i18n.tr("Update v%1").arg(backend.clientUpdateAvailable ? backend.clientLatestVersion : backend.serverLatestVersion)
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.accent
+                            }
+                        }
+                        MouseArea {
+                            id: topUpdatePillMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showUpdateModal = true
                         }
                     }
                 }
@@ -10546,6 +10583,125 @@ ApplicationWindow {
                         wrapMode: Text.WordWrap
                     }
                 }
+
+                // Cloud Managed Updates (Strictly gated to signed-in bluepill.nertwork.com users)
+                Rectangle {
+                    id: cloudUpdatesSettingsBox
+                    objectName: "cloudUpdatesSettingsBox"
+                    Layout.fillWidth: true
+                    implicitHeight: cloudUpdatesCol.implicitHeight + 18
+                    radius: 8
+                    color: theme.lighterBackground
+                    border.width: 1
+                    border.color: backend.cloudLoggedIn ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45) : theme.muted
+
+                    ColumnLayout {
+                        id: cloudUpdatesCol
+                        anchors.fill: parent
+                        anchors.margins: 9
+                        spacing: 6
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: "🔄 " + i18n.tr("Cloud Managed Updates")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.brightForeground
+                            }
+                            Text {
+                                text: backend.cloudLoggedIn ? i18n.tr("BluePill Cloud Active") : i18n.tr("Cloud Login Only")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: backend.cloudLoggedIn ? theme.green : theme.darkForeground
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: backend.cloudLoggedIn
+                                  ? i18n.tr("Background stable update checks run automatically and always ask for your confirmation before installing.")
+                                  : i18n.tr("Available when signed in at bluepill.nertwork.com. Local/self-hosted setups never phone home.")
+                            font.pixelSize: theme.fontSize - 3
+                            color: theme.darkForeground
+                            wrapMode: Text.WordWrap
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                id: toggleAutoUpdateCheckBtn
+                                objectName: "toggleAutoUpdateCheckBtn"
+                                Layout.fillWidth: true
+                                height: 30
+                                radius: 6
+                                enabled: backend.cloudLoggedIn
+                                opacity: backend.cloudLoggedIn ? 1.0 : 0.5
+                                color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled)
+                                       ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22)
+                                       : theme.background
+                                border.width: 1
+                                border.color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled) ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (backend.autoUpdateCheckEnabled ? "✓ " : "○ ") + i18n.tr("Auto-Check Stable Updates")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: backend.autoUpdateCheckEnabled
+                                    color: backend.autoUpdateCheckEnabled ? theme.brightForeground : theme.darkForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: backend.cloudLoggedIn
+                                    onClicked: backend.autoUpdateCheckEnabled = !backend.autoUpdateCheckEnabled
+                                }
+                            }
+                            Rectangle {
+                                id: checkUpdatesNowBtn
+                                objectName: "checkUpdatesNowBtn"
+                                height: 30
+                                implicitWidth: checkUpdLbl.implicitWidth + 20
+                                radius: 6
+                                enabled: backend.cloudLoggedIn && !backend.updateChecking
+                                opacity: backend.cloudLoggedIn ? 1.0 : 0.5
+                                color: theme.background
+                                border.width: 1
+                                border.color: theme.accent
+                                Text {
+                                    id: checkUpdLbl
+                                    anchors.centerIn: parent
+                                    text: backend.updateChecking ? i18n.tr("Checking…") : i18n.tr("Check for Updates")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: backend.cloudLoggedIn && !backend.updateChecking
+                                    onClicked: {
+                                        backend.checkForUpdatesNow()
+                                        if (backend.anyUpdateAvailable) {
+                                            root.showUpdateModal = true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: backend.updateStatusText.length > 0
+                            text: backend.updateStatusText
+                            font.pixelSize: theme.fontSize - 3
+                            color: backend.anyUpdateAvailable ? theme.accent : theme.darkForeground
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
                 } // end serverSyncSection
 
                 // UI & Appearance Settings Section
@@ -11131,6 +11287,205 @@ ApplicationWindow {
                         }
                     }
                 }
+                }
+            }
+        }
+    }
+
+    // Cloud Managed Updates Confirmation Modal
+    Rectangle {
+        id: cloudUpdateModal
+        objectName: "cloudUpdateModal"
+        visible: root.showUpdateModal
+        anchors.fill: parent
+        color: "#aa0e0e14"
+        z: 1000
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: root.showUpdateModal = false
+        }
+
+        Rectangle {
+            width: Math.min(480, root.width - 40)
+            height: cloudUpdateModalCol.implicitHeight + 40
+            anchors.centerIn: parent
+            radius: 12
+            color: theme.darkBackground
+            border.width: 1
+            border.color: theme.accent
+
+            MouseArea { anchors.fill: parent }
+
+            ColumnLayout {
+                id: cloudUpdateModalCol
+                anchors.fill: parent
+                anchors.margins: 20
+                spacing: 12
+
+                Text {
+                    Layout.fillWidth: true
+                    text: "🔄 " + i18n.tr("BluePill Cloud Managed Updates")
+                    font.pixelSize: theme.fontSize + 2
+                    font.bold: true
+                    color: theme.brightForeground
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    text: i18n.tr("Review available stable updates below. Updates only install when you explicitly confirm.")
+                    font.pixelSize: theme.fontSize - 2
+                    color: theme.darkForeground
+                    wrapMode: Text.WordWrap
+                }
+
+                // Client App Update Section
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: clientUpdRow.implicitHeight + 18
+                    radius: 8
+                    color: theme.lighterBackground
+                    border.width: 1
+                    border.color: backend.clientUpdateAvailable ? theme.accent : theme.muted
+
+                    RowLayout {
+                        id: clientUpdRow
+                        anchors.fill: parent
+                        anchors.margins: 9
+                        spacing: 10
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                text: i18n.tr("Client App Update")
+                                font.pixelSize: theme.fontSize - 1
+                                font.bold: true
+                                color: theme.brightForeground
+                            }
+                            Text {
+                                text: backend.clientUpdateAvailable
+                                      ? ("v" + (Qt.application.version || "1.2.6") + " → v" + backend.clientLatestVersion)
+                                      : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.6")
+                                font.pixelSize: theme.fontSize - 2
+                                color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
+                            }
+                        }
+                        Rectangle {
+                            id: confirmClientUpdateBtn
+                            objectName: "confirmClientUpdateBtn"
+                            height: 32
+                            implicitWidth: confirmClientTxt.implicitWidth + 20
+                            radius: 7
+                            enabled: backend.cloudLoggedIn && backend.clientUpdateAvailable && !backend.updateApplying
+                            opacity: enabled ? 1.0 : 0.45
+                            color: theme.accent
+                            Text {
+                                id: confirmClientTxt
+                                anchors.centerIn: parent
+                                text: i18n.tr("Confirm & Update App")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.onAccent
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                enabled: parent.enabled
+                                onClicked: backend.confirmClientUpdate()
+                            }
+                        }
+                    }
+                }
+
+                // Mac Server Update Section
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: srvUpdRow.implicitHeight + 18
+                    radius: 8
+                    color: theme.lighterBackground
+                    border.width: 1
+                    border.color: backend.serverUpdateAvailable ? theme.accent : theme.muted
+
+                    RowLayout {
+                        id: srvUpdRow
+                        anchors.fill: parent
+                        anchors.margins: 9
+                        spacing: 10
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: 2
+                            Text {
+                                text: i18n.tr("Mac Server Update (%1)").arg(backend.serverUpdateMethod || "homebrew")
+                                font.pixelSize: theme.fontSize - 1
+                                font.bold: true
+                                color: theme.brightForeground
+                            }
+                            Text {
+                                text: backend.serverUpdateAvailable
+                                      ? ("v" + (backend.serverCurrentVersion || "?") + " → v" + backend.serverLatestVersion)
+                                      : i18n.tr("Up to date")
+                                font.pixelSize: theme.fontSize - 2
+                                color: backend.serverUpdateAvailable ? theme.accent : theme.darkForeground
+                            }
+                        }
+                        Rectangle {
+                            id: confirmServerUpdateBtn
+                            objectName: "confirmServerUpdateBtn"
+                            height: 32
+                            implicitWidth: confirmSrvTxt.implicitWidth + 20
+                            radius: 7
+                            enabled: backend.cloudLoggedIn && backend.serverUpdateAvailable && !backend.updateApplying
+                            opacity: enabled ? 1.0 : 0.45
+                            color: theme.green
+                            Text {
+                                id: confirmSrvTxt
+                                anchors.centerIn: parent
+                                text: i18n.tr("Confirm & Update Mac Server")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: "#ffffff"
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                enabled: parent.enabled
+                                onClicked: backend.confirmServerUpdate(true)
+                            }
+                        }
+                    }
+                }
+
+                Text {
+                    Layout.fillWidth: true
+                    visible: backend.updateStatusText.length > 0
+                    text: backend.updateStatusText
+                    font.pixelSize: theme.fontSize - 3
+                    color: theme.foreground
+                    wrapMode: Text.WordWrap
+                }
+
+                RowLayout {
+                    Layout.fillWidth: true
+                    Item { Layout.fillWidth: true }
+                    Rectangle {
+                        height: 32
+                        implicitWidth: 84
+                        radius: 7
+                        color: theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.muted
+                        Text {
+                            anchors.centerIn: parent
+                            text: i18n.tr("Close")
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.foreground
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: root.showUpdateModal = false
+                        }
+                    }
                 }
             }
         }

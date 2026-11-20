@@ -84,6 +84,19 @@ class Backend : public QObject {
     Q_PROPERTY(QString serverPassword READ serverPassword NOTIFY configChanged)
     Q_PROPERTY(bool hasPasswordConfigured READ hasPasswordConfigured NOTIFY configChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY configChanged)
+    Q_PROPERTY(bool cloudLoggedIn READ cloudLoggedIn NOTIFY configChanged)
+    Q_PROPERTY(bool autoUpdateCheckEnabled READ autoUpdateCheckEnabled WRITE setAutoUpdateCheckEnabled NOTIFY configChanged)
+    Q_PROPERTY(bool clientUpdateAvailable READ clientUpdateAvailable NOTIFY updateStateChanged)
+    Q_PROPERTY(QString clientLatestVersion READ clientLatestVersion NOTIFY updateStateChanged)
+    Q_PROPERTY(QString clientUpdateUrl READ clientUpdateUrl NOTIFY updateStateChanged)
+    Q_PROPERTY(bool serverUpdateAvailable READ serverUpdateAvailable NOTIFY updateStateChanged)
+    Q_PROPERTY(QString serverCurrentVersion READ serverCurrentVersion NOTIFY updateStateChanged)
+    Q_PROPERTY(QString serverLatestVersion READ serverLatestVersion NOTIFY updateStateChanged)
+    Q_PROPERTY(QString serverUpdateMethod READ serverUpdateMethod NOTIFY updateStateChanged)
+    Q_PROPERTY(bool updateChecking READ updateChecking NOTIFY updateStateChanged)
+    Q_PROPERTY(bool updateApplying READ updateApplying NOTIFY updateStateChanged)
+    Q_PROPERTY(QString updateStatusText READ updateStatusText NOTIFY updateStateChanged)
+    Q_PROPERTY(bool anyUpdateAvailable READ anyUpdateAvailable NOTIFY updateStateChanged)
     Q_PROPERTY(QVariantList tailscaleRelays READ tailscaleRelays NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(QString tailscaleStatus READ tailscaleStatus NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(bool tailscaleScanning READ tailscaleScanning NOTIFY tailscaleRelaysChanged)
@@ -377,6 +390,26 @@ public:
     Q_INVOKABLE void startNewChat(const QString &address, const QString &text = QString());
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
     Q_INVOKABLE void openUrl(const QString &url);
+    bool cloudLoggedIn() const;
+    bool autoUpdateCheckEnabled() const { return m_autoUpdateCheckEnabled; }
+    void setAutoUpdateCheckEnabled(bool enabled);
+    bool clientUpdateAvailable() const { return cloudLoggedIn() && m_clientUpdateAvailable; }
+    QString clientLatestVersion() const { return m_clientLatestVersion; }
+    QString clientUpdateUrl() const { return m_clientUpdateUrl; }
+    bool serverUpdateAvailable() const { return cloudLoggedIn() && m_serverUpdateAvailable; }
+    QString serverCurrentVersion() const { return m_serverCurrentVersion; }
+    QString serverLatestVersion() const { return m_serverLatestVersion; }
+    QString serverUpdateMethod() const { return m_serverUpdateMethod; }
+    bool updateChecking() const { return m_updateChecking; }
+    bool updateApplying() const { return m_updateApplying; }
+    QString updateStatusText() const { return m_updateStatusText; }
+    bool anyUpdateAvailable() const { return clientUpdateAvailable() || serverUpdateAvailable(); }
+    Q_INVOKABLE static int compareSemver(const QString &a, const QString &b);
+    Q_INVOKABLE void checkForUpdatesNow();
+    Q_INVOKABLE void confirmClientUpdate();
+    Q_INVOKABLE bool confirmServerUpdate(bool confirmed = false);
+    void setUpdatesFeedUrlForTest(const QString &url) { m_updatesFeedUrlOverride = url; }
+    void checkForCloudUpdates(bool manual = false);
     Q_INVOKABLE void registerWindow(QObject *window);
     bool eventFilter(QObject *watched, QEvent *event) override;
     Q_INVOKABLE void loadDemoData();
@@ -648,6 +681,7 @@ signals:
     void voiceRecordingChanged();
     void audioDevicesChanged();
     void scheduledMessagesChanged();
+    void updateStateChanged();
 
     void toastMessage(const QString &text);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
@@ -813,6 +847,24 @@ private:
     bool m_connected = false;
     bool m_loading = false;
     bool m_demoMode = false;
+    bool m_autoUpdateCheckEnabled = true;
+    bool m_clientUpdateAvailable = false;
+    QString m_clientLatestVersion;
+    QString m_clientUpdateUrl;
+    QString m_clientWinInstallerUrl;
+    QString m_clientDebUrl;
+    QString m_clientRpmUrl;
+    QString m_clientArchUrl;
+    bool m_serverUpdateAvailable = false;
+    QString m_serverCurrentVersion;
+    QString m_serverLatestVersion;
+    QString m_serverUpdateMethod = QStringLiteral("homebrew");
+    bool m_updateChecking = false;
+    bool m_updateApplying = false;
+    bool m_initialCloudUpdateChecked = false;
+    QString m_updateStatusText;
+    QString m_updatesFeedUrlOverride;
+    QTimer m_cloudUpdateTimer;
     bool m_windowActive = true;
     QPointer<QObject> m_rootWindow;
     bool m_notificationsEnabled = true;
