@@ -5,10 +5,15 @@
 <h1 align="center">BluePill — Native Qt6 iMessage, RCS &amp; SMS Client + Cloud Relay &amp; Web UI</h1>
 
 <p align="center">
-  <a href="https://bluepill.nertwork.com/demo"><strong>Try Live Demo</strong></a> ·
-  <a href="https://bluepill.nertwork.com/signup"><strong>Free Beta Cloud Relay</strong></a> ·
-  <a href="https://bluepill.nertwork.com"><strong>Website</strong></a> ·
+  <strong>Official Website:</strong> <a href="https://bluepill.nertwork.com"><strong>https://bluepill.nertwork.com</strong></a> ·
+  <strong>Live Interactive Demo:</strong> <a href="https://bluepill.nertwork.com/demo"><strong>Try Live Demo</strong></a> ·
+  <strong>Free Cloud Relay Signup:</strong> <a href="https://bluepill.nertwork.com/signup"><strong>Sign Up Free</strong></a> ·
+  <strong>Support Open-Source Development:</strong> <a href="https://bluepill.nertwork.com/#support"><strong>Sponsor BluePill</strong></a>
+</p>
+
+<p align="center">
   <a href="https://github.com/nertwork/bluepill/releases/latest"><strong>Downloads (.exe / .deb / .rpm)</strong></a> ·
+  <a href="https://bluepill.nertwork.com/docs"><strong>Documentation</strong></a> ·
   <a href="mailto:support@nertwork.com"><strong>support@nertwork.com</strong></a>
 </p>
 

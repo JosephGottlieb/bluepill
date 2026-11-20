@@ -7940,7 +7940,9 @@ void Backend::reconcileChatMessages(const QString &chatGuid, const QJsonArray &s
             if (!validServerGuids.contains(cachedGuid)) {
                 const bool isFromMe = it.value().value(QStringLiteral("isFromMe")).toBool();
                 const qint64 cachedTs = it.value().value(QStringLiteral("dateCreated")).toVariant().toLongLong();
+                const qint64 recentlySentAt = m_recentlySentMessageAtMs.value(cachedGuid, 0);
                 if (isFromMe && (m_pendingDeliveryMessages.contains(cachedGuid) ||
+                                 (recentlySentAt > 0 && (nowRecMs - recentlySentAt) < 60000LL) ||
                                  (cachedTs > 0 && (nowRecMs - cachedTs) < 60000LL))) {
                     continue;
                 }
@@ -8938,6 +8940,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                 }
             }
             m_seenMessageGuids.insert(realGuid);
+            m_recentlySentMessageAtMs.insert(realGuid, QDateTime::currentMSecsSinceEpoch());
             if (!tempGuid.isEmpty() && tempGuid != realGuid) {
                 m_seenMessageGuids.remove(tempGuid);
                 m_pendingDeliveryMessages.remove(tempGuid);
@@ -9315,6 +9318,7 @@ void Backend::deleteMessage(const QString &messageGuid, const QString &chatGuid)
 
     // 1. Record in persistent deleted set
     m_deletedMessageGuids.insert(resolvedMsgGuid);
+    m_recentlySentMessageAtMs.remove(resolvedMsgGuid);
     m_pendingDeliveryMessages.remove(resolvedMsgGuid);
     m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
     m_expiredPendingDeliveryGuids.remove(resolvedMsgGuid);
@@ -9530,6 +9534,7 @@ QString Backend::messageOwnChatGuid(const QJsonObject &msgObj, const QString &fa
 
 void Backend::applyLocalUnsend(const QString &resolvedMsgGuid, const QString &resolvedChatGuid) {
     m_deletedMessageGuids.insert(resolvedMsgGuid);
+    m_recentlySentMessageAtMs.remove(resolvedMsgGuid);
     m_pendingDeliveryMessages.remove(resolvedMsgGuid);
     m_pendingDeliveryAddedAtMs.remove(resolvedMsgGuid);
     m_expiredPendingDeliveryGuids.remove(resolvedMsgGuid);
@@ -10422,6 +10427,7 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
 
             if (!realGuid.isEmpty()) {
                 m_seenMessageGuids.insert(realGuid);
+                m_recentlySentMessageAtMs.insert(realGuid, QDateTime::currentMSecsSinceEpoch());
                 if (!tempGuid.isEmpty() && tempGuid != realGuid) {
                     m_seenMessageGuids.remove(tempGuid);
                     clearPendingDeliveryTrackingForGuid(tempGuid, true);

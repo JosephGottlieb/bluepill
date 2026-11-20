@@ -44,6 +44,19 @@ def convert_and_embed_html(md_path: str, html_path: str) -> bool:
     if re.search(main_regex, html_page):
         html_page = re.sub(main_regex, lambda m: m.group(1) + body_html + "\n        " + m.group(2), html_page)
 
+    # Consolidate search ranking onto official bluepill.nertwork.com/docs
+    canonical_tag = '<link rel="canonical" href="https://bluepill.nertwork.com/docs">'
+    if re.search(r'<link\s+rel="canonical"[^>]*>', html_page, flags=re.IGNORECASE):
+        html_page = re.sub(
+            r'<link\s+rel="canonical"[^>]*>',
+            canonical_tag,
+            html_page,
+            count=1,
+            flags=re.IGNORECASE,
+        )
+    elif "</head>" in html_page:
+        html_page = html_page.replace("</head>", f"    {canonical_tag}\n</head>", 1)
+
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_page)
     return True
@@ -111,9 +124,20 @@ def main():
         with open(idx_path, encoding="utf-8") as f:
             idx_text = f.read()
         idx_text = re.sub(r"BluePill v[0-9.]+", f"BluePill v{version}", idx_text)
+        canonical_root = '<link rel="canonical" href="https://bluepill.nertwork.com/">'
+        if re.search(r'<link\s+rel="canonical"[^>]*>', idx_text, flags=re.IGNORECASE):
+            idx_text = re.sub(
+                r'<link\s+rel="canonical"[^>]*>',
+                canonical_root,
+                idx_text,
+                count=1,
+                flags=re.IGNORECASE,
+            )
+        elif "</head>" in idx_text:
+            idx_text = idx_text.replace("</head>", f"    {canonical_root}\n</head>", 1)
         with open(idx_path, "w", encoding="utf-8") as f:
             f.write(idx_text)
-        print("Updated version in index.html")
+        print("Updated version and canonical link in index.html")
 
     print("Documentation sync complete.")
 

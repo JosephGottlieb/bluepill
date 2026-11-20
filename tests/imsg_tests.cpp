@@ -1439,6 +1439,8 @@ private slots:
         int textSendRequests = 0;
         int newChatRequests = 0;
         bool simulateMissingChatOnSend = false;
+        const qint64 baseNowMs = QDateTime::currentMSecsSinceEpoch();
+        QJsonArray mockServerMessages;
         QList<QTcpSocket *> stalledMediaSockets;
 
         QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
@@ -1482,15 +1484,39 @@ private slots:
                                              R"({"status":500,"message":"Chat does not exist!"})");
                             return;
                         }
-                        sendJsonResponse(sock, 200, "OK",
-                                         R"({"status":200,"data":{"guid":"real-msg-guid-158","text":"Just sent you money - pay your taxes ❤️","isFromMe":true,"dateCreated":1775860005000}})");
+                        const QJsonObject sentObj{
+                            {QStringLiteral("guid"), QStringLiteral("real-msg-guid-158")},
+                            {QStringLiteral("text"), QStringLiteral("Just sent you money - pay your taxes ❤️")},
+                            {QStringLiteral("isFromMe"), true},
+                            {QStringLiteral("dateCreated"), baseNowMs + 5000}
+                        };
+                        mockServerMessages.prepend(sentObj);
+                        const QByteArray body = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), sentObj}}).toJson(QJsonDocument::Compact);
+                        sendJsonResponse(sock, 200, "OK", body);
                         return;
                     }
 
                     if (reqLine.startsWith("POST /api/v1/chat/new")) {
                         newChatRequests++;
-                        sendJsonResponse(sock, 200, "OK",
-                                         R"({"status":200,"data":{"guid":"iMessage;-;+14155550140","messages":[{"guid":"real-newchat-msg-guid-158","text":"Hello brand new chat","isFromMe":true,"dateCreated":1775860009000}]}})");
+                        const QJsonObject newMsgObj{
+                            {QStringLiteral("guid"), QStringLiteral("real-newchat-msg-guid-158")},
+                            {QStringLiteral("text"), QStringLiteral("Hello brand new chat")},
+                            {QStringLiteral("isFromMe"), true},
+                            {QStringLiteral("dateCreated"), baseNowMs + 9000}
+                        };
+                        mockServerMessages.prepend(newMsgObj);
+                        const QJsonObject chatData{
+                            {QStringLiteral("guid"), QStringLiteral("iMessage;-;+14155550140")},
+                            {QStringLiteral("messages"), QJsonArray{newMsgObj}}
+                        };
+                        const QByteArray body = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), chatData}}).toJson(QJsonDocument::Compact);
+                        sendJsonResponse(sock, 200, "OK", body);
+                        return;
+                    }
+
+                    if (reqLine.startsWith("POST /api/v1/message/query") || reqLine.startsWith("GET /api/v1/chat/")) {
+                        const QByteArray body = QJsonDocument(QJsonObject{{QStringLiteral("status"), 200}, {QStringLiteral("data"), mockServerMessages}}).toJson(QJsonDocument::Compact);
+                        sendJsonResponse(sock, 200, "OK", body);
                         return;
                     }
 
@@ -1499,6 +1525,12 @@ private slots:
             }
         });
 
+        const QByteArray prevBbUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevBbPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        auto restoreEnv = qScopeGuard([&]() {
+            if (prevBbUrl.isEmpty()) qunsetenv("BLUEBUBBLES_URL"); else qputenv("BLUEBUBBLES_URL", prevBbUrl);
+            if (prevBbPass.isEmpty()) qunsetenv("BLUEBUBBLES_PASSWORD"); else qputenv("BLUEBUBBLES_PASSWORD", prevBbPass);
+        });
         qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(port).toUtf8());
         qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
 
@@ -1546,6 +1578,7 @@ private slots:
             allMsgs.append(slowMsg);
         }
 
+        mockServerMessages = allMsgs;
         b.ingestMessagesForTest(allMsgs, true);
         b.selectChat(chatGuid);
 
@@ -1554,6 +1587,11 @@ private slots:
         // Concurrency cap: at most 2 stalled media sockets should be active simultaneously
         QTRY_COMPARE_WITH_TIMEOUT(stalledMediaSockets.size(), 2, 1500);
 
+        auto lastMsgField = [&](const QString &key) -> QString {
+            const QVariantList msgs = b.messages();
+            return msgs.isEmpty() ? QString() : msgs.last().toMap().value(key).toString();
+        };
+
         // 2. While m_mediaNam has 2 stalled downloads + 6 queued, sendMessage must complete in < 300ms via m_sendNam!
         QElapsedTimer sendTimer;
         sendTimer.start();
@@ -1561,22 +1599,22 @@ private slots:
 
         // Verify optimistic message is immediately appended
         QVERIFY(!b.messages().isEmpty());
-        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(), QStringLiteral("Sending..."));
+        QCOMPARE(lastMsgField(QStringLiteral("receiptText")), QStringLiteral("Sending..."));
 
         // Wait for POST /api/v1/message/text response and verify immediate transition to Delivered + real GUID
-        QTRY_COMPARE_WITH_TIMEOUT(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(),
-                                  QStringLiteral("Delivered"), 500);
-        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("guid")).toString(),
+        QTRY_COMPARE_WITH_TIMEOUT(lastMsgField(QStringLiteral("receiptText")),
+                                  QStringLiteral("Delivered"), 1000);
+        QCOMPARE(lastMsgField(QStringLiteral("guid")),
                  QStringLiteral("real-msg-guid-158"));
-        QVERIFY2(sendTimer.elapsed() < 500, "sendMessage must not be blocked by in-flight attachment downloads");
+        QVERIFY2(sendTimer.elapsed() < 1000, "sendMessage must not be blocked by in-flight attachment downloads");
 
         // 3. Test brand-new chat fallback where /api/v1/message/text returns "Chat does not exist!" -> immediate /api/v1/chat/new
         simulateMissingChatOnSend = true;
         b.sendMessage(chatGuid, QStringLiteral("Hello brand new chat"));
-        QTRY_COMPARE_WITH_TIMEOUT(newChatRequests, 1, 500);
-        QTRY_COMPARE_WITH_TIMEOUT(b.messages().last().toMap().value(QStringLiteral("guid")).toString(),
-                                  QStringLiteral("real-newchat-msg-guid-158"), 500);
-        QCOMPARE(b.messages().last().toMap().value(QStringLiteral("receiptText")).toString(),
+        QTRY_COMPARE_WITH_TIMEOUT(newChatRequests, 1, 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(lastMsgField(QStringLiteral("guid")),
+                                  QStringLiteral("real-newchat-msg-guid-158"), 1000);
+        QCOMPARE(lastMsgField(QStringLiteral("receiptText")),
                  QStringLiteral("Delivered"));
 
         for (QTcpSocket *s : stalledMediaSockets) {

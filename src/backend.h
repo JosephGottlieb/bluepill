@@ -891,6 +891,7 @@ private:
     QHash<QString, qint64> m_readWatermarks;
     QHash<QString, qint64> m_unreadOverrides;
     QHash<QString, qint64> m_localReadMutationTimeMs;
+    QHash<QString, qint64> m_recentlySentMessageAtMs;
     int m_pollTickCount = 0;
     QSet<QString> m_downloadingAttachments;
     QSet<QString> m_attemptedAttachments;
