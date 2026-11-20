@@ -9,6 +9,16 @@
 #include <QTextStream>
 
 namespace {
+QString effectiveThemeHomePath() {
+#if defined(Q_OS_WIN) && defined(IMSG_UNIT_TEST)
+    const QString homeOverride = qEnvironmentVariable("HOME").trimmed();
+    if (!homeOverride.isEmpty()) {
+        return QDir::fromNativeSeparators(homeOverride);
+    }
+#endif
+    return QDir::homePath();
+}
+
 QString extractTomlMode(const QString &tomlContent) {
     QRegularExpression re(QStringLiteral(R"(^\s*mode\s*=\s*\"([^\"]+)\")"),
                           QRegularExpression::MultilineOption);
@@ -91,7 +101,7 @@ bool Theme::detectSystemIsLight() const {
         }
     }
 #endif
-    const QString home = QDir::homePath();
+    const QString home = effectiveThemeHomePath();
     const QStringList candidates = {
         home + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml"),
         home + QStringLiteral("/.config/omarchy/current/theme/colors.toml")
@@ -186,7 +196,7 @@ void Theme::applyDefaultLightPalette() {
 }
 
 void Theme::setupWatcher() {
-    const QString home = QDir::homePath();
+    const QString home = effectiveThemeHomePath();
     const QStringList paths = {
         home + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml"),
         home + QStringLiteral("/.local/state/omarchy/current/theme.generation"),
@@ -217,7 +227,7 @@ void Theme::reload() {
         applyDefaultDarkPalette();
     }
 
-    const QString home = QDir::homePath();
+    const QString home = effectiveThemeHomePath();
     const QStringList candidates = {
         home + QStringLiteral("/.local/state/omarchy/current/theme/colors.toml"),
         home + QStringLiteral("/.config/omarchy/current/theme/colors.toml")

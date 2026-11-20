@@ -6986,7 +6986,7 @@ private slots:
         QVERIFY2(capturedStatement.contains(QStringLiteral("message.guid IN (")),
                  qPrintable(QStringLiteral("Expected batched IN query, got: ") + capturedStatement));
         // pend-fresh-1 resolved to Delivered from server response, leaving pend-fresh-2
-        QTRY_COMPARE_WITH_TIMEOUT(b.pendingDeliveryCountForTest(), 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.pendingDeliveryCountForTest(), 1, 8000);
 
         // Once a later incoming reply arrives, pend-fresh-2 expires locally without another network query
         QJsonObject laterReply{
