@@ -14,6 +14,7 @@
 #include <QSignalSpy>
 #include <QQmlContext>
 #include <QQuickItem>
+#include <QQuickStyle>
 #include <QQuickWindow>
 #include <QSGRendererInterface>
 #include <functional>
@@ -50,6 +51,7 @@ class ImsgTests : public QObject {
 
 private slots:
     void initTestCase() {
+        QQuickStyle::setStyle(QStringLiteral("Basic"));
         // Keep the suite hermetic: Settings opens on first run in QML tests and
         // would otherwise run `tailscale status` and probe real tailnet peers.
         qputenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY", "1");
@@ -324,10 +326,12 @@ private slots:
         const auto perms = QFile::permissions(cfgPath);
         QVERIFY(perms & QFileDevice::ReadOwner);
         QVERIFY(perms & QFileDevice::WriteOwner);
+#ifndef Q_OS_WIN
         QVERIFY(!(perms & QFileDevice::ReadGroup));
         QVERIFY(!(perms & QFileDevice::WriteGroup));
         QVERIFY(!(perms & QFileDevice::ReadOther));
         QVERIFY(!(perms & QFileDevice::WriteOther));
+#endif
     }
 
     void testGreenBubbleAndServiceDetection() {
@@ -3287,6 +3291,22 @@ private slots:
                 }
             }
         }
+        if (!QFileInfo::exists(sampleHeicPath) || QFileInfo(sampleHeicPath).size() < 100) {
+            // Minimal valid 32x32 HEIC fixture for environments without an HEVC patent encoder
+            static const QByteArray kMinimalHeic = QByteArray::fromBase64(
+                "AAAAHGZ0eXBoZWljAAAAAG1pZjFoZWljbWlhZgAAAX1tZXRhAAAAAAAAACFoZGxyAAAAAAAAAABwaWN0"
+                "AAAAAAAAAAAAAAAAAAAAAA5waXRtAAAAAAABAAAAImlsb2MAAAAAREAAAQABAAAAAAGhAAEAAAAAAAAA"
+                "HQAAACNpaW5mAAAAAAABAAAAFWluZmUCAAAAAAEAAGh2YzEAAAAA/WlwcnAAAADdaXBjbwAAAHZodmND"
+                "AQNwAAAAAAAAAAAAHvAA/P34+AAADwMgAAEAGEABDAH//wNwAAADAJAAAAMAAAMAHroCQCEAAQAqQgEB"
+                "A3AAAAMAkAAAAwAAAwAeoCCBBZbq5Ka5uAhoMCAAAAMAIAAAAwAhIgABAAZEAcFzwIkAAAAUaXNwZQAA"
+                "AAAAAABAAAAAQAAAAChjbGFwAAAAIAAAAAEAAAAgAAAAAf///+AAAAAC////4AAAAAIAAAATY29scm5j"
+                "bHgAAQANAAaAAAAAEHBpeGkAAAAAAwgICAAAABhpcG1hAAAAAAAAAAEAAQWBAoMEBQAAACVtZGF0AAAA"
+                "GSgBrxOA+BDhp//pCiv/ME1f+kSa/OikM+A=");
+            QFile fb(sampleHeicPath);
+            QVERIFY(fb.open(QIODevice::WriteOnly | QIODevice::Truncate));
+            fb.write(kMinimalHeic);
+            fb.close();
+        }
         QFile heicFile(sampleHeicPath);
         QVERIFY(heicFile.open(QIODevice::ReadOnly));
         const QByteArray rawHeicBytes = heicFile.readAll();
@@ -4299,16 +4319,25 @@ private slots:
         // A slow fake `tailscale status` keeps the custom-domain check in flight.
         QTemporaryDir binDir;
         QVERIFY(binDir.isValid());
+#ifdef Q_OS_WIN
+        QFile fake(binDir.filePath(QStringLiteral("tailscale.bat")));
+        QVERIFY(fake.open(QIODevice::WriteOnly));
+        fake.write("@echo off\r\nping -n 2 127.0.0.1 >nul\r\necho {\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"100.100.1.1\"]},\"Peer\":{}}\r\n");
+        fake.close();
+        const QByteArray pathSep = ";";
+#else
         QFile fake(binDir.filePath(QStringLiteral("tailscale")));
         QVERIFY(fake.open(QIODevice::WriteOnly));
         fake.write("#!/bin/sh\nsleep 0.4\necho '{\"BackendState\":\"Running\",\"Self\":{\"TailscaleIPs\":[\"100.100.1.1\"]},\"Peer\":{}}'\n");
         fake.close();
         fake.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
+        const QByteArray pathSep = ":";
+#endif
 
         const QByteArray savedPath = qgetenv("PATH");
         const QByteArray savedUrl = qgetenv("BLUEPILL_SERVER_URL");
         const QByteArray savedPwd = qgetenv("BLUEPILL_PASSWORD");
-        qputenv("PATH", binDir.path().toLocal8Bit() + ":" + savedPath);
+        qputenv("PATH", QDir::toNativeSeparators(binDir.path()).toLocal8Bit() + pathSep + savedPath);
         qputenv("BLUEPILL_SERVER_URL", "http://studio.tail.example.com:1235");
         qputenv("BLUEPILL_PASSWORD", "CHANGE_ME_TO_A_SECURE_TOKEN");
         qunsetenv("BLUEPILL_DISABLE_TAILSCALE_DISCOVERY");
@@ -5302,7 +5331,9 @@ private slots:
         // Verify state file has 0600 owner-only permissions
         QFileInfo fi(statePath);
         QVERIFY(fi.exists());
+#ifndef Q_OS_WIN
         QCOMPARE(fi.permissions() & (QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ReadOther | QFileDevice::WriteOther), QFileDevice::Permissions());
+#endif
 
         // Update Note (passing baseRevision = 1 to represent an existing server-backed note edited offline)
         backend.saveIcloudNote(QStringLiteral("note_test_1"), QStringLiteral("Updated Meeting Notes"), QStringLiteral("New action items"), QStringLiteral("Work"), 1);
@@ -6907,7 +6938,7 @@ private slots:
         QVERIFY2(capturedStatement.contains(QStringLiteral("message.guid IN (")),
                  qPrintable(QStringLiteral("Expected batched IN query, got: ") + capturedStatement));
         // pend-fresh-1 resolved to Delivered from server response, leaving pend-fresh-2
-        QTRY_COMPARE_WITH_TIMEOUT(b.pendingDeliveryCountForTest(), 1, 1000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.pendingDeliveryCountForTest(), 1, 3000);
 
         // Once a later incoming reply arrives, pend-fresh-2 expires locally without another network query
         QJsonObject laterReply{

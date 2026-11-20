@@ -151,6 +151,16 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <memory>
 #include <utility>
 
+static QString effectiveHomePath() {
+#if defined(Q_OS_WIN) && defined(IMSG_UNIT_TEST)
+    const QString homeOverride = qEnvironmentVariable("HOME").trimmed();
+    if (!homeOverride.isEmpty()) {
+        return QDir::fromNativeSeparators(homeOverride);
+    }
+#endif
+    return QDir::homePath();
+}
+
 #ifdef Q_OS_WIN
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -336,11 +346,11 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
 #ifdef Q_OS_WIN
         QString appData = qEnvironmentVariable("APPDATA").trimmed();
         if (appData.isEmpty()) {
-            appData = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+            appData = effectiveHomePath() + QStringLiteral("/AppData/Roaming");
         }
         m_stateFilePath = QDir::cleanPath(appData + QStringLiteral("/bluepill/state.json"));
 #else
-        m_stateFilePath = QDir::homePath() + QStringLiteral("/.config/imsg/state.json");
+        m_stateFilePath = effectiveHomePath() + QStringLiteral("/.config/imsg/state.json");
 #endif
         loadAppState();
         loadDeletedMessagesFile();
@@ -359,9 +369,9 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     applyEnvBool("BLUEPILL_ENABLE_PHOTOS", m_icloudPhotosEnabled);
     loadCredentials();
     refreshAudioDevices();
-    loadContactsFromFile(QDir::homePath() + QStringLiteral("/.config/imsg/contacts.json"));
-    loadContactsFromFile(QDir::homePath() + QStringLiteral("/.cache/bluebubbles/contacts.json"));
-    loadContactsFromFile(QDir::homePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contacts.json"));
+    loadContactsFromFile(effectiveHomePath() + QStringLiteral("/.config/imsg/contacts.json"));
+    loadContactsFromFile(effectiveHomePath() + QStringLiteral("/.cache/bluebubbles/contacts.json"));
+    loadContactsFromFile(effectiveHomePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contacts.json"));
     // Pre-populate attachment paths from existing ~/.cache/imsg/attachments BEFORE loading messages cache
     indexCachedAttachmentsOnDisk();
 
@@ -444,8 +454,8 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
     });
 
 
-    const QString omarchyNotifPath = QDir::homePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
-    const QString omarchyDir = QDir::homePath() + QStringLiteral("/.local/state/omarchy");
+    const QString omarchyNotifPath = effectiveHomePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
+    const QString omarchyDir = effectiveHomePath() + QStringLiteral("/.local/state/omarchy");
     if (QFile::exists(omarchyNotifPath)) {
         m_omarchyWatcher.addPath(omarchyNotifPath);
     } else if (QDir(omarchyDir).exists()) {
@@ -462,7 +472,7 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         onOmarchyChanged();
     });
     connect(&m_omarchyWatcher, &QFileSystemWatcher::directoryChanged, this, [this, onOmarchyChanged](const QString &) {
-        const QString notifFile = QDir::homePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
+        const QString notifFile = effectiveHomePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
         if (QFile::exists(notifFile) && !m_omarchyWatcher.files().contains(notifFile)) {
             m_omarchyWatcher.addPath(notifFile);
         }
@@ -919,7 +929,7 @@ QString Backend::deletedMessagesFilePath() const {
         const QFileInfo fi(m_stateFilePath);
         return fi.absoluteDir().filePath(QStringLiteral("deleted_messages.json"));
     }
-    return QDir::homePath() + QStringLiteral("/.config/imsg/deleted_messages.json");
+    return effectiveHomePath() + QStringLiteral("/.config/imsg/deleted_messages.json");
 }
 
 void Backend::loadDeletedMessagesFile() {
@@ -987,7 +997,7 @@ QString Backend::messagesCacheFilePath() const {
 }
 
 void Backend::indexCachedAttachmentsOnDisk() {
-    const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+    const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
     QDir attDir(cacheDir);
     if (!attDir.exists()) return;
 
@@ -1559,7 +1569,7 @@ void Backend::fetchUnresolvedPinnedChats() {
 }
 
 bool Backend::omarchyDnd() const {
-    const QString path = QDir::homePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
+    const QString path = effectiveHomePath() + QStringLiteral("/.local/state/omarchy/notifications.json");
     QFile file(path);
     if (!file.open(QIODevice::ReadOnly)) {
         return false;
@@ -1597,11 +1607,11 @@ QString Backend::defaultBluepillConfigPath() {
 #ifdef Q_OS_WIN
     QString appData = qEnvironmentVariable("APPDATA").trimmed();
     if (appData.isEmpty()) {
-        appData = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+        appData = effectiveHomePath() + QStringLiteral("/AppData/Roaming");
     }
     return QDir::cleanPath(appData + QStringLiteral("/bluepill/config.json"));
 #else
-    return QDir::homePath() + QStringLiteral("/.config/bluepill/config.json");
+    return effectiveHomePath() + QStringLiteral("/.config/bluepill/config.json");
 #endif
 }
 
@@ -1621,11 +1631,11 @@ QString Backend::configFilePath() const {
 #ifdef Q_OS_WIN
     QString appData = qEnvironmentVariable("APPDATA").trimmed();
     if (appData.isEmpty()) {
-        appData = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+        appData = effectiveHomePath() + QStringLiteral("/AppData/Roaming");
     }
     const QString legacyCfg = QDir::cleanPath(appData + QStringLiteral("/imsg/config.json"));
 #else
-    const QString home = QDir::homePath();
+    const QString home = effectiveHomePath();
     const QString legacyCfg = home + QStringLiteral("/.config/imsg/config.json");
 #endif
     if (!QFileInfo::exists(bpCfg) && QFileInfo::exists(legacyCfg)) {
@@ -2287,7 +2297,7 @@ void Backend::loadCredentials() {
         m_password = qEnvironmentVariable("BLUEBUBBLES_PASSWORD").trimmed();
     }
 
-    const QString home = QDir::homePath();
+    const QString home = effectiveHomePath();
     const QString cfgPath = configFilePath();
 
     {
@@ -2433,7 +2443,7 @@ void Backend::parseContactsJson(const QByteArray &jsonBytes) {
         arr = doc.object().value(QStringLiteral("data")).toArray();
     }
 
-    const QString avatarDir = QDir::homePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contact_avatars");
+    const QString avatarDir = effectiveHomePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contact_avatars");
 
     for (const QJsonValue &v : arr) {
         const QJsonObject c = v.toObject();
@@ -2519,7 +2529,7 @@ QString Backend::avatarFetchKey(const QString &apiPath) const {
 }
 
 QString Backend::avatarCacheFile(const QString &apiPath) const {
-    return QDir::homePath() + QStringLiteral("/.cache/imsg/avatars/") +
+    return effectiveHomePath() + QStringLiteral("/.cache/imsg/avatars/") +
            QString::fromLatin1(QCryptographicHash::hash(avatarFetchKey(apiPath).toUtf8(), QCryptographicHash::Sha1).toHex()) +
            QStringLiteral(".img");
 }
@@ -3664,7 +3674,7 @@ void Backend::fetchContactsRemote() {
         m_lastContactsFetchMs = QDateTime::currentMSecsSinceEpoch();
 
         // Cache contacts with strict 0600 permissions
-        const QString configPath = QDir::homePath() + QStringLiteral("/.config/imsg/contacts.json");
+        const QString configPath = effectiveHomePath() + QStringLiteral("/.config/imsg/contacts.json");
         QDir().mkpath(QFileInfo(configPath).absolutePath());
         QFile f(configPath);
         if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
@@ -6387,7 +6397,7 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
 
     // Persist to local config cache ~/.config/imsg/contacts.json (only in live mode)
     if (!m_demoMode) {
-        const QString cfgPath = QDir::homePath() + QStringLiteral("/.config/imsg/contacts.json");
+        const QString cfgPath = effectiveHomePath() + QStringLiteral("/.config/imsg/contacts.json");
         QJsonArray existingContacts;
         QFile rf(cfgPath);
         if (rf.open(QIODevice::ReadOnly)) {
@@ -8156,7 +8166,7 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
         return;
     }
 
-    const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+    const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
     QDir().mkpath(cacheDir);
     QString safeName = transferName;
     safeName.replace(QRegularExpression(QStringLiteral(R"([/\\:])")), QStringLiteral("_"));
@@ -8390,7 +8400,7 @@ bool Backend::isDecodableImageFile(const QString &path) {
 void Backend::fetchLinkPreview(const QString &msgGuid, const QString &url) {
     if (url.isEmpty()) return;
 
-    const QString previewDir = QDir::homePath() + QStringLiteral("/.cache/imsg/previews");
+    const QString previewDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/previews");
     QDir().mkpath(previewDir);
 
     const QString urlHash = QString::fromUtf8(QCryptographicHash::hash(url.toUtf8(), QCryptographicHash::Sha1).toHex());
@@ -10303,9 +10313,13 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
     req.setPriority(QNetworkRequest::HighPriority);
     req.setTransferTimeout(45000);
     const QString trimmedCaption = caption.trimmed();
+    QPointer<QFile> uploadFile(file);
     QNetworkReply *reply = m_sendNam.post(req, multiPart);
     multiPart->setParent(reply);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, tempGuid, nowMs, absLocalPath, mimeType, durationSeconds, waveformBars, trimmedCaption, isAud, ownedVoiceRecording]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, uploadFile, canonicalGuid, tempGuid, nowMs, absLocalPath, mimeType, durationSeconds, waveformBars, trimmedCaption, isAud, ownedVoiceRecording]() {
+        if (uploadFile && uploadFile->isOpen()) {
+            uploadFile->close();
+        }
         reply->deleteLater();
         if (m_activeSendCount > 0) {
             --m_activeSendCount;
@@ -10523,7 +10537,7 @@ void Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
                 if (!ag.isEmpty() && QFileInfo::exists(absLocalPath)) {
                     QString cachePathForGuid = absLocalPath;
                     if (isAud && !absLocalPath.contains(QStringLiteral("/.cache/imsg/attachments/"))) {
-                        const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+                        const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
                         QDir().mkpath(cacheDir);
                         QString safeName = QFileInfo(absLocalPath).fileName();
                         safeName.replace(QRegularExpression(QStringLiteral("[^a-zA-Z0-9._-]")), QStringLiteral("_"));
@@ -11144,7 +11158,7 @@ QString Backend::ensureNotificationSoundFile(const QString &preset) {
         soundsDir += QStringLiteral("/sounds");
     }
 #else
-    const QString soundsDir = QDir::homePath() + QStringLiteral("/.cache/bluepill/sounds");
+    const QString soundsDir = effectiveHomePath() + QStringLiteral("/.cache/bluepill/sounds");
 #endif
 
     if (norm == QStringLiteral("chime")) {
@@ -11917,9 +11931,9 @@ int Backend::runCliStatus(bool asJson) {
 }
 
 int Backend::runCliRecent(int limit, bool asJson) {
-    loadContactsFromFile(QDir::homePath() + QStringLiteral("/.config/imsg/contacts.json"));
-    loadContactsFromFile(QDir::homePath() + QStringLiteral("/.cache/bluebubbles/contacts.json"));
-    loadContactsFromFile(QDir::homePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contacts.json"));
+    loadContactsFromFile(effectiveHomePath() + QStringLiteral("/.config/imsg/contacts.json"));
+    loadContactsFromFile(effectiveHomePath() + QStringLiteral("/.cache/bluebubbles/contacts.json"));
+    loadContactsFromFile(effectiveHomePath() + QStringLiteral("/.local/share/app.bluebubbles.BlueBubbles/contacts.json"));
 
     const qint64 afterMs = QDateTime::currentMSecsSinceEpoch() - (14LL * 86400LL * 1000LL);
     QJsonObject body;
@@ -12969,7 +12983,7 @@ void Backend::toggleAudioPlayback(const QString &attachmentGuid, const QString &
         else if (ctype.contains(QStringLiteral("mpeg")) || effectiveSourceUrl.endsWith(QStringLiteral(".mp3"), Qt::CaseInsensitive)) ext = QStringLiteral(".mp3");
         else if (ctype.contains(QStringLiteral("ogg")) || ctype.contains(QStringLiteral("opus"))) ext = QStringLiteral(".ogg");
 
-        const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+        const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
         QDir().mkpath(cacheDir);
         const QString destPath = cacheDir + QLatin1Char('/') + attachmentGuid.left(16) + QStringLiteral("_voice") + ext;
         QFile f(destPath);
@@ -15438,7 +15452,7 @@ void Backend::shareIcloudPhotoToChat(const QString &chatGuid, const QString &att
             emit toastMessage(QStringLiteral("Downloaded iCloud photo is empty"));
             return;
         }
-        const QString cacheDir = QDir::homePath() + QStringLiteral("/.cache/imsg/attachments");
+        const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
         QDir().mkpath(cacheDir);
         QString safeName = QFileInfo(fileName.isEmpty() ? QStringLiteral("photo.jpg") : fileName).fileName();
         if (safeName.isEmpty()) safeName = QStringLiteral("photo.jpg");

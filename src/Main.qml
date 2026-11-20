@@ -8667,8 +8667,16 @@ ApplicationWindow {
         objectName: "contactInfoModal"
         visible: root.showContactInfo
         // Holds focus while open so Return/typing never reach the composer underneath
-        Keys.onEscapePressed: root.closeContactInfo()
-        Keys.onPressed: (event) => { event.accepted = true }
+        Keys.onPressed: (event) => {
+            if (event.key === Qt.Key_Escape) {
+                if (root.showPhotoViewer) root.closePhotoViewer()
+                else if (root.showContactModal) root.showContactModal = false
+                else if (root.showContactInfo) root.closeContactInfo()
+                event.accepted = true
+                return
+            }
+            event.accepted = true
+        }
         // Over the open conversation only (not the sidebar)
         readonly property point paneOrigin: {
             void (conversationPane.x + conversationPane.y + conversationPane.width + conversationPane.height + root.width + root.height)
