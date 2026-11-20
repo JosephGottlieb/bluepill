@@ -10,11 +10,13 @@ permissions:
   contents: write
 
 jobs:
-  build-and-release:
-    name: Build Packages & Publish Release
+  build-arch-and-bottle:
+    name: Arch Linux Package & Homebrew Bottle
     runs-on: ubuntu-latest
     container:
       image: archlinux:latest
+    outputs:
+      version: ${{ steps.vars.outputs.version }}
     steps:
       - name: Install Arch Linux Dependencies
         run: |
@@ -82,11 +84,160 @@ jobs:
           cp "${GITHUB_WORKSPACE}/bluepill-${VER}.all.bottle.tar.gz" "${GITHUB_WORKSPACE}/bluepill--${VER}.all.bottle.tar.gz"
           cd "${GITHUB_WORKSPACE}"
 
-      - name: Generate SHA256 Checksums
+      - name: Stage Arch & Bottle Artifacts
+        run: |
+          mkdir -p dist-arch
+          cp pkgbuild/*.pkg.tar.zst dist-arch/
+          cp bluepill-*.all.bottle.tar.gz dist-arch/
+
+      - name: Upload Arch & Bottle Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-arch-bottle
+          path: dist-arch/*
+
+  build-deb:
+    name: Debian/Ubuntu (.deb) Package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Ubuntu 24.04 Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build dpkg-dev qt6-base-dev qt6-declarative-dev qt6-svg-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-window qt6-image-formats-plugins libqt6svg6 libnotify-bin imagemagick libheif-examples libheif-plugin-libde265 libheif-plugin-x265
+
+      - name: Checkout Tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build & Package (.deb)
+        run: ./packaging/build-deb.sh dist-deb
+
+      - name: Upload .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-deb
+          path: dist-deb/*.deb
+
+  build-rpm:
+    name: Fedora (.rpm) Package
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - name: Install Fedora 41 Dependencies
+        run: |
+          dnf install -y -q rpm-build cmake gcc-c++ ninja-build qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel libnotify ImageMagick ImageMagick-heic libheif-tools
+
+      - name: Checkout Tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Build & Package (.rpm)
+        run: ./packaging/build-rpm.sh dist-rpm
+
+      - name: Upload .rpm Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-rpm
+          path: dist-rpm/*.rpm
+
+  build-windows:
+    name: Windows Installer (.exe)
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.1'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtimageformats'
+
+      - name: Configure, Build & Test (CMake + MSVC)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if (-not (Get-Command magick -ErrorAction SilentlyContinue)) {
+              choco install imagemagick -y --no-progress
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          }
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --parallel
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Deploy Qt6 Runtime & Build Inno Setup Installer
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF_NAME -and $env:GITHUB_REF_NAME.StartsWith("v")) {
+              $ver = $env:GITHUB_REF_NAME.Substring(1)
+          } else {
+              $ver = (Select-String -Path CMakeLists.txt -Pattern 'project\(bluepill VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          }
+          New-Item -ItemType Directory -Force -Path build-win-dist | Out-Null
+          Copy-Item build\Release\bluepill.exe build-win-dist\bluepill.exe
+          $windeploy = Join-Path $env:Qt6_DIR "bin\windeployqt6.exe"
+          if (-not (Test-Path $windeploy)) {
+              $windeploy = Join-Path $env:Qt6_DIR "bin\windeployqt.exe"
+          }
+          & $windeploy --release --qmldir src --no-translations build-win-dist\bluepill.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $iscc) {
+              $defaultIscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+              if (Test-Path $defaultIscc) {
+                  $iscc = $defaultIscc
+              } else {
+                  choco install innosetup -y --no-progress
+                  $iscc = $defaultIscc
+              }
+          }
+          & $iscc "/DAppVersion=$ver" "/DDistDir=..\build-win-dist" installer\bluepill.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Upload Windows Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-windows
+          path: dist/BluePill-Setup-*.exe
+
+  publish-release:
+    name: Publish GitHub Release & Sync Package Managers
+    needs: [build-arch-and-bottle, build-deb, build-rpm, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Tag
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Download All Built Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist-raw
+
+      - name: Flatten & Generate SHA256 Checksums
         run: |
           mkdir -p dist
-          cp pkgbuild/*.pkg.tar.zst dist/
-          cp bluepill-*.all.bottle.tar.gz dist/
+          find dist-raw -type f -exec cp -v {} dist/ \;
           cd dist
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt
@@ -106,7 +257,7 @@ jobs:
             echo "::notice ::HOMEBREW_TAP_TOKEN not configured. Skipping automated Homebrew Tap commit."
             exit 0
           fi
-          VER="${{ steps.vars.outputs.version }}"
+          VER="${{ needs.build-arch-and-bottle.outputs.version }}"
           SRC_URL="https://github.com/nertwork/bluepill/archive/refs/tags/v${VER}.tar.gz"
           SRC_TMP="/tmp/bluepill-v${VER}.tar.gz"
           curl -fsSL "${SRC_URL}" -o "${SRC_TMP}"
@@ -155,7 +306,7 @@ jobs:
             exit 0
           fi
           echo "Automated AUR push enabled via SSH key."
-          VER="${{ steps.vars.outputs.version }}"
+          VER="${{ needs.build-arch-and-bottle.outputs.version }}"
           SRC_URL="https://github.com/nertwork/bluepill/archive/refs/tags/v${VER}.tar.gz"
           SRC_TMP="/tmp/bluepill-aur-v${VER}.tar.gz"
           curl -fsSL "${SRC_URL}" -o "${SRC_TMP}"
@@ -182,6 +333,9 @@ jobs:
           txt = re.sub(r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')", txt, count=1, flags=re.M)
           p.write_text(txt, encoding="utf-8")
           PY
+          mkdir -p /tmp/aur-build
+          chmod 777 /tmp/aur-build
+          useradd -m builder || true
           chown -R builder:builder /tmp/aur-bluepill
           su builder -c "cd /tmp/aur-bluepill && makepkg --printsrcinfo > .SRCINFO"
           chown -R root:root /tmp/aur-bluepill

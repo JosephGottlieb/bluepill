@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 network testlib
+QT += core gui widgets qml quick quickcontrols2 network testlib
 CONFIG += c++20 testcase
 
 TARGET = imsg_tests

@@ -7,11 +7,10 @@ set(CMAKE_AUTOMOC ON)
 set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Core Gui Qml Quick QuickControls2 Network Svg Concurrent)
+find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Qml Quick QuickControls2 Network Svg Concurrent)
 find_package(Qt6 OPTIONAL_COMPONENTS Test)
 
-add_executable(bluepill
-    src/main.cpp
+set(BLUEPILL_COMMON_SOURCES
     src/theme.h
     src/theme.cpp
     src/translator.h
@@ -21,9 +20,23 @@ add_executable(bluepill
     src/resources.qrc
 )
 
+if (WIN32)
+    add_executable(bluepill WIN32
+        src/main.cpp
+        ${BLUEPILL_COMMON_SOURCES}
+        resources/bluepill.rc
+    )
+else()
+    add_executable(bluepill
+        src/main.cpp
+        ${BLUEPILL_COMMON_SOURCES}
+    )
+endif()
+
 target_link_libraries(bluepill PRIVATE
     Qt6::Core
     Qt6::Gui
+    Qt6::Widgets
     Qt6::Qml
     Qt6::Quick
     Qt6::QuickControls2
@@ -32,21 +45,22 @@ target_link_libraries(bluepill PRIVATE
     Qt6::Concurrent
 )
 
+if (WIN32)
+    target_link_libraries(bluepill PRIVATE Advapi32 Crypt32 Winmm)
+endif()
+
+install(TARGETS bluepill RUNTIME DESTINATION bin)
+
 if (TARGET Qt6::Test)
     enable_testing()
     add_executable(imsg_tests
         tests/imsg_tests.cpp
-        src/theme.h
-        src/theme.cpp
-        src/translator.h
-        src/translator.cpp
-        src/backend.h
-        src/backend.cpp
-        src/resources.qrc
+        ${BLUEPILL_COMMON_SOURCES}
     )
     target_link_libraries(imsg_tests PRIVATE
         Qt6::Core
         Qt6::Gui
+        Qt6::Widgets
         Qt6::Qml
         Qt6::Quick
         Qt6::QuickControls2
@@ -55,6 +69,9 @@ if (TARGET Qt6::Test)
         Qt6::Concurrent
         Qt6::Test
     )
+    if (WIN32)
+        target_link_libraries(imsg_tests PRIVATE Advapi32 Crypt32 Winmm)
+    endif()
     target_include_directories(imsg_tests PRIVATE src)
     target_compile_definitions(imsg_tests PRIVATE IMSG_UNIT_TEST=1)
     add_test(NAME imsg_tests COMMAND imsg_tests)

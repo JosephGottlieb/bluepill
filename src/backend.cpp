@@ -3,6 +3,7 @@
 #include <QKeyEvent>
 #include "backend.h"
 
+#include <QApplication>
 #include <QClipboard>
 #include <QCoreApplication>
 #include <QDateTime>
@@ -150,6 +151,107 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <memory>
 #include <utility>
 
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <wincred.h>
+#include <mmsystem.h>
+
+static QString readWindowsCredential(const QString &targetName) {
+    if (targetName.isEmpty()) return QString();
+    PCREDENTIALW pcred = nullptr;
+    if (!CredReadW(reinterpret_cast<LPCWSTR>(targetName.utf16()), CRED_TYPE_GENERIC, 0, &pcred) || !pcred) {
+        return QString();
+    }
+    QString secret;
+    if (pcred->CredentialBlob && pcred->CredentialBlobSize > 0) {
+        const auto *bytes = reinterpret_cast<const char *>(pcred->CredentialBlob);
+        const int sz = static_cast<int>(pcred->CredentialBlobSize);
+        if (sz >= 2 && (sz % 2) == 0 && bytes[1] == '\0') {
+            secret = QString::fromUtf16(reinterpret_cast<const char16_t *>(bytes), sz / 2).trimmed();
+        } else {
+            secret = QString::fromUtf8(bytes, sz).trimmed();
+        }
+    }
+    CredFree(pcred);
+    return secret;
+}
+
+static bool writeWindowsCredential(const QString &targetName, const QString &secret) {
+    if (targetName.isEmpty() || secret.isEmpty()) return false;
+    const QByteArray utf8 = secret.toUtf8();
+    QString user = QStringLiteral("bluepill");
+    CREDENTIALW cred = {};
+    cred.Type = CRED_TYPE_GENERIC;
+    cred.TargetName = const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(targetName.utf16()));
+    cred.CredentialBlobSize = static_cast<DWORD>(utf8.size());
+    cred.CredentialBlob = reinterpret_cast<LPBYTE>(const_cast<char *>(utf8.data()));
+    cred.Persist = CRED_PERSIST_LOCAL_MACHINE;
+    cred.UserName = const_cast<LPWSTR>(reinterpret_cast<LPCWSTR>(user.utf16()));
+    return CredWriteW(&cred, 0) == TRUE;
+}
+#endif
+
+static void startImageConvertProcess(QObject *parent, const QString &srcPath, const QString &outTarget,
+                                     std::function<void()> onFinished) {
+#ifdef Q_OS_WIN
+    const QString magick = Backend::findBundledOrSystemExecutable(QStringLiteral("magick"));
+    const QString ffmpeg = magick.isEmpty() ? Backend::findBundledOrSystemExecutable(QStringLiteral("ffmpeg")) : QString();
+    QString bin;
+    QStringList args;
+    if (!magick.isEmpty()) {
+        bin = magick;
+        args << (srcPath + QStringLiteral("[0]")) << QStringLiteral("-auto-orient")
+             << QStringLiteral("-quality") << QStringLiteral("90") << outTarget;
+    } else if (!ffmpeg.isEmpty()) {
+        bin = ffmpeg;
+        args << QStringLiteral("-y") << QStringLiteral("-loglevel") << QStringLiteral("error")
+             << QStringLiteral("-i") << srcPath
+             << QStringLiteral("-frames:v") << QStringLiteral("1")
+             << QStringLiteral("-update") << QStringLiteral("1")
+             << QStringLiteral("-f") << QStringLiteral("image2")
+             << QStringLiteral("-c:v") << QStringLiteral("mjpeg")
+             << outTarget;
+    } else {
+        QTimer::singleShot(0, parent, std::move(onFinished));
+        return;
+    }
+    QProcess *proc = new QProcess(parent);
+    QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), parent,
+                     [proc, cb = std::move(onFinished)](int, QProcess::ExitStatus) mutable {
+                         proc->deleteLater();
+                         cb();
+                     });
+    QObject::connect(proc, &QProcess::errorOccurred, parent,
+                     [proc](QProcess::ProcessError) {
+                         // finished() won't fire on FailedToStart
+                         if (proc->state() == QProcess::NotRunning) {
+                             proc->deleteLater();
+                         }
+                     });
+    proc->start(bin, args);
+#else
+    QProcess *proc = new QProcess(parent);
+    QObject::connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), parent,
+                     [proc, cb = std::move(onFinished)](int, QProcess::ExitStatus) mutable {
+                         proc->deleteLater();
+                         cb();
+                     });
+    proc->start(QStringLiteral("sh"), QStringList{
+        QStringLiteral("-c"),
+        QStringLiteral("umask 077; heif-convert -q 90 \"$1\" \"$2\" >/dev/null 2>&1 || magick \"$1[0]\" -auto-orient -quality 90 \"$2\" >/dev/null 2>&1 || ffmpeg -y -loglevel error -i \"$1\" -frames:v 1 -update 1 -f image2 -c:v mjpeg \"$2\" >/dev/null 2>&1"),
+        QStringLiteral("--"),
+        srcPath,
+        outTarget
+    });
+#endif
+}
+
 static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObject &obj,
                                       bool simulatePrePermFail = false, bool simulatePostPermFail = false) {
     if (targetPath.isEmpty()) return false;
@@ -165,14 +267,23 @@ static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObje
     const QFileDevice::Permissions groupOtherMask =
         QFileDevice::ReadGroup | QFileDevice::WriteGroup | QFileDevice::ExeGroup |
         QFileDevice::ReadOther | QFileDevice::WriteOther | QFileDevice::ExeOther;
+#ifndef Q_OS_WIN
     if (simulatePrePermFail || !outFile.setPermissions(ownerRw)) {
         outFile.cancelWriting();
         return false;
     }
+#else
+    Q_UNUSED(ownerRw);
+    if (simulatePrePermFail) {
+        outFile.cancelWriting();
+        return false;
+    }
+#endif
     if (outFile.write(payload) != payload.size() || !outFile.flush()) {
         outFile.cancelWriting();
         return false;
     }
+#ifndef Q_OS_WIN
     const QFileDevice::Permissions stagedPerms = outFile.permissions();
     if (simulatePostPermFail ||
         (stagedPerms & groupOtherMask) != 0 ||
@@ -181,6 +292,13 @@ static bool writeConfigAtomicallyImpl(const QString &targetPath, const QJsonObje
         outFile.cancelWriting();
         return false;
     }
+#else
+    Q_UNUSED(groupOtherMask);
+    if (simulatePostPermFail) {
+        outFile.cancelWriting();
+        return false;
+    }
+#endif
     if (!outFile.commit()) {
         return false;
     }
@@ -215,7 +333,15 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         });
     }
     if (autoStart) {
+#ifdef Q_OS_WIN
+        QString appData = qEnvironmentVariable("APPDATA").trimmed();
+        if (appData.isEmpty()) {
+            appData = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+        }
+        m_stateFilePath = QDir::cleanPath(appData + QStringLiteral("/bluepill/state.json"));
+#else
         m_stateFilePath = QDir::homePath() + QStringLiteral("/.config/imsg/state.json");
+#endif
         loadAppState();
         loadDeletedMessagesFile();
     }
@@ -1467,6 +1593,18 @@ int Backend::computeTextPartIndex(const QJsonObject &msgObj) {
     return 0;
 }
 
+QString Backend::defaultBluepillConfigPath() {
+#ifdef Q_OS_WIN
+    QString appData = qEnvironmentVariable("APPDATA").trimmed();
+    if (appData.isEmpty()) {
+        appData = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+    }
+    return QDir::cleanPath(appData + QStringLiteral("/bluepill/config.json"));
+#else
+    return QDir::homePath() + QStringLiteral("/.config/bluepill/config.json");
+#endif
+}
+
 QString Backend::configFilePath() const {
     if (!m_configFilePath.trimmed().isEmpty()) {
         return m_configFilePath.trimmed();
@@ -1479,18 +1617,32 @@ QString Backend::configFilePath() const {
     if (!envPath.isEmpty()) {
         return envPath;
     }
+    const QString bpCfg = defaultBluepillConfigPath();
+#ifdef Q_OS_WIN
+    QString appData = qEnvironmentVariable("APPDATA").trimmed();
+    if (appData.isEmpty()) {
+        appData = QDir::homePath() + QStringLiteral("/AppData/Roaming");
+    }
+    const QString legacyCfg = QDir::cleanPath(appData + QStringLiteral("/imsg/config.json"));
+#else
     const QString home = QDir::homePath();
-    const QString bpCfg = home + QStringLiteral("/.config/bluepill/config.json");
     const QString legacyCfg = home + QStringLiteral("/.config/imsg/config.json");
+#endif
     if (!QFileInfo::exists(bpCfg) && QFileInfo::exists(legacyCfg)) {
         QDir().mkpath(QFileInfo(bpCfg).absolutePath());
         QFile::copy(legacyCfg, bpCfg);
+#ifndef Q_OS_WIN
         QFile::setPermissions(bpCfg, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
     }
+#ifdef Q_OS_WIN
+    return bpCfg;
+#else
     if (QFileInfo::exists(bpCfg)) {
         return bpCfg;
     }
     return legacyCfg;
+#endif
 }
 
 void Backend::setConfigFilePath(const QString &path) {
@@ -2091,10 +2243,17 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     emit configChanged();
     emit statusChanged();
     if (m_configFilePath.trimmed().isEmpty()) {
-        const QString bpCfg = QDir::homePath() + QStringLiteral("/.config/bluepill/config.json");
+        const QString bpCfg = defaultBluepillConfigPath();
         if (cfgPath != bpCfg) {
             writeConfigAtomically(bpCfg, cfgObj);
         }
+#ifdef Q_OS_WIN
+        if (!resolvedPassword.isEmpty()) {
+            const QString host = QUrl(normPrimary).host().trimmed();
+            const QString target = QStringLiteral("bluepill:%1").arg(host.isEmpty() ? QStringLiteral("default") : host);
+            writeWindowsCredential(target, resolvedPassword);
+        }
+#endif
     }
     emit toastMessage(QStringLiteral("✓ Saved BluePill / BlueBubbles server configuration"));
 
@@ -2154,7 +2313,9 @@ void Backend::loadCredentials() {
             if (obj.contains(QStringLiteral("audioOutputDevice"))) {
                 m_selectedAudioOutputDevice = obj.value(QStringLiteral("audioOutputDevice")).toString().trimmed();
             }
+#ifndef Q_OS_WIN
             QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
         }
     }
 
@@ -2180,9 +2341,26 @@ void Backend::loadCredentials() {
         }
     }
 
-    // Try reading credentials from Linux Secret Service via secret-tool if password is still empty
+    // Try reading credentials from platform keyring if password is still empty
     if (m_configFilePath.isEmpty() && m_password.isEmpty()) {
         const QString host = QUrl(m_serverUrl).host().trimmed();
+#ifdef Q_OS_WIN
+        if (!host.isEmpty()) {
+            m_password = readWindowsCredential(QStringLiteral("bluepill:") + host);
+            if (m_password.isEmpty()) {
+                m_password = readWindowsCredential(QStringLiteral("bluebubbles:") + host);
+            }
+            if (m_password.isEmpty()) {
+                m_password = readWindowsCredential(QStringLiteral("imsg:") + host);
+            }
+        }
+        if (m_password.isEmpty()) {
+            m_password = readWindowsCredential(QStringLiteral("bluepill:default"));
+        }
+        if (m_password.isEmpty()) {
+            m_password = readWindowsCredential(QStringLiteral("imsg:default"));
+        }
+#elif defined(Q_OS_LINUX)
         auto lookupSecret = [](const QString &service, const QString &account) -> QString {
             if (account.isEmpty()) return QString();
             QProcess proc;
@@ -2203,6 +2381,9 @@ void Backend::loadCredentials() {
         if (m_password.isEmpty()) {
             m_password = lookupSecret(QStringLiteral("imsg"), QStringLiteral("default"));
         }
+#else
+        Q_UNUSED(host);
+#endif
     }
 
     m_candidateUrls.clear();
@@ -8096,28 +8277,18 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
                 }
             }
             // Asynchronous non-blocking HEIF/HEIC/HEICS/AVIF/TIFF conversion on background process
-            QProcess *proc = new QProcess(this);
-            connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                    [proc, attGuid, srcPath, outTarget, inPlaceJpg, notifyAttachmentResolved](int, QProcess::ExitStatus) {
-                        proc->deleteLater();
-                        if (QFileInfo::exists(outTarget) && QFileInfo(outTarget).size() >= 100) {
-                            if (inPlaceJpg) {
-                                QFile::remove(srcPath);
-                                QFile::rename(outTarget, srcPath);
-                                notifyAttachmentResolved(attGuid, srcPath);
-                            } else {
-                                notifyAttachmentResolved(attGuid, outTarget);
-                            }
-                        } else if (!inPlaceJpg) {
-                            notifyAttachmentResolved(attGuid, srcPath);
-                        }
-                    });
-            proc->start(QStringLiteral("sh"), QStringList{
-                QStringLiteral("-c"),
-                QStringLiteral("heif-convert -q 90 \"$1\" \"$2\" >/dev/null 2>&1 || magick \"$1[0]\" -auto-orient -quality 90 \"$2\" >/dev/null 2>&1 || ffmpeg -y -loglevel error -i \"$1\" -frames:v 1 -update 1 -f image2 -c:v mjpeg \"$2\" >/dev/null 2>&1"),
-                QStringLiteral("--"),
-                srcPath,
-                outTarget
+            startImageConvertProcess(this, srcPath, outTarget, [attGuid, srcPath, outTarget, inPlaceJpg, notifyAttachmentResolved]() {
+                if (QFileInfo::exists(outTarget) && QFileInfo(outTarget).size() >= 100) {
+                    if (inPlaceJpg) {
+                        QFile::remove(srcPath);
+                        QFile::rename(outTarget, srcPath);
+                        notifyAttachmentResolved(attGuid, srcPath);
+                    } else {
+                        notifyAttachmentResolved(attGuid, outTarget);
+                    }
+                } else if (!inPlaceJpg) {
+                    notifyAttachmentResolved(attGuid, srcPath);
+                }
             });
             return;
         }
@@ -9714,6 +9885,7 @@ void Backend::copyToClipboard(const QString &text, const QString &label) {
         }
     }
 
+#ifdef Q_OS_LINUX
     // Also pipe to wl-copy on Wayland so clipboard persists across all Wayland/XWayland surfaces
     if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
@@ -9724,6 +9896,7 @@ void Backend::copyToClipboard(const QString &text, const QString &label) {
         proc->write(text.toUtf8());
         proc->closeWriteChannel();
     }
+#endif
 
     if (label.isEmpty()) {
         emit toastMessage(QStringLiteral("✓ Copied to clipboard"));
@@ -9810,11 +9983,22 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
                 }
             }
         }
+#ifndef Q_OS_LINUX
+        else {
+            QImageReader winReader(localPath);
+            winReader.setAutoTransform(true);
+            const QImage img = winReader.read();
+            if (!img.isNull()) {
+                mime->setImageData(img);
+            }
+        }
+#endif
         cb->setMimeData(mime, QClipboard::Clipboard);
     }
 
     const uint64_t copySeq = m_clipboardCopySeq->load();
 
+#ifdef Q_OS_LINUX
     // Offload PNG encoding and Wayland wl-copy piping to background worker thread so GUI never freezes
     if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/wl-copy"))) {
@@ -9866,6 +10050,9 @@ bool Backend::copyImageToClipboard(const QString &localUrlOrPath, const QString 
             }
         });
     }
+#else
+    Q_UNUSED(copySeq);
+#endif
 
     emit toastMessage(QStringLiteral("✓ Copied image to clipboard"));
     return true;
@@ -9902,7 +10089,7 @@ QString Backend::pasteClipboardImageToTempFile() {
     // Priority 3 (0ms Fast-Path): Local file:// or absolute image path in clipboard text
     if (mime && mime->hasText()) {
         const QString txt = mime->text().trimmed();
-        if (txt.startsWith(QStringLiteral("file://")) || txt.startsWith(QStringLiteral("/"))) {
+        if (txt.startsWith(QStringLiteral("file://")) || txt.startsWith(QStringLiteral("/")) || QDir::isAbsolutePath(txt)) {
             const QString candidate = txt.startsWith(QStringLiteral("file://")) ? QUrl(txt).toLocalFile() : txt;
             if (isImageMimeOrExt(QString(), candidate) && QFileInfo::exists(candidate)) {
                 return candidate;
@@ -9918,12 +10105,15 @@ QString Backend::pasteClipboardImageToTempFile() {
             QImageWriter writer(outPath, QByteArrayLiteral("png"));
             writer.setCompression(1);
             if (writer.write(img)) {
+#ifndef Q_OS_WIN
                 QFile::setPermissions(outPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
                 return outPath;
             }
         }
     }
 
+#ifdef Q_OS_LINUX
     // Priority 5: Wayland wl-paste raw byte stream fallback (no QImage decode/re-encode)
     if (QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/wl-paste"))) {
@@ -9967,6 +10157,7 @@ QString Backend::pasteClipboardImageToTempFile() {
             }
         }
     }
+#endif
     return QString();
 }
 
@@ -10879,11 +11070,15 @@ void Backend::openUrl(const QString &url) {
     m_lastOpenedUrlTimeMs = nowMs;
 
     const bool opened = QDesktopServices::openUrl(QUrl(normalized));
+#ifdef Q_OS_LINUX
     if (!opened &&
         QGuiApplication::platformName() != QStringLiteral("offscreen") &&
         QFileInfo::exists(QStringLiteral("/usr/bin/xdg-open"))) {
         QProcess::startDetached(QStringLiteral("/usr/bin/xdg-open"), QStringList{normalized});
     }
+#else
+    Q_UNUSED(opened);
+#endif
 }
 
 void Backend::openAttachment(const QString &guid, const QString &transferName) {
@@ -10941,7 +11136,21 @@ QString Backend::ensureNotificationSoundFile(const QString &preset) {
     QString norm = preset.trimmed().toLower();
     if (norm.isEmpty()) norm = QStringLiteral("chime");
 
+#ifdef Q_OS_WIN
+    QString soundsDir = QStandardPaths::writableLocation(QStandardPaths::CacheLocation);
+    if (soundsDir.isEmpty()) {
+        soundsDir = QDir::tempPath() + QStringLiteral("/bluepill-sounds");
+    } else {
+        soundsDir += QStringLiteral("/sounds");
+    }
+#else
+    const QString soundsDir = QDir::homePath() + QStringLiteral("/.cache/bluepill/sounds");
+#endif
+
     if (norm == QStringLiteral("chime")) {
+        if (QFileInfo::exists(QStringLiteral("/usr/share/bluepill/imessage-notify.wav"))) {
+            return QStringLiteral("/usr/share/bluepill/imessage-notify.wav");
+        }
         if (QFileInfo::exists(QStringLiteral("/usr/share/imsg/imessage-notify.wav"))) {
             return QStringLiteral("/usr/share/imsg/imessage-notify.wav");
         }
@@ -10949,13 +11158,34 @@ QString Backend::ensureNotificationSoundFile(const QString &preset) {
         if (QFileInfo::exists(localPath)) {
             return localPath;
         }
+        const QString bundledWinPath = QCoreApplication::applicationDirPath() + QStringLiteral("/resources/imessage-notify.wav");
+        if (QFileInfo::exists(bundledWinPath)) {
+            return bundledWinPath;
+        }
+        if (QFileInfo::exists(QStringLiteral(":/imessage-notify.wav"))) {
+            QDir().mkpath(soundsDir);
+            const QString extractedPath = soundsDir + QStringLiteral("/imessage-notify.wav");
+            if (QFileInfo::exists(extractedPath) && QFileInfo(extractedPath).size() > 1024) {
+                return extractedPath;
+            }
+            QFile resFile(QStringLiteral(":/imessage-notify.wav"));
+            if (resFile.open(QIODevice::ReadOnly)) {
+                QFile out(extractedPath);
+                if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+                    out.write(resFile.readAll());
+                    out.close();
+                    if (QFileInfo(extractedPath).size() > 1024) {
+                        return extractedPath;
+                    }
+                }
+            }
+        }
     } else if (norm == QStringLiteral("system")) {
         if (QFileInfo::exists(QStringLiteral("/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"))) {
             return QStringLiteral("/usr/share/sounds/freedesktop/stereo/message-new-instant.oga");
         }
     }
 
-    const QString soundsDir = QDir::homePath() + QStringLiteral("/.cache/bluepill/sounds");
     QDir().mkpath(soundsDir);
     const QString wavPath = soundsDir + QStringLiteral("/notify-%1.wav").arg(norm);
     if (QFileInfo::exists(wavPath) && QFileInfo(wavPath).size() > 1024) {
@@ -11066,17 +11296,36 @@ void Backend::previewNotificationSound(const QString &preset) {
     playNotificationSound(chosen, true);
 }
 
+void Backend::showDesktopNotification(const QString &title, const QString &body) {
+    const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
+    if (isOffscreen || m_demoMode || !m_notificationBannerEnabled) {
+        return;
+    }
+#ifdef Q_OS_WIN
+    if (!qobject_cast<QApplication *>(QCoreApplication::instance())) {
+        return;
+    }
+    if (!m_trayIcon && QSystemTrayIcon::isSystemTrayAvailable()) {
+        m_trayIcon = new QSystemTrayIcon(QIcon(QStringLiteral(":/bluepill.svg")), this);
+        m_trayIcon->setToolTip(QStringLiteral("BluePill"));
+        m_trayIcon->show();
+    }
+    if (m_trayIcon) {
+        m_trayIcon->showMessage(title, body, QSystemTrayIcon::Information, 5000);
+    }
+#else
+    QProcess::startDetached(QStringLiteral("notify-send"),
+                            {QStringLiteral("-a"), QStringLiteral("BluePill"),
+                             QStringLiteral("-i"), QStringLiteral("messaging-im"),
+                             QStringLiteral("-u"), QStringLiteral("normal"),
+                             title, body});
+#endif
+}
+
 void Backend::sendTestNotification() {
     m_notificationCountForTest++;
-    const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
-    if (!isOffscreen && !m_demoMode && m_notificationBannerEnabled) {
-        QProcess::startDetached(QStringLiteral("notify-send"),
-                                {QStringLiteral("-a"), QStringLiteral("BluePill"),
-                                 QStringLiteral("-i"), QStringLiteral("messaging-im"),
-                                 QStringLiteral("-u"), QStringLiteral("normal"),
-                                 QStringLiteral("BluePill Test Notification"),
-                                 QStringLiteral("Audio preset: %1").arg(m_notificationSoundPreset)});
-    }
+    showDesktopNotification(QStringLiteral("BluePill Test Notification"),
+                            QStringLiteral("Audio preset: %1").arg(m_notificationSoundPreset));
     playNotificationSound(m_notificationSoundPreset, true);
     emit toastMessage(QStringLiteral("🔔 Sent test notification (%1)").arg(m_notificationSoundPreset));
 }
@@ -11087,14 +11336,7 @@ void Backend::notifyIncomingMessage(const QString &chatGuid, const QString &send
         return;
     }
     m_notificationCountForTest++;
-    const bool isOffscreen = (QGuiApplication::platformName() == QStringLiteral("offscreen"));
-    if (!isOffscreen && !m_demoMode && m_notificationBannerEnabled) {
-        QProcess::startDetached(QStringLiteral("notify-send"),
-                                {QStringLiteral("-a"), QStringLiteral("BluePill"),
-                                 QStringLiteral("-i"), QStringLiteral("messaging-im"),
-                                 QStringLiteral("-u"), QStringLiteral("normal"),
-                                 sender, preview});
-    }
+    showDesktopNotification(sender, preview);
     if (m_notificationSoundEnabled) {
         playNotificationSound();
     }
@@ -11115,6 +11357,10 @@ void Backend::playNotificationSound(const QString &presetOverride, bool forcePre
     }
 
     if (!soundPath.isEmpty()) {
+#ifdef Q_OS_WIN
+        const QString winPath = QDir::toNativeSeparators(soundPath);
+        PlaySoundW(reinterpret_cast<LPCWSTR>(winPath.utf16()), nullptr, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
+#else
         const QString effectiveOut = effectiveAudioOutputDevice();
         QStringList pwArgs;
         if (!effectiveOut.isEmpty()) {
@@ -11129,6 +11375,7 @@ void Backend::playNotificationSound(const QString &presetOverride, bool forcePre
             paArgs << soundPath;
             QProcess::startDetached(QStringLiteral("paplay"), paArgs);
         }
+#endif
     }
 }
 
@@ -12049,7 +12296,7 @@ QVariantList Backend::searchEmojis(const QString &query, const QString &category
     // Check ASCII emoticon table for exact or case-insensitive match
     struct AsciiCand {
         const char *token;
-        std::initializer_list<const char *> list;
+        std::vector<const char *> list;
     };
     static const std::vector<AsciiCand> asciiMap = {
         {":-)", {"😊", "🙂", "😄", "😁"}},
@@ -12387,6 +12634,21 @@ void Backend::stopAudioPlaybackProcess() {
     proc->deleteLater();
 }
 
+QString Backend::findBundledOrSystemExecutable(const QString &baseName) {
+#ifdef Q_OS_WIN
+    const QString exeName = baseName.endsWith(QStringLiteral(".exe"), Qt::CaseInsensitive)
+                                ? baseName
+                                : (baseName + QStringLiteral(".exe"));
+    const QString bundled = QCoreApplication::applicationDirPath() + QLatin1Char('/') + exeName;
+    if (QFileInfo::exists(bundled) && QFileInfo(bundled).isFile()) {
+        return bundled;
+    }
+    return QStandardPaths::findExecutable(baseName);
+#else
+    return QStandardPaths::findExecutable(baseName);
+#endif
+}
+
 bool Backend::canSeekLocalAudioPlayback() const {
 #ifdef IMSG_UNIT_TEST
     return true;
@@ -12394,7 +12656,7 @@ bool Backend::canSeekLocalAudioPlayback() const {
     if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
         return true;
     }
-    return !QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty();
+    return !findBundledOrSystemExecutable(QStringLiteral("ffplay")).isEmpty();
 #endif
 }
 
@@ -12429,8 +12691,9 @@ bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackG
         env.insert(QStringLiteral("PULSE_SINK"), effectiveOut);
     }
 
-    if (!QStandardPaths::findExecutable(QStringLiteral("ffplay")).isEmpty()) {
-        bin = QStringLiteral("ffplay");
+    const QString ffplayBin = findBundledOrSystemExecutable(QStringLiteral("ffplay"));
+    if (!ffplayBin.isEmpty()) {
+        bin = ffplayBin;
         args << QStringLiteral("-nodisp") << QStringLiteral("-autoexit") << QStringLiteral("-loglevel") << QStringLiteral("error");
         if (m_audioSeekOffsetMs > 250) {
             args << QStringLiteral("-ss") << QString::number(double(m_audioSeekOffsetMs) / 1000.0, 'f', 2);
@@ -12459,7 +12722,14 @@ bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackG
         m_audioPlaybackElapsedMs = 0;
         m_audioSeekOffsetMs = 0;
         emit audioPlaybackChanged();
+#ifdef Q_OS_WIN
+        if (QDesktopServices::openUrl(QUrl::fromLocalFile(localFile))) {
+            return true;
+        }
+        emit toastMessage(QStringLiteral("⚠ Unable to open audio attachment"));
+#else
         emit toastMessage(QStringLiteral("⚠ No audio player found (ffplay/pw-play/paplay)"));
+#endif
         return false;
     }
 
@@ -15194,34 +15464,28 @@ void Backend::shareIcloudPhotoToChat(const QString &chatGuid, const QString &att
                 const QString outTarget = inPlaceJpg
                                               ? (destPath + QStringLiteral(".conv.jpg"))
                                               : (destPath + QStringLiteral(".jpg"));
-                QProcess *proc = new QProcess(this);
-                connect(proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-                        [this, proc, chatGuid, attachmentGuid, destPath, outTarget, inPlaceJpg](int, QProcess::ExitStatus) {
-                            proc->deleteLater();
-                            QString finalPath = destPath;
-                            if (QFileInfo::exists(outTarget) && QFileInfo(outTarget).size() >= 100) {
-                                QFile::setPermissions(outTarget, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-                                if (inPlaceJpg) {
-                                    QFile::remove(destPath);
-                                    QFile::rename(outTarget, destPath);
-                                    finalPath = destPath;
-                                } else {
-                                    finalPath = outTarget;
-                                }
-                            }
-                            QFile::setPermissions(finalPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
-                            m_attachmentPaths.insert(attachmentGuid, finalPath);
-                            if (!m_demoMode && !isSecureOrLocalIcloudEndpoint()) {
-                                return;
-                            }
-                            sendAttachment(chatGuid, finalPath);
-                        });
-                proc->start(QStringLiteral("sh"), QStringList{
-                    QStringLiteral("-c"),
-                    QStringLiteral("umask 077; heif-convert -q 90 \"$1\" \"$2\" >/dev/null 2>&1 || magick \"$1[0]\" -auto-orient -quality 90 \"$2\" >/dev/null 2>&1 || ffmpeg -y -loglevel error -i \"$1\" -frames:v 1 -update 1 -f image2 -c:v mjpeg \"$2\" >/dev/null 2>&1"),
-                    QStringLiteral("--"),
-                    destPath,
-                    outTarget
+                startImageConvertProcess(this, destPath, outTarget, [this, chatGuid, attachmentGuid, destPath, outTarget, inPlaceJpg]() {
+                    QString finalPath = destPath;
+                    if (QFileInfo::exists(outTarget) && QFileInfo(outTarget).size() >= 100) {
+#ifndef Q_OS_WIN
+                        QFile::setPermissions(outTarget, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
+                        if (inPlaceJpg) {
+                            QFile::remove(destPath);
+                            QFile::rename(outTarget, destPath);
+                            finalPath = destPath;
+                        } else {
+                            finalPath = outTarget;
+                        }
+                    }
+#ifndef Q_OS_WIN
+                    QFile::setPermissions(finalPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
+                    m_attachmentPaths.insert(attachmentGuid, finalPath);
+                    if (!m_demoMode && !isSecureOrLocalIcloudEndpoint()) {
+                        return;
+                    }
+                    sendAttachment(chatGuid, finalPath);
                 });
                 return;
             }

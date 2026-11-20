@@ -1,4 +1,7 @@
 build/
+build-deb/
+build-win-dist/
+dist/
 obj/
 moc/
 rcc/

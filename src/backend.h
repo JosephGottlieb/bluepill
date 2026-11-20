@@ -15,6 +15,7 @@
 #include <QPointer>
 #include <QSet>
 #include <QString>
+#include <QSystemTrayIcon>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -737,6 +738,9 @@ private:
     void sortChats();
     bool shouldNotifyForIncomingMessage(const QJsonObject &m, const QString &chatGuid, qint64 dateCreated, qint64 rowId) const;
     void notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview);
+    void showDesktopNotification(const QString &title, const QString &body);
+    static QString findBundledOrSystemExecutable(const QString &baseName);
+    static QString defaultBluepillConfigPath();
     void playNotificationSound(const QString &presetOverride = QString(), bool forcePreview = false);
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
@@ -987,4 +991,5 @@ private:
     QString m_pendingClipboardCopyGuid;
     QString m_lastOpenedUrl;
     qint64 m_lastOpenedUrlTimeMs = 0;
+    QPointer<QSystemTrayIcon> m_trayIcon;
 };

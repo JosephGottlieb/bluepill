@@ -1,4 +1,4 @@
-QT += core gui qml quick quickcontrols2 network svg concurrent
+QT += core gui widgets qml quick quickcontrols2 network svg concurrent
 CONFIG += c++20
 
 TARGET = bluepill

@@ -1,9 +1,8 @@
 import QtQuick
-import QtQuick.Effects
 
 // Circle with the contact's photo, or their initials until a photo loads.
-// The photo is masked to a circle on GPU scene graphs; the software renderer
-// can't run shader effects, so there it's shown clipped to the square.
+// The photo is masked to a circle on GPU scene graphs when QtQuick.Effects is
+// available; on software renderers or older Qt (<6.5), it clips to the box.
 Rectangle {
     id: avatar
     property string source: ""
@@ -11,9 +10,10 @@ Rectangle {
     property int fontPixelSize: 14
     readonly property bool hasPhoto: photo.status === Image.Ready
     readonly property bool canMask: GraphicsInfo.api !== GraphicsInfo.Software
+    property bool hasEffectMask: false
 
     radius: width / 2
-    clip: !canMask
+    clip: !canMask || !hasEffectMask
 
     Text {
         anchors.centerIn: parent
@@ -34,15 +34,30 @@ Rectangle {
         asynchronous: true
         autoTransform: true
         fillMode: Image.PreserveAspectCrop
-        visible: avatar.hasPhoto && !avatar.canMask
+        visible: avatar.hasPhoto && (!avatar.canMask || !avatar.hasEffectMask)
     }
 
-    MultiEffect {
+    Item {
+        id: effectHost
         anchors.fill: photo
-        source: photo
-        visible: avatar.hasPhoto && avatar.canMask
-        maskEnabled: true
-        maskSource: circleMask
+        visible: avatar.hasPhoto && avatar.canMask && avatar.hasEffectMask
+        Component.onCompleted: {
+            if (!avatar.canMask) return
+            try {
+                var fx = Qt.createQmlObject(
+                    'import QtQuick; import QtQuick.Effects; MultiEffect { anchors.fill: parent; maskEnabled: true }',
+                    effectHost,
+                    "RoundAvatarEffect"
+                )
+                if (fx) {
+                    fx.source = photo
+                    fx.maskSource = circleMask
+                    avatar.hasEffectMask = true
+                }
+            } catch (e) {
+                avatar.hasEffectMask = false
+            }
+        }
     }
 
     Item {

@@ -771,6 +771,7 @@ ApplicationWindow {
         root.photoViewerPanX = 0
         root.photoViewerPanY = 0
         root.focusAfterOverlay()
+        Qt.callLater(root.focusAfterOverlay)
     }
 
     function handlePhotoViewerKey(event) {
@@ -914,6 +915,7 @@ ApplicationWindow {
         if (!showContactModal && showContactInfo) {
             root.refreshContactInfo()
             root.focusAfterOverlay()
+            Qt.callLater(root.focusAfterOverlay)
         }
     }
     function openContactModal(address, title) {
@@ -9683,7 +9685,9 @@ ApplicationWindow {
 
                 Text {
                     Layout.fillWidth: true
-                    text: i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
+                    text: Qt.platform.os === "windows"
+                        ? i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved to %APPDATA%\\bluepill\\config.json.")
+                        : i18n.tr("Connect to a BluePill macOS Relay (brew install nertwork/tap/bluepill), a legacy BlueBubbles Server (https://...), or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap

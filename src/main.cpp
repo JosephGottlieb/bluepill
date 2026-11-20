@@ -3,7 +3,7 @@
 #include "theme.h"
 #include "translator.h"
 
-#include <QGuiApplication>
+#include <QApplication>
 #include <QLoggingCategory>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -17,6 +17,35 @@
 #include <QTimer>
 #include <functional>
 #include <iostream>
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#include <cstdio>
+
+static void attachParentConsoleForCli() {
+    const DWORD outType = GetFileType(GetStdHandle(STD_OUTPUT_HANDLE));
+    const DWORD errType = GetFileType(GetStdHandle(STD_ERROR_HANDLE));
+    const DWORD inType = GetFileType(GetStdHandle(STD_INPUT_HANDLE));
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) {
+        return;
+    }
+    FILE *fp = nullptr;
+    if (outType != FILE_TYPE_DISK && outType != FILE_TYPE_PIPE) {
+        freopen_s(&fp, "CONOUT$", "w", stdout);
+    }
+    if (errType != FILE_TYPE_DISK && errType != FILE_TYPE_PIPE) {
+        freopen_s(&fp, "CONOUT$", "w", stderr);
+    }
+    if (inType != FILE_TYPE_DISK && inType != FILE_TYPE_PIPE) {
+        freopen_s(&fp, "CONIN$", "r", stdin);
+    }
+}
+#endif
 
 static QQuickItem *findVisualItemByName(QQuickItem *item, const QString &objName) {
     if (!item) return nullptr;
@@ -33,12 +62,35 @@ int main(int argc, char *argv[]) {
         rawArgs.append(QString::fromUtf8(argv[i]));
     }
 
+    if (rawArgs.contains(QStringLiteral("--help")) || rawArgs.contains(QStringLiteral("-h"))) {
+#ifdef Q_OS_WIN
+        attachParentConsoleForCli();
+#endif
+        std::cout << "bluepill 1.2.3 (imsg compatible)\n"
+                  << "Usage: bluepill [options|command]\n\n"
+                  << "Options:\n"
+                  << "  -h, --help                         Show this help message and exit\n"
+                  << "  -v, --version                      Show version information and exit\n"
+                  << "  --demo                             Launch GUI with synthetic demo conversations\n"
+                  << "  --webui                            Open built-in BluePill Web UI in browser\n\n"
+                  << "Commands:\n"
+                  << "  status [--json]                    Check relay connection health\n"
+                  << "  recent [--limit N] [--json]        Fetch recent messages\n"
+                  << "  send <recipient> <text> [--json]   Send an iMessage, RCS, or SMS\n";
+        return 0;
+    }
     if (rawArgs.contains(QStringLiteral("--version")) || rawArgs.contains(QStringLiteral("-v"))) {
+#ifdef Q_OS_WIN
+        attachParentConsoleForCli();
+#endif
         std::cout << "bluepill 1.2.3 (imsg compatible)" << std::endl;
         return 0;
     }
     if (rawArgs.contains(QStringLiteral("--webui")) || (!rawArgs.isEmpty() && rawArgs.first() == QStringLiteral("webui"))) {
-        QGuiApplication app(argc, argv);
+#ifdef Q_OS_WIN
+        attachParentConsoleForCli();
+#endif
+        QApplication app(argc, argv);
         Backend backend(false);
         std::cout << backend.webUiUrl().toStdString() << std::endl;
         backend.openWebUi();
@@ -52,6 +104,9 @@ int main(int argc, char *argv[]) {
     );
 
     if (isCliCommand) {
+#ifdef Q_OS_WIN
+        attachParentConsoleForCli();
+#endif
         QCoreApplication app(argc, argv);
         app.setApplicationName(QStringLiteral("imsg"));
         app.setApplicationVersion(QStringLiteral("1.2.3"));
@@ -77,7 +132,7 @@ int main(int argc, char *argv[]) {
 
     QLoggingCategory::setFilterRules(QStringLiteral("qt.qpa.services.warning=false"));
     QQuickStyle::setStyle(QStringLiteral("Basic"));
-    QGuiApplication app(argc, argv);
+    QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("imsg"));
     app.setApplicationVersion(QStringLiteral("1.2.3"));
     app.setDesktopFileName(QStringLiteral("bluepill"));

@@ -6,6 +6,7 @@ on:
   pull_request:
     branches: [main, master]
     types: [opened, edited, synchronize, reopened]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -92,7 +93,7 @@ jobs:
               for skip in [".git", "build", "obj", "moc", "rcc"]:
                   if skip in dn: dn.remove(skip)
               for f in fn:
-                  if f.endswith((".png", ".wav", ".svg")): continue
+                  if f.endswith((".png", ".wav", ".svg", ".ico")): continue
                   p = os.path.join(dp, f)
                   if "workflows/" in p: continue
                   with open(p, errors="ignore") as fh:
@@ -112,7 +113,7 @@ jobs:
 
       - name: Shell Scripts & Homebrew Formula Syntax Verification
         run: |
-          bash -n bin/build bin/test
+          bash -n bin/build bin/test packaging/build-deb.sh packaging/build-rpm.sh
           ruby -c Formula/bluepill.rb
 
   build-and-test:
@@ -144,7 +145,7 @@ jobs:
               for skip in [".git", "build", "obj", "moc", "rcc"]:
                   if skip in dn: dn.remove(skip)
               for f in fn:
-                  if f.endswith((".png", ".wav", ".svg")): continue
+                  if f.endswith((".png", ".wav", ".svg", ".ico")): continue
                   p = os.path.join(dp, f)
                   if "workflows/" in p: continue
                   with open(p, errors="ignore") as fh:
@@ -177,3 +178,145 @@ jobs:
           chown -R builder:builder .
           su builder -c "cd pkgbuild && makepkg -fs --noconfirm"
           ls -lh pkgbuild/*.pkg.tar*
+
+  build-deb:
+    name: Debian/Ubuntu (.deb) Build, Tests & Package
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Install Ubuntu 24.04 Build & Qt6 Dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential cmake ninja-build dpkg-dev qt6-base-dev qt6-declarative-dev qt6-svg-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-window qt6-image-formats-plugins libqt6svg6 libnotify-bin imagemagick libheif-examples libheif-plugin-libde265 libheif-plugin-x265
+
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build, Test & Package (.deb)
+        run: ./packaging/build-deb.sh dist
+
+      - name: Verify Clean .deb Install
+        run: |
+          sudo apt-get install -y ./dist/bluepill_*.deb
+          bluepill --version
+          bluepill --help
+          imsg --version
+          QT_QPA_PLATFORM=offscreen bluepill --demo --test-startup
+
+      - name: Upload .deb Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bluepill-deb
+          path: dist/bluepill_*.deb
+
+  build-rpm:
+    name: Fedora (.rpm) Build, Tests & Package
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:41
+    steps:
+      - name: Install Fedora 41 Build & Qt6 Dependencies
+        run: |
+          dnf install -y -q rpm-build cmake gcc-c++ ninja-build qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel libnotify ImageMagick ImageMagick-heic libheif-tools
+
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Build, Test & Package (.rpm)
+        run: ./packaging/build-rpm.sh dist
+
+      - name: Verify Clean .rpm Install
+        run: |
+          dnf install -y -q ./dist/bluepill-*.rpm
+          bluepill --version
+          bluepill --help
+          imsg --version
+          QT_QPA_PLATFORM=offscreen bluepill --demo --test-startup
+
+      - name: Upload .rpm Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bluepill-rpm
+          path: dist/bluepill-*.rpm
+
+  build-windows:
+    name: Windows Build, Unit Tests & Installer
+    runs-on: windows-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Setup MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Install Qt 6
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '6.8.1'
+          host: 'windows'
+          target: 'desktop'
+          arch: 'win64_msvc2022_64'
+          modules: 'qtimageformats'
+
+      - name: Configure & Build (CMake + MSVC)
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          cmake --build build --config Release --parallel
+
+      - name: Run Unit Tests (Offscreen QPA)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          if (-not (Get-Command magick -ErrorAction SilentlyContinue)) {
+              choco install imagemagick -y --no-progress
+              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+          }
+          ctest --test-dir build -C Release --output-on-failure
+
+      - name: Deploy Qt6 Runtime & Build Inno Setup Installer
+        shell: pwsh
+        run: |
+          $ver = (Select-String -Path CMakeLists.txt -Pattern 'project\(bluepill VERSION ([0-9.]+)').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force -Path build-win-dist | Out-Null
+          Copy-Item build\Release\bluepill.exe build-win-dist\bluepill.exe
+          $windeploy = Join-Path $env:Qt6_DIR "bin\windeployqt6.exe"
+          if (-not (Test-Path $windeploy)) {
+              $windeploy = Join-Path $env:Qt6_DIR "bin\windeployqt.exe"
+          }
+          & $windeploy --release --qmldir src --no-translations build-win-dist\bluepill.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $env:QT_QPA_PLATFORM = "offscreen"
+          & build-win-dist\bluepill.exe --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & build-win-dist\bluepill.exe --demo --test-startup
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+          $iscc = Get-Command iscc -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
+          if (-not $iscc) {
+              $defaultIscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+              if (Test-Path $defaultIscc) {
+                  $iscc = $defaultIscc
+              } else {
+                  choco install innosetup -y --no-progress
+                  $iscc = $defaultIscc
+              }
+          }
+          & $iscc "/DAppVersion=$ver" "/DDistDir=..\build-win-dist" installer\bluepill.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem dist\BluePill-Setup-*.exe
+
+      - name: Upload Windows Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bluepill-windows-installer
+          path: dist/BluePill-Setup-*.exe

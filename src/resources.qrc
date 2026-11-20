@@ -5,6 +5,7 @@
         <file>ThemedComboBox.qml</file>
         <file>RoundAvatar.qml</file>
         <file>bluepill.svg</file>
+        <file alias="imessage-notify.wav">../resources/imessage-notify.wav</file>
         <file>i18n/da.json</file>
     </qresource>
 </RCC>
