@@ -2934,50 +2934,100 @@ ApplicationWindow {
                             color: theme.darkForeground
                             wrapMode: Text.WordWrap
                         }
-                        RowLayout {
+                        ColumnLayout {
                             Layout.fillWidth: true
                             Layout.topMargin: 4
-                            spacing: 10
+                            spacing: 8
                             visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
-                            Rectangle {
-                                objectName: "welcomeCloudSignInBtn"
+                            RowLayout {
                                 Layout.fillWidth: true
-                                height: 38
-                                radius: 8
-                                color: theme.accent
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: i18n.tr("Sign in with BluePill Cloud →")
-                                    font.pixelSize: theme.fontSize - 1
-                                    font.bold: true
-                                    color: theme.onAccent
+                                spacing: 8
+                                Rectangle {
+                                    objectName: "welcomeCloudGoogleBtn"
+                                    Layout.fillWidth: true
+                                    height: 36
+                                    radius: 8
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "G  " + i18n.tr("Continue with Google")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.startCloudSignIn("google")
+                                    }
                                 }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: backend.startCloudSignIn()
+                                Rectangle {
+                                    objectName: "welcomeCloudGitHubBtn"
+                                    Layout.fillWidth: true
+                                    height: 36
+                                    radius: 8
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "🐙  " + i18n.tr("Continue with GitHub")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.startCloudSignIn("github")
+                                    }
                                 }
                             }
-                            Rectangle {
-                                objectName: "welcomeTryDemoBtn"
-                                Layout.preferredWidth: welcomeDemoTxt.implicitWidth + 28
-                                height: 38
-                                radius: 8
-                                color: Qt.rgba(48/255, 209/255, 88/255, 0.16)
-                                border.width: 1
-                                border.color: theme.green
-                                Text {
-                                    id: welcomeDemoTxt
-                                    anchors.centerIn: parent
-                                    text: i18n.tr("Try Live Demo")
-                                    font.pixelSize: theme.fontSize - 1
-                                    font.bold: true
-                                    color: theme.green
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                Rectangle {
+                                    objectName: "welcomeCloudSignInBtn"
+                                    Layout.fillWidth: true
+                                    height: 38
+                                    radius: 8
+                                    color: theme.accent
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Sign in with Email / BluePill Cloud")
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.onAccent
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.startCloudSignIn("")
+                                    }
                                 }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.connectToLiveDemo()
+                                Rectangle {
+                                    objectName: "welcomeTryDemoBtn"
+                                    Layout.preferredWidth: welcomeDemoTxt.implicitWidth + 28
+                                    height: 38
+                                    radius: 8
+                                    color: Qt.rgba(48/255, 209/255, 88/255, 0.16)
+                                    border.width: 1
+                                    border.color: theme.green
+                                    Text {
+                                        id: welcomeDemoTxt
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Try Live Demo")
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.green
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.connectToLiveDemo()
+                                    }
                                 }
                             }
                         }
@@ -10048,51 +10098,103 @@ ApplicationWindow {
                             color: theme.foreground
                             wrapMode: Text.WordWrap
                         }
-                        RowLayout {
+                        ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 8
                             visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
-                            Rectangle {
-                                id: cloudSignInBtn
-                                objectName: "cloudSignInBtn"
+                            RowLayout {
                                 Layout.fillWidth: true
-                                height: 34
-                                radius: 7
-                                color: theme.accent
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: i18n.tr("Sign in with BluePill Cloud →")
-                                    font.pixelSize: theme.fontSize - 2
-                                    font.bold: true
-                                    color: theme.onAccent
+                                spacing: 8
+                                Rectangle {
+                                    id: cloudGoogleSignInBtn
+                                    objectName: "cloudGoogleSignInBtn"
+                                    Layout.fillWidth: true
+                                    height: 32
+                                    radius: 7
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "G  " + i18n.tr("Continue with Google")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.startCloudSignIn("google")
+                                    }
                                 }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: backend.startCloudSignIn()
+                                Rectangle {
+                                    id: cloudGitHubSignInBtn
+                                    objectName: "cloudGitHubSignInBtn"
+                                    Layout.fillWidth: true
+                                    height: 32
+                                    radius: 7
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "🐙  " + i18n.tr("Continue with GitHub")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.startCloudSignIn("github")
+                                    }
                                 }
                             }
-                            Rectangle {
-                                id: tryLiveDemoBtn
-                                objectName: "tryLiveDemoBtn"
-                                Layout.preferredWidth: tryDemoTxt.implicitWidth + 24
-                                height: 34
-                                radius: 7
-                                color: Qt.rgba(48/255, 209/255, 88/255, 0.16)
-                                border.width: 1
-                                border.color: theme.green
-                                Text {
-                                    id: tryDemoTxt
-                                    anchors.centerIn: parent
-                                    text: i18n.tr("Try Live Demo")
-                                    font.pixelSize: theme.fontSize - 2
-                                    font.bold: true
-                                    color: theme.green
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Rectangle {
+                                    id: cloudSignInBtn
+                                    objectName: "cloudSignInBtn"
+                                    Layout.fillWidth: true
+                                    height: 34
+                                    radius: 7
+                                    color: theme.accent
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Sign in with Email / BluePill Cloud")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.onAccent
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.startCloudSignIn("")
+                                    }
                                 }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    onClicked: root.connectToLiveDemo()
+                                Rectangle {
+                                    id: tryLiveDemoBtn
+                                    objectName: "tryLiveDemoBtn"
+                                    Layout.preferredWidth: tryDemoTxt.implicitWidth + 24
+                                    height: 34
+                                    radius: 7
+                                    color: Qt.rgba(48/255, 209/255, 88/255, 0.16)
+                                    border.width: 1
+                                    border.color: theme.green
+                                    Text {
+                                        id: tryDemoTxt
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Try Live Demo")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.green
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: root.connectToLiveDemo()
+                                    }
                                 }
                             }
                         }

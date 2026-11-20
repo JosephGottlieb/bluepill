@@ -402,7 +402,7 @@ public:
     QString cloudAccountEmail() const { return m_cloudAccountEmail; }
     QString cloudSignInError() const { return m_cloudSignInError; }
     QString cloudSignInBrowserUrl() const { return m_cloudSignInBrowserUrl; }
-    Q_INVOKABLE void startCloudSignIn();
+    Q_INVOKABLE void startCloudSignIn(const QString &provider = QString());
     Q_INVOKABLE void cancelCloudSignIn();
     Q_INVOKABLE void signOutCloud();
     void setCloudWebBaseUrlForTest(const QString &url) { m_cloudWebBaseOverride = url; }

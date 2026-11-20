@@ -10,7 +10,7 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 - **One-Click BluePill Cloud Browser Sign-In (`src/backend.{h,cpp}`, `src/Main.qml`):**
   - Added local `QTcpServer` loopback callback listener (`127.0.0.1:<ephemeral>`) with 32-byte `QRandomGenerator::system()` CSRF `state`, 5-minute timeout, and automatic token exchange against `POST /api/v1/auth/desktop/exchange`.
   - Exposed `cloudSignInPending`, `cloudAccountEmail` (persisted via `QSettings` under `cloud/accountEmail`), `cloudSignInError`, `cloudSignInBrowserUrl`, `startCloudSignIn()`, `cancelCloudSignIn()`, `signOutCloud()`, and `cloudSignInCompleted`.
-  - Updated both the Welcome onboarding screen and Settings → BluePill Cloud card with **"Sign in with BluePill Cloud →"**, inline browser-pending state (**Open Browser Again** / **Cancel**), signed-in banner (**Signed in as `<email>`** with **Open Portal** / **Sign Out**), and welcome toast on completion.
+  - Updated both the Welcome onboarding screen and Settings → BluePill Cloud card with **"Continue with Google"**, **"Continue with GitHub"**, and **"Sign in with Email / BluePill Cloud"** buttons (`?provider=google|github` fast-path), inline browser-pending state (**Open Browser Again** / **Cancel**), signed-in banner (**Signed in as `<email>`** with **Open Portal** / **Sign Out**), and welcome toast on completion.
 
 ## [1.2.6] - 2026-11-19
 

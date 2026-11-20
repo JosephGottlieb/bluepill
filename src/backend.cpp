@@ -1877,7 +1877,7 @@ void Backend::stopCloudSignInListener() {
     }
 }
 
-void Backend::startCloudSignIn() {
+void Backend::startCloudSignIn(const QString &provider) {
     stopCloudSignInListener();
     if (m_cloudExchangeReply) {
         m_cloudExchangeReply->abort();
@@ -1914,10 +1914,14 @@ void Backend::startCloudSignIn() {
     }
     while (webBase.endsWith(QLatin1Char('/'))) webBase.chop(1);
 
-    const QString authUrl = QStringLiteral("%1/portal/desktop-auth?port=%2&state=%3")
-                                .arg(webBase)
-                                .arg(port)
-                                .arg(state);
+    QString authUrl = QStringLiteral("%1/portal/desktop-auth?port=%2&state=%3")
+                          .arg(webBase)
+                          .arg(port)
+                          .arg(state);
+    const QString cleanProvider = provider.trimmed().toLower();
+    if (cleanProvider == QStringLiteral("google") || cleanProvider == QStringLiteral("github")) {
+        authUrl += QStringLiteral("&provider=") + cleanProvider;
+    }
 
     m_cloudAuthServer = server;
     connect(server, &QTcpServer::newConnection, this, &Backend::handleCloudAuthConnection);

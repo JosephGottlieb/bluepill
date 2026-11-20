@@ -11390,16 +11390,33 @@ private slots:
         engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
         QVERIFY(!engine.rootObjects().isEmpty());
         QObject *root = engine.rootObjects().first();
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("welcomeCloudGoogleBtn")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("welcomeCloudGitHubBtn")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("cloudGoogleSignInBtn")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("cloudGitHubSignInBtn")) != nullptr);
         QVERIFY(root->findChild<QObject *>(QStringLiteral("welcomeCloudPendingBox")) != nullptr);
         QVERIFY(root->findChild<QObject *>(QStringLiteral("welcomeCloudSignedInBanner")) != nullptr);
         QVERIFY(root->findChild<QObject *>(QStringLiteral("settingsCloudPendingBox")) != nullptr);
         QVERIFY(root->findChild<QObject *>(QStringLiteral("settingsCloudSignedInBanner")) != nullptr);
+
+        // Verify provider fast-path URLs for Google & GitHub SSO
+        b.startCloudSignIn(QStringLiteral("google"));
+        QVERIFY(b.cloudSignInPending());
+        QVERIFY(b.cloudSignInBrowserUrl().contains(QStringLiteral("provider=google")));
+        b.cancelCloudSignIn();
+
+        b.startCloudSignIn(QStringLiteral("github"));
+        QVERIFY(b.cloudSignInPending());
+        QVERIFY(b.cloudSignInBrowserUrl().contains(QStringLiteral("provider=github")));
+        b.cancelCloudSignIn();
+
         root->setProperty("showServerConfigModal", true);
 
         // 1. Full happy path: startCloudSignIn -> partial TCP callback -> mock exchange -> configured & persisted
         QSignalSpy completedSpy(&b, &Backend::cloudSignInCompleted);
         b.startCloudSignIn();
         QCOMPARE(b.cloudSignInPending(), true);
+        QVERIFY(!b.cloudSignInBrowserUrl().contains(QStringLiteral("provider=")));
         const quint16 listenPort = b.cloudSignInListenPortForTest();
         const QString expectedState = b.cloudSignInExpectedStateForTest();
         QVERIFY(listenPort >= 1024);
