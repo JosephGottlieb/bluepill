@@ -1101,7 +1101,13 @@ ApplicationWindow {
                 root.clearActionMenu()
                 // The info card follows the conversation
                 if (root.showContactInfo) {
-                    if (newGuid.length > 0) root.refreshContactInfo(); else root.closeContactInfo()
+                    if (newGuid.length > 0) {
+                        root.refreshContactInfo()
+                        root.focusAfterOverlay()
+                        Qt.callLater(root.focusAfterOverlay)
+                    } else {
+                        root.closeContactInfo()
+                    }
                 }
                 root.cancelEditing()
                 root.replyTargetGuid = ""
