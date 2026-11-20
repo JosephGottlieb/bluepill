@@ -134,6 +134,7 @@ static void insertCachedAttachmentPath(QHash<QString, QString> &cache, const QSt
 #include <QNetworkReply>
 #include <QPainter>
 #include <QProcess>
+#include <QRandomGenerator>
 #include <QRegularExpression>
 #include <QSaveFile>
 #include <QSslConfiguration>
@@ -485,6 +486,17 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         checkForCloudUpdates(false);
     });
 
+    m_cloudSignInTimeoutTimer.setSingleShot(true);
+    m_cloudSignInTimeoutTimer.setInterval(5 * 60 * 1000);
+    connect(&m_cloudSignInTimeoutTimer, &QTimer::timeout, this, [this]() {
+        if (!m_cloudSignInPending) return;
+        stopCloudSignInListener();
+        m_cloudSignInPending = false;
+        m_cloudSignInExpectedState.clear();
+        m_cloudSignInError = QStringLiteral("Sign-in timed out after 5 minutes. Please try again.");
+        emit cloudSignInStateChanged();
+    });
+
     if (autoStart && !m_serverUrl.isEmpty() && !m_password.isEmpty()) {
         refreshAll();
         m_pollTimer.start();
@@ -501,6 +513,12 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
 }
 
 Backend::~Backend() {
+    stopCloudSignInListener();
+    if (m_cloudExchangeReply) {
+        m_cloudExchangeReply->abort();
+        m_cloudExchangeReply->deleteLater();
+        m_cloudExchangeReply.clear();
+    }
     stopAudioPlaybackProcess();
     stopVoiceRecordProcess(false);
     if (!m_currentVoiceRecordingPath.isEmpty()) {
@@ -1846,6 +1864,357 @@ bool Backend::cloudLoggedIn() const {
     return true;
 }
 
+QString Backend::cloudSettingsFilePath() const {
+    return QFileInfo(configFilePath()).absolutePath() + QStringLiteral("/settings.ini");
+}
+
+void Backend::stopCloudSignInListener() {
+    m_cloudSignInTimeoutTimer.stop();
+    if (m_cloudAuthServer) {
+        m_cloudAuthServer->close();
+        m_cloudAuthServer->deleteLater();
+        m_cloudAuthServer.clear();
+    }
+}
+
+void Backend::startCloudSignIn() {
+    stopCloudSignInListener();
+    if (m_cloudExchangeReply) {
+        m_cloudExchangeReply->abort();
+        m_cloudExchangeReply->deleteLater();
+        m_cloudExchangeReply.clear();
+    }
+
+    auto *server = new QTcpServer(this);
+    if (!server->listen(QHostAddress::LocalHost, 0)) {
+        const QString err = server->errorString();
+        server->deleteLater();
+        m_cloudSignInPending = false;
+        m_cloudSignInExpectedState.clear();
+        m_cloudSignInBrowserUrl.clear();
+        m_cloudSignInError = QStringLiteral("Could not start local sign-in callback listener: %1").arg(err);
+        emit cloudSignInStateChanged();
+        return;
+    }
+
+    const quint16 port = server->serverPort();
+    QByteArray stateBytes(32, Qt::Uninitialized);
+    QRandomGenerator::system()->fillRange(
+        reinterpret_cast<quint32 *>(stateBytes.data()),
+        stateBytes.size() / static_cast<int>(sizeof(quint32)));
+    const QString state = QString::fromLatin1(
+        stateBytes.toBase64(QByteArray::Base64UrlEncoding | QByteArray::OmitTrailingEquals));
+
+    QString webBase = m_cloudWebBaseOverride.trimmed();
+    if (webBase.isEmpty()) {
+        webBase = qEnvironmentVariable("BLUEPILL_CLOUD_WEB_URL").trimmed();
+    }
+    if (webBase.isEmpty()) {
+        webBase = QStringLiteral("https://bluepill.nertwork.com");
+    }
+    while (webBase.endsWith(QLatin1Char('/'))) webBase.chop(1);
+
+    const QString authUrl = QStringLiteral("%1/portal/desktop-auth?port=%2&state=%3")
+                                .arg(webBase)
+                                .arg(port)
+                                .arg(state);
+
+    m_cloudAuthServer = server;
+    connect(server, &QTcpServer::newConnection, this, &Backend::handleCloudAuthConnection);
+
+    m_cloudSignInExpectedState = state;
+    m_cloudSignInBrowserUrl = authUrl;
+    m_cloudSignInError.clear();
+    m_cloudSignInPending = true;
+    m_cloudSignInTimeoutTimer.start();
+    emit cloudSignInStateChanged();
+
+    const bool suppressOpen = m_suppressDesktopBrowserOpen ||
+                              qEnvironmentVariableIsSet("BLUEPILL_SUPPRESS_BROWSER_OPEN") ||
+                              qEnvironmentVariable("QT_QPA_PLATFORM").compare(QStringLiteral("offscreen"), Qt::CaseInsensitive) == 0;
+    if (!suppressOpen) {
+        QDesktopServices::openUrl(QUrl(authUrl));
+    }
+}
+
+void Backend::cancelCloudSignIn() {
+    stopCloudSignInListener();
+    if (m_cloudExchangeReply) {
+        m_cloudExchangeReply->abort();
+        m_cloudExchangeReply->deleteLater();
+        m_cloudExchangeReply.clear();
+    }
+    m_cloudSignInExpectedState.clear();
+    m_cloudSignInBrowserUrl.clear();
+    m_cloudSignInError.clear();
+    m_cloudSignInPending = false;
+    emit cloudSignInStateChanged();
+}
+
+void Backend::signOutCloud() {
+    stopCloudSignInListener();
+    if (m_cloudExchangeReply) {
+        m_cloudExchangeReply->abort();
+        m_cloudExchangeReply->deleteLater();
+        m_cloudExchangeReply.clear();
+    }
+
+    QSettings settings(cloudSettingsFilePath(), QSettings::IniFormat);
+    const QString lastCloudServerUrl = settings.value(QStringLiteral("cloud/serverUrl")).toString().trimmed();
+    settings.remove(QStringLiteral("cloud/accountEmail"));
+    settings.remove(QStringLiteral("cloud/serverUrl"));
+    settings.sync();
+
+    const bool wasCloudConfigured = cloudLoggedIn() ||
+                                    (!lastCloudServerUrl.isEmpty() && isSameServerEndpoint(configuredServerUrl(), lastCloudServerUrl));
+
+    m_cloudAccountEmail.clear();
+    m_cloudSignInExpectedState.clear();
+    m_cloudSignInBrowserUrl.clear();
+    m_cloudSignInError.clear();
+    m_cloudSignInPending = false;
+    emit cloudSignInStateChanged();
+
+    if (wasCloudConfigured) {
+        m_pollTimer.stop();
+        m_reconnectTimer.stop();
+        m_socketReconnectTimer.stop();
+        m_contactsRefreshTimer.stop();
+        m_cloudUpdateTimer.stop();
+        stopSocketIoClient();
+
+        const QString cfgPath = configFilePath();
+        QJsonObject cfgObj;
+        QFile existingFile(cfgPath);
+        if (existingFile.exists() && existingFile.open(QIODevice::ReadOnly)) {
+            cfgObj = QJsonDocument::fromJson(existingFile.readAll()).object();
+            existingFile.close();
+        }
+        cfgObj.insert(QStringLiteral("serverUrl"), QString());
+        cfgObj.insert(QStringLiteral("secondaryServerUrl"), QString());
+        cfgObj.insert(QStringLiteral("password"), QString());
+        writeConfigAtomically(cfgPath, cfgObj);
+
+        bumpServerEndpointGeneration();
+        m_serverUrl.clear();
+        m_lastConfiguredBaseUrl.clear();
+        m_secondaryServerUrl.clear();
+        m_password.clear();
+        m_candidateUrls.clear();
+        m_candidateUrlIndex = 0;
+        m_consecutiveFailures = 0;
+        m_demoMode = false;
+        m_clientUpdateAvailable = false;
+        m_serverUpdateAvailable = false;
+        m_updateStatusText.clear();
+        m_initialCloudUpdateChecked = false;
+        m_connected = false;
+        m_loading = false;
+        m_serverStatus = QStringLiteral("Disconnected · Signed out of BluePill Cloud");
+        m_chats.clear();
+        m_messages.clear();
+        m_selectedChatGuid.clear();
+
+        emit chatsChanged();
+        emit messagesChanged();
+        emit selectedChatChanged();
+        emit configChanged();
+        emit updateStateChanged();
+        emit statusChanged();
+    }
+    emit toastMessage(QStringLiteral("Signed out of BluePill Cloud"));
+}
+
+void Backend::handleCloudAuthConnection() {
+    while (m_cloudAuthServer && m_cloudAuthServer->hasPendingConnections()) {
+        QTcpSocket *sock = m_cloudAuthServer->nextPendingConnection();
+        if (!sock) continue;
+        sock->setParent(this);
+        connect(sock, &QTcpSocket::disconnected, sock, &QObject::deleteLater);
+
+        auto buf = std::make_shared<QByteArray>();
+        auto handled = std::make_shared<bool>(false);
+        connect(sock, &QTcpSocket::readyRead, this, [this, sock, buf, handled]() {
+            if (*handled) return;
+            buf->append(sock->readAll());
+            if (buf->size() > 32768) {
+                *handled = true;
+                sendCloudHttpResponse(
+                    sock, 400, QByteArrayLiteral("Bad Request"),
+                    QByteArrayLiteral("<!doctype html><html><body><h1>Invalid Request</h1></body></html>"));
+                return;
+            }
+            if (!buf->contains("\r\n\r\n") && !buf->contains("\n\n")) {
+                return;
+            }
+            *handled = true;
+            processCloudCallbackRequest(sock, *buf);
+        });
+    }
+}
+
+void Backend::sendCloudHttpResponse(QTcpSocket *sock, int statusCode, const QByteArray &statusText, const QByteArray &htmlBody) {
+    if (!sock) return;
+    const QByteArray header =
+        "HTTP/1.1 " + QByteArray::number(statusCode) + " " + statusText + "\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Content-Length: " + QByteArray::number(htmlBody.size()) + "\r\n"
+        "Cache-Control: no-store\r\n"
+        "Connection: close\r\n\r\n";
+    sock->write(header);
+    sock->write(htmlBody);
+    sock->flush();
+    sock->disconnectFromHost();
+}
+
+void Backend::processCloudCallbackRequest(QTcpSocket *sock, const QByteArray &rawRequest) {
+    int lineEnd = rawRequest.indexOf("\r\n");
+    if (lineEnd < 0) lineEnd = rawRequest.indexOf('\n');
+    const QByteArray requestLine = (lineEnd >= 0 ? rawRequest.left(lineEnd) : rawRequest).trimmed();
+    const QList<QByteArray> parts = requestLine.split(' ');
+    if (parts.size() < 2) {
+        sendCloudHttpResponse(
+            sock, 400, QByteArrayLiteral("Bad Request"),
+            QByteArrayLiteral("<!doctype html><html><body style=\"font-family:system-ui,sans-serif;padding:40px;text-align:center;\"><h2>Invalid callback request</h2><p>Please return to the BluePill app and try again.</p></body></html>"));
+        return;
+    }
+
+    const QByteArray method = parts.at(0).trimmed().toUpper();
+    const QString target = QString::fromUtf8(parts.at(1).trimmed());
+    const QUrl reqUrl(QStringLiteral("http://127.0.0.1") + target);
+    const QString path = reqUrl.path();
+
+    if (method == QByteArrayLiteral("GET") && path == QStringLiteral("/favicon.ico")) {
+        sendCloudHttpResponse(sock, 404, QByteArrayLiteral("Not Found"), QByteArrayLiteral("<html><body>Not found</body></html>"));
+        return;
+    }
+
+    if (method != QByteArrayLiteral("GET") || path != QStringLiteral("/callback")) {
+        sendCloudHttpResponse(sock, 404, QByteArrayLiteral("Not Found"), QByteArrayLiteral("<html><body>Not found</body></html>"));
+        return;
+    }
+
+    const QUrlQuery query(reqUrl);
+    const QString code = query.queryItemValue(QStringLiteral("code"), QUrl::FullyDecoded).trimmed();
+    const QString state = query.queryItemValue(QStringLiteral("state"), QUrl::FullyDecoded).trimmed();
+
+    if (m_cloudSignInExpectedState.isEmpty() || state != m_cloudSignInExpectedState || code.isEmpty()) {
+        sendCloudHttpResponse(
+            sock, 400, QByteArrayLiteral("Bad Request"),
+            QByteArrayLiteral("<!doctype html><html><body style=\"font-family:system-ui,sans-serif;background:#0f172a;color:#f8fafc;padding:48px;text-align:center;\"><h2>Sign-in verification failed</h2><p>Invalid or mismatched sign-in state. Please return to the BluePill app and try again.</p></body></html>"));
+        stopCloudSignInListener();
+        m_cloudSignInExpectedState.clear();
+        m_cloudSignInPending = false;
+        m_cloudSignInError = QStringLiteral("Sign-in verification failed (state mismatch or missing authorization code).");
+        emit cloudSignInStateChanged();
+        return;
+    }
+
+    const QString expectedState = m_cloudSignInExpectedState;
+    m_cloudSignInExpectedState.clear();
+
+    const QByteArray okHtml = QByteArrayLiteral(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>Signed in to BluePill</title></head>"
+        "<body style=\"font-family:system-ui,-apple-system,sans-serif;background:#0f172a;color:#f8fafc;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;\">"
+        "<div style=\"background:#1e293b;border:1px solid #334155;border-radius:16px;padding:36px 40px;max-width:440px;text-align:center;box-shadow:0 20px 45px rgba(0,0,0,0.4);\">"
+        "<div style=\"font-size:36px;margin-bottom:12px;\">&#x2705;</div>"
+        "<h2 style=\"margin:0 0 10px 0;font-size:20px;\">Signed in to BluePill!</h2>"
+        "<p style=\"margin:0;color:#cbd5e1;font-size:15px;line-height:1.5;\">Signed in to BluePill! You can close this tab and return to the BluePill app.</p>"
+        "</div></body></html>");
+    sendCloudHttpResponse(sock, 200, QByteArrayLiteral("OK"), okHtml);
+    stopCloudSignInListener();
+    exchangeCloudAuthCode(code, expectedState);
+}
+
+void Backend::exchangeCloudAuthCode(const QString &code, const QString &state) {
+    QString apiBase = m_cloudApiBaseOverride.trimmed();
+    if (apiBase.isEmpty()) {
+        apiBase = qEnvironmentVariable("BLUEPILL_CLOUD_API_URL").trimmed();
+    }
+    if (apiBase.isEmpty()) {
+        apiBase = QStringLiteral("https://api.bluepill.nertwork.com");
+    }
+    while (apiBase.endsWith(QLatin1Char('/'))) apiBase.chop(1);
+
+    const QUrl exchangeUrl(apiBase + QStringLiteral("/api/v1/auth/desktop/exchange"));
+    QNetworkRequest req(exchangeUrl);
+    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
+    req.setTransferTimeout(20000);
+
+    const QJsonObject payload{
+        {QStringLiteral("code"), code},
+        {QStringLiteral("state"), state}
+    };
+
+    if (m_cloudExchangeReply) {
+        m_cloudExchangeReply->abort();
+        m_cloudExchangeReply->deleteLater();
+        m_cloudExchangeReply.clear();
+    }
+    QNetworkReply *reply = m_nam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+    m_cloudExchangeReply = reply;
+
+    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+        if (m_cloudExchangeReply == reply) {
+            m_cloudExchangeReply.clear();
+        }
+        const QByteArray body = reply->readAll();
+        const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+        const QNetworkReply::NetworkError netErr = reply->error();
+        const QString errStr = reply->errorString();
+        reply->deleteLater();
+
+        if (netErr == QNetworkReply::OperationCanceledError && !m_cloudSignInPending) {
+            return;
+        }
+
+        const QJsonObject obj = QJsonDocument::fromJson(body).object();
+        const bool ok = (netErr == QNetworkReply::NoError && httpStatus >= 200 && httpStatus < 300 &&
+                         obj.value(QStringLiteral("ok")).toBool(false));
+        const QString rawServerUrl = obj.value(QStringLiteral("server_url")).toString().trimmed();
+        const QString relayPassword = obj.value(QStringLiteral("relay_password")).toString().trimmed();
+        const QString email = obj.value(QStringLiteral("email")).toString().trimmed();
+
+        if (!ok || rawServerUrl.isEmpty() || relayPassword.isEmpty()) {
+            QString serverErr = obj.value(QStringLiteral("error")).toString().trimmed();
+            if (serverErr.isEmpty()) {
+                serverErr = errStr.isEmpty()
+                                ? QStringLiteral("BluePill Cloud sign-in exchange failed (HTTP %1).").arg(httpStatus)
+                                : errStr;
+            }
+            m_cloudSignInPending = false;
+            m_cloudSignInError = serverErr;
+            emit cloudSignInStateChanged();
+            return;
+        }
+
+        QUrl parsedServerUrl(rawServerUrl);
+        if (parsedServerUrl.isValid() && parsedServerUrl.port() == -1) {
+            const QString scheme = parsedServerUrl.scheme().toLower();
+            if (scheme == QStringLiteral("https")) {
+                parsedServerUrl.setPort(443);
+            } else if (scheme == QStringLiteral("http")) {
+                parsedServerUrl.setPort(80);
+            }
+        }
+        const QString resolvedServerUrl = parsedServerUrl.isValid() ? parsedServerUrl.toString() : rawServerUrl;
+
+        QSettings settings(cloudSettingsFilePath(), QSettings::IniFormat);
+        settings.setValue(QStringLiteral("cloud/accountEmail"), email);
+        settings.setValue(QStringLiteral("cloud/serverUrl"), resolvedServerUrl);
+        settings.sync();
+
+        m_cloudAccountEmail = email;
+        m_cloudSignInError.clear();
+        m_cloudSignInBrowserUrl.clear();
+        m_cloudSignInPending = false;
+
+        saveServerConfig(resolvedServerUrl, QString(), relayPassword);
+        emit cloudSignInStateChanged();
+        emit cloudSignInCompleted(email, configuredServerUrl());
+    });
+}
+
 int Backend::compareSemver(const QString &a, const QString &b) {
     auto parseParts = [](const QString &raw) {
         QString s = raw.trimmed();
@@ -2750,6 +3119,14 @@ void Backend::loadCredentials() {
     }
     if (m_themeMode != prevThemeMode) {
         emit themeModeChanged();
+    }
+    {
+        QSettings settings(cloudSettingsFilePath(), QSettings::IniFormat);
+        const QString loadedEmail = settings.value(QStringLiteral("cloud/accountEmail")).toString().trimmed();
+        if (m_cloudAccountEmail != loadedEmail) {
+            m_cloudAccountEmail = loadedEmail;
+            emit cloudSignInStateChanged();
+        }
     }
     emit configChanged();
 }

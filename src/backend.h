@@ -14,8 +14,11 @@
 #include <QProcess>
 #include <QPointer>
 #include <QSet>
+#include <QSettings>
 #include <QString>
 #include <QSystemTrayIcon>
+#include <QTcpServer>
+#include <QTcpSocket>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -85,6 +88,10 @@ class Backend : public QObject {
     Q_PROPERTY(bool hasPasswordConfigured READ hasPasswordConfigured NOTIFY configChanged)
     Q_PROPERTY(bool needsSetup READ needsSetup NOTIFY configChanged)
     Q_PROPERTY(bool cloudLoggedIn READ cloudLoggedIn NOTIFY configChanged)
+    Q_PROPERTY(bool cloudSignInPending READ cloudSignInPending NOTIFY cloudSignInStateChanged)
+    Q_PROPERTY(QString cloudAccountEmail READ cloudAccountEmail NOTIFY cloudSignInStateChanged)
+    Q_PROPERTY(QString cloudSignInError READ cloudSignInError NOTIFY cloudSignInStateChanged)
+    Q_PROPERTY(QString cloudSignInBrowserUrl READ cloudSignInBrowserUrl NOTIFY cloudSignInStateChanged)
     Q_PROPERTY(bool autoUpdateCheckEnabled READ autoUpdateCheckEnabled WRITE setAutoUpdateCheckEnabled NOTIFY configChanged)
     Q_PROPERTY(bool clientUpdateAvailable READ clientUpdateAvailable NOTIFY updateStateChanged)
     Q_PROPERTY(QString clientLatestVersion READ clientLatestVersion NOTIFY updateStateChanged)
@@ -391,6 +398,18 @@ public:
     Q_INVOKABLE void openAttachment(const QString &guid, const QString &transferName);
     Q_INVOKABLE void openUrl(const QString &url);
     bool cloudLoggedIn() const;
+    bool cloudSignInPending() const { return m_cloudSignInPending; }
+    QString cloudAccountEmail() const { return m_cloudAccountEmail; }
+    QString cloudSignInError() const { return m_cloudSignInError; }
+    QString cloudSignInBrowserUrl() const { return m_cloudSignInBrowserUrl; }
+    Q_INVOKABLE void startCloudSignIn();
+    Q_INVOKABLE void cancelCloudSignIn();
+    Q_INVOKABLE void signOutCloud();
+    void setCloudWebBaseUrlForTest(const QString &url) { m_cloudWebBaseOverride = url; }
+    void setCloudApiBaseUrlForTest(const QString &url) { m_cloudApiBaseOverride = url; }
+    void setSuppressDesktopBrowserOpenForTest(bool suppress) { m_suppressDesktopBrowserOpen = suppress; }
+    quint16 cloudSignInListenPortForTest() const { return m_cloudAuthServer ? m_cloudAuthServer->serverPort() : 0; }
+    QString cloudSignInExpectedStateForTest() const { return m_cloudSignInExpectedState; }
     bool autoUpdateCheckEnabled() const { return m_autoUpdateCheckEnabled; }
     void setAutoUpdateCheckEnabled(bool enabled);
     bool clientUpdateAvailable() const { return cloudLoggedIn() && m_clientUpdateAvailable; }
@@ -682,6 +701,8 @@ signals:
     void audioDevicesChanged();
     void scheduledMessagesChanged();
     void updateStateChanged();
+    void cloudSignInStateChanged();
+    void cloudSignInCompleted(const QString &email, const QString &serverUrl);
 
     void toastMessage(const QString &text);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
@@ -783,6 +804,12 @@ private:
     void notifyIncomingMessage(const QString &chatGuid, const QString &sender, const QString &preview);
     void showDesktopNotification(const QString &title, const QString &body);
     static QString defaultBluepillConfigPath();
+    QString cloudSettingsFilePath() const;
+    void stopCloudSignInListener();
+    void handleCloudAuthConnection();
+    void processCloudCallbackRequest(QTcpSocket *sock, const QByteArray &rawRequest);
+    void sendCloudHttpResponse(QTcpSocket *sock, int statusCode, const QByteArray &statusText, const QByteArray &htmlBody);
+    void exchangeCloudAuthCode(const QString &code, const QString &state);
     void playNotificationSound(const QString &presetOverride = QString(), bool forcePreview = false);
     void handleNetworkFailure(const QString &context);
     void handleNetworkSuccess();
@@ -865,6 +892,17 @@ private:
     QString m_updateStatusText;
     QString m_updatesFeedUrlOverride;
     QTimer m_cloudUpdateTimer;
+    bool m_cloudSignInPending = false;
+    QString m_cloudAccountEmail;
+    QString m_cloudSignInError;
+    QString m_cloudSignInBrowserUrl;
+    QString m_cloudSignInExpectedState;
+    QString m_cloudWebBaseOverride;
+    QString m_cloudApiBaseOverride;
+    bool m_suppressDesktopBrowserOpen = false;
+    QPointer<QTcpServer> m_cloudAuthServer;
+    QPointer<QNetworkReply> m_cloudExchangeReply;
+    QTimer m_cloudSignInTimeoutTimer;
     bool m_windowActive = true;
     QPointer<QObject> m_rootWindow;
     bool m_notificationsEnabled = true;

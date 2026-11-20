@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.6)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.7)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, built-in Cloud Relay WebSocket tunnel,
@@ -57,7 +57,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
@@ -8422,7 +8422,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.6</span>
+      <span class="pill pill-blue">v1.2.7</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>

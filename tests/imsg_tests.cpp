@@ -11292,6 +11292,217 @@ private slots:
         if (!prevBbPass.isEmpty()) qputenv("BLUEBUBBLES_PASSWORD", prevBbPass);
     }
 
+    void testCloudDesktopSignInFlow() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+        const QByteArray prevBpUrl = qgetenv("BLUEPILL_SERVER_URL");
+        const QByteArray prevBpPass = qgetenv("BLUEPILL_PASSWORD");
+        const QByteArray prevImsgUrl = qgetenv("IMSG_SERVER_URL");
+        const QByteArray prevImsgPass = qgetenv("IMSG_PASSWORD");
+        const QByteArray prevBbUrl = qgetenv("BLUEBUBBLES_URL");
+        const QByteArray prevBbPass = qgetenv("BLUEBUBBLES_PASSWORD");
+        auto restoreEnv = qScopeGuard([&]() {
+            if (!prevBpUrl.isEmpty()) qputenv("BLUEPILL_SERVER_URL", prevBpUrl); else qunsetenv("BLUEPILL_SERVER_URL");
+            if (!prevBpPass.isEmpty()) qputenv("BLUEPILL_PASSWORD", prevBpPass); else qunsetenv("BLUEPILL_PASSWORD");
+            if (!prevImsgUrl.isEmpty()) qputenv("IMSG_SERVER_URL", prevImsgUrl); else qunsetenv("IMSG_SERVER_URL");
+            if (!prevImsgPass.isEmpty()) qputenv("IMSG_PASSWORD", prevImsgPass); else qunsetenv("IMSG_PASSWORD");
+            if (!prevBbUrl.isEmpty()) qputenv("BLUEBUBBLES_URL", prevBbUrl); else qunsetenv("BLUEBUBBLES_URL");
+            if (!prevBbPass.isEmpty()) qputenv("BLUEBUBBLES_PASSWORD", prevBbPass); else qunsetenv("BLUEBUBBLES_PASSWORD");
+        });
+        qunsetenv("BLUEPILL_SERVER_URL");
+        qunsetenv("BLUEPILL_PASSWORD");
+        qunsetenv("IMSG_SERVER_URL");
+        qunsetenv("IMSG_PASSWORD");
+        qunsetenv("BLUEBUBBLES_URL");
+        qunsetenv("BLUEBUBBLES_PASSWORD");
+
+        const QString cfgPath = tempDir.filePath(QStringLiteral("config_signin.json"));
+
+        // Local mock BluePill Cloud API exchange server
+        QTcpServer mockExchange;
+        QVERIFY(mockExchange.listen(QHostAddress::LocalHost, 0));
+        QString lastExchangeCode;
+        QString lastExchangeState;
+        int exchangeHits = 0;
+        QObject::connect(&mockExchange, &QTcpServer::newConnection, &mockExchange, [&]() {
+            while (mockExchange.hasPendingConnections()) {
+                QTcpSocket *s = mockExchange.nextPendingConnection();
+                auto reqBuf = std::make_shared<QByteArray>();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s, reqBuf]() {
+                    reqBuf->append(s->readAll());
+                    const int hdrEnd = reqBuf->indexOf("\r\n\r\n");
+                    if (hdrEnd < 0) return;
+                    int contentLen = 0;
+                    const QList<QByteArray> hdrLines = reqBuf->left(hdrEnd).split('\n');
+                    for (const QByteArray &line : hdrLines) {
+                        const QByteArray lower = line.trimmed().toLower();
+                        if (lower.startsWith("content-length:")) {
+                            contentLen = lower.mid(15).trimmed().toInt();
+                        }
+                    }
+                    const int bodyStart = hdrEnd + 4;
+                    if (reqBuf->size() < bodyStart + contentLen) return;
+
+                    const QByteArray bodyBytes = reqBuf->mid(bodyStart, contentLen);
+                    const QJsonObject reqObj = QJsonDocument::fromJson(bodyBytes).object();
+                    lastExchangeCode = reqObj.value(QStringLiteral("code")).toString();
+                    lastExchangeState = reqObj.value(QStringLiteral("state")).toString();
+                    ++exchangeHits;
+
+                    const QByteArray jsonResp = QJsonDocument(QJsonObject{
+                        {QStringLiteral("ok"), true},
+                        {QStringLiteral("email"), QStringLiteral("alice@example.com")},
+                        {QStringLiteral("name"), QStringLiteral("Alice")},
+                        {QStringLiteral("slug"), QStringLiteral("alice")},
+                        {QStringLiteral("server_url"), QStringLiteral("https://api.bluepill.nertwork.com/t/alice")},
+                        {QStringLiteral("relay_password"), QStringLiteral("cloud-relay-secret-99")},
+                        {QStringLiteral("web_client_url"), QStringLiteral("https://bluepill.nertwork.com/t/alice/web")},
+                        {QStringLiteral("tunnel_online"), true}
+                    }).toJson(QJsonDocument::Compact);
+
+                    const QByteArray httpResp =
+                        "HTTP/1.1 200 OK\r\n"
+                        "Content-Type: application/json\r\n"
+                        "Content-Length: " + QByteArray::number(jsonResp.size()) + "\r\n"
+                        "Connection: close\r\n\r\n" + jsonResp;
+                    s->write(httpResp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_signin.json")));
+        b.setConfigFilePath(cfgPath);
+        b.setCloudWebBaseUrlForTest(QStringLiteral("https://bluepill.nertwork.com"));
+        b.setCloudApiBaseUrlForTest(QStringLiteral("http://127.0.0.1:%1").arg(mockExchange.serverPort()));
+        b.setSuppressDesktopBrowserOpenForTest(true);
+
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+        QObject *root = engine.rootObjects().first();
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("welcomeCloudPendingBox")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("welcomeCloudSignedInBanner")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("settingsCloudPendingBox")) != nullptr);
+        QVERIFY(root->findChild<QObject *>(QStringLiteral("settingsCloudSignedInBanner")) != nullptr);
+        root->setProperty("showServerConfigModal", true);
+
+        // 1. Full happy path: startCloudSignIn -> partial TCP callback -> mock exchange -> configured & persisted
+        QSignalSpy completedSpy(&b, &Backend::cloudSignInCompleted);
+        b.startCloudSignIn();
+        QCOMPARE(b.cloudSignInPending(), true);
+        const quint16 listenPort = b.cloudSignInListenPortForTest();
+        const QString expectedState = b.cloudSignInExpectedStateForTest();
+        QVERIFY(listenPort >= 1024);
+        QVERIFY(expectedState.size() >= 16);
+        QVERIFY(b.cloudSignInBrowserUrl().contains(QStringLiteral("/portal/desktop-auth?port=%1&state=%2").arg(listenPort).arg(expectedState)));
+
+        QTcpSocket cbSock;
+        cbSock.connectToHost(QHostAddress::LocalHost, listenPort);
+        QVERIFY(cbSock.waitForConnected(2000));
+        // Send callback in two partial TCP writes to test buffering until \r\n\r\n
+        const QByteArray cbPart1 = QStringLiteral("GET /callback?code=testcode&state=%1").arg(expectedState).toUtf8();
+        const QByteArray cbPart2 = QByteArrayLiteral(" HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        cbSock.write(cbPart1);
+        cbSock.flush();
+        QCoreApplication::processEvents();
+        cbSock.write(cbPart2);
+        cbSock.flush();
+        QByteArray cbResp;
+        QTRY_VERIFY_WITH_TIMEOUT(cbSock.bytesAvailable() > 0 || cbSock.state() == QAbstractSocket::UnconnectedState, 3000);
+        while (cbSock.waitForReadyRead(300)) {
+            cbResp.append(cbSock.readAll());
+        }
+        cbResp.append(cbSock.readAll());
+        QVERIFY2(cbResp.startsWith("HTTP/1.1 200 OK"), cbResp.constData());
+        QVERIFY(cbResp.contains("Signed in to BluePill!"));
+
+        QTRY_COMPARE_WITH_TIMEOUT(completedSpy.count(), 1, 5000);
+        QCOMPARE(exchangeHits, 1);
+        QCOMPARE(lastExchangeCode, QStringLiteral("testcode"));
+        QCOMPARE(lastExchangeState, expectedState);
+        QCOMPARE(b.cloudSignInPending(), false);
+        QCOMPARE(b.cloudSignInError(), QString());
+        QCOMPARE(b.cloudAccountEmail(), QStringLiteral("alice@example.com"));
+        QCOMPARE(b.configuredServerUrl(), QStringLiteral("https://api.bluepill.nertwork.com:443/t/alice"));
+        QCOMPARE(b.serverPassword(), QStringLiteral("cloud-relay-secret-99"));
+        QCOMPARE(b.cloudLoggedIn(), true);
+        QCOMPARE(root->property("showServerConfigModal").toBool(), false);
+        QVERIFY(root->property("activeToastText").toString().contains(QStringLiteral("Signed in as alice@example.com")));
+
+        // Verify QSettings persistence on reload
+        {
+            Backend bReload(false);
+            bReload.setConfigFilePath(cfgPath);
+            QCOMPARE(bReload.cloudAccountEmail(), QStringLiteral("alice@example.com"));
+            QCOMPARE(bReload.configuredServerUrl(), QStringLiteral("https://api.bluepill.nertwork.com:443/t/alice"));
+            QCOMPARE(bReload.cloudLoggedIn(), true);
+        }
+
+        // 4. signOutCloud() clears cloudAccountEmail and Cloud credentials cleanly
+        b.signOutCloud();
+        QCOMPARE(b.cloudAccountEmail(), QString());
+        QCOMPARE(b.configuredServerUrl(), QString());
+        QCOMPARE(b.serverPassword(), QString());
+        QCOMPARE(b.cloudLoggedIn(), false);
+        {
+            Backend bAfterSignOut(false);
+            bAfterSignOut.setConfigFilePath(cfgPath);
+            QCOMPARE(bAfterSignOut.cloudAccountEmail(), QString());
+            QCOMPARE(bAfterSignOut.configuredServerUrl(), QString());
+        }
+
+        // 2. Mismatched state rejected (HTTP 400, existing config NOT overwritten)
+        b.saveServerConfig(QStringLiteral("http://192.0.2.10:1235"), QString(), QStringLiteral("keep-local-pw"));
+        QCOMPARE(b.configuredServerUrl(), QStringLiteral("http://192.0.2.10:1235"));
+        b.startCloudSignIn();
+        QCOMPARE(b.cloudSignInPending(), true);
+        const quint16 badStatePort = b.cloudSignInListenPortForTest();
+        QVERIFY(badStatePort >= 1024);
+
+        QTcpSocket badSock;
+        badSock.connectToHost(QHostAddress::LocalHost, badStatePort);
+        QVERIFY(badSock.waitForConnected(2000));
+        badSock.write("GET /callback?code=badcode&state=wrong_state_value HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        badSock.flush();
+        QByteArray badResp;
+        QTRY_VERIFY_WITH_TIMEOUT(badSock.bytesAvailable() > 0 || badSock.state() == QAbstractSocket::UnconnectedState, 3000);
+        while (badSock.waitForReadyRead(300)) {
+            badResp.append(badSock.readAll());
+        }
+        badResp.append(badSock.readAll());
+        QVERIFY2(badResp.startsWith("HTTP/1.1 400"), badResp.constData());
+        QCOMPARE(b.cloudSignInPending(), false);
+        QVERIFY(!b.cloudSignInError().isEmpty());
+        QCOMPARE(b.configuredServerUrl(), QStringLiteral("http://192.0.2.10:1235"));
+        QCOMPARE(b.serverPassword(), QStringLiteral("keep-local-pw"));
+        QCOMPARE(b.cloudAccountEmail(), QString());
+        QCOMPARE(exchangeHits, 1);
+
+        // 3. cancelCloudSignIn() shuts down listener and clears cloudSignInPending
+        b.startCloudSignIn();
+        QCOMPARE(b.cloudSignInPending(), true);
+        const quint16 cancelPort = b.cloudSignInListenPortForTest();
+        QVERIFY(cancelPort >= 1024);
+        b.cancelCloudSignIn();
+        QCOMPARE(b.cloudSignInPending(), false);
+        QCOMPARE(b.cloudSignInListenPortForTest(), static_cast<quint16>(0));
+        QCOMPARE(b.cloudSignInError(), QString());
+        QCoreApplication::processEvents();
+        QTcpSocket closedSock;
+        closedSock.connectToHost(QHostAddress::LocalHost, cancelPort);
+        QVERIFY(!closedSock.waitForConnected(300));
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

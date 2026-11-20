@@ -1278,6 +1278,10 @@ ApplicationWindow {
                 backend.openAttachment(pendingOpenGuid, pendingOpenName)
             }
         }
+        function onCloudSignInCompleted(email, serverUrl) {
+            root.showServerConfigModal = false
+            root.showToast(i18n.tr("Signed in as ") + (email || "BluePill Cloud") + i18n.tr(" — connecting to your Mac relay…"))
+        }
     }
 
     Timer {
@@ -1753,7 +1757,7 @@ ApplicationWindow {
                                     objectName: "topStatusPillText"
                                     text: {
                                         var statusMatch = (backend.serverStatus || "").match(/v\d+\.\d+(?:\.\d+)?/i)
-                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.6")
+                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.7")
                                         var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
                                         var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
                                         return host.length > 0 ? (st + " · " + host) : st
@@ -2925,7 +2929,7 @@ ApplicationWindow {
                         Text {
                             Layout.fillWidth: true
                             horizontalAlignment: Text.AlignHCenter
-                            text: i18n.tr("Sign in at bluepill.nertwork.com to copy your Relay URL & password, or explore the live interactive demo.")
+                            text: i18n.tr("Sign in with BluePill Cloud to connect automatically, or explore the live interactive demo.")
                             font.pixelSize: theme.fontSize - 1
                             color: theme.darkForeground
                             wrapMode: Text.WordWrap
@@ -2934,6 +2938,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.topMargin: 4
                             spacing: 10
+                            visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
                             Rectangle {
                                 objectName: "welcomeCloudSignInBtn"
                                 Layout.fillWidth: true
@@ -2942,7 +2947,7 @@ ApplicationWindow {
                                 color: theme.accent
                                 Text {
                                     anchors.centerIn: parent
-                                    text: i18n.tr("Sign in at bluepill.nertwork.com →")
+                                    text: i18n.tr("Sign in with BluePill Cloud →")
                                     font.pixelSize: theme.fontSize - 1
                                     font.bold: true
                                     color: theme.onAccent
@@ -2950,10 +2955,7 @@ ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
-                                        root.openServerConfigModal()
-                                    }
+                                    onClicked: backend.startCloudSignIn()
                                 }
                             }
                             Rectangle {
@@ -2978,6 +2980,160 @@ ApplicationWindow {
                                     onClicked: root.connectToLiveDemo()
                                 }
                             }
+                        }
+                        Rectangle {
+                            id: welcomeCloudPendingBox
+                            objectName: "welcomeCloudPendingBox"
+                            visible: backend.cloudSignInPending
+                            Layout.fillWidth: true
+                            implicitHeight: welcomePendingCol.implicitHeight + 18
+                            radius: 8
+                            color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
+                            border.width: 1
+                            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.40)
+                            ColumnLayout {
+                                id: welcomePendingCol
+                                anchors.fill: parent
+                                anchors.margins: 9
+                                spacing: 8
+                                Text {
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    text: i18n.tr("Complete sign-in in your browser (Google, GitHub, or Email)…")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.brightForeground
+                                    wrapMode: Text.WordWrap
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Rectangle {
+                                        objectName: "welcomeOpenBrowserAgainBtn"
+                                        Layout.fillWidth: true
+                                        height: 32
+                                        radius: 6
+                                        color: theme.accent
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: i18n.tr("Open Browser Again")
+                                            font.pixelSize: theme.fontSize - 2
+                                            font.bold: true
+                                            color: theme.onAccent
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: if (backend.cloudSignInBrowserUrl.length > 0) Qt.openUrlExternally(backend.cloudSignInBrowserUrl)
+                                        }
+                                    }
+                                    Rectangle {
+                                        objectName: "welcomeCancelCloudSignInBtn"
+                                        Layout.preferredWidth: welcomeCancelTxt.implicitWidth + 24
+                                        height: 32
+                                        radius: 6
+                                        color: theme.lighterBackground
+                                        border.width: 1
+                                        border.color: theme.muted
+                                        Text {
+                                            id: welcomeCancelTxt
+                                            anchors.centerIn: parent
+                                            text: i18n.tr("Cancel")
+                                            font.pixelSize: theme.fontSize - 2
+                                            color: theme.foreground
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: backend.cancelCloudSignIn()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            id: welcomeCloudSignedInBanner
+                            objectName: "welcomeCloudSignedInBanner"
+                            visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length > 0
+                            Layout.fillWidth: true
+                            implicitHeight: welcomeSignedInCol.implicitHeight + 16
+                            radius: 8
+                            color: Qt.rgba(48/255, 209/255, 88/255, 0.14)
+                            border.width: 1
+                            border.color: theme.green
+                            ColumnLayout {
+                                id: welcomeSignedInCol
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 8
+                                Text {
+                                    objectName: "welcomeCloudSignedInText"
+                                    Layout.fillWidth: true
+                                    horizontalAlignment: Text.AlignHCenter
+                                    text: "✓ " + i18n.tr("Signed in as ") + backend.cloudAccountEmail
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.green
+                                    wrapMode: Text.WordWrap
+                                }
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 8
+                                    Rectangle {
+                                        objectName: "welcomeOpenPortalBtn"
+                                        Layout.fillWidth: true
+                                        height: 32
+                                        radius: 6
+                                        color: theme.lighterBackground
+                                        border.width: 1
+                                        border.color: theme.muted
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: i18n.tr("Open Portal")
+                                            font.pixelSize: theme.fontSize - 2
+                                            font.bold: true
+                                            color: theme.foreground
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
+                                        }
+                                    }
+                                    Rectangle {
+                                        objectName: "welcomeSignOutCloudBtn"
+                                        Layout.preferredWidth: welcomeSignOutTxt.implicitWidth + 24
+                                        height: 32
+                                        radius: 6
+                                        color: Qt.rgba(255/255, 69/255, 58/255, 0.14)
+                                        border.width: 1
+                                        border.color: theme.red
+                                        Text {
+                                            id: welcomeSignOutTxt
+                                            anchors.centerIn: parent
+                                            text: i18n.tr("Sign Out")
+                                            font.pixelSize: theme.fontSize - 2
+                                            font.bold: true
+                                            color: theme.red
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: backend.signOutCloud()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            objectName: "welcomeCloudSignInErrorText"
+                            visible: backend.cloudSignInError.length > 0
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: backend.cloudSignInError
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.red
+                            wrapMode: Text.WordWrap
                         }
                         Rectangle {
                             objectName: "welcomeOpenSettingsBtn"
@@ -9771,7 +9927,7 @@ ApplicationWindow {
                                 Text {
                                     id: settingsClientVersionText
                                     objectName: "settingsClientVersionText"
-                                    text: "BluePill v" + (Qt.application.version || "1.2.6")
+                                    text: "BluePill v" + (Qt.application.version || "1.2.7")
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.accent
@@ -9887,7 +10043,7 @@ ApplicationWindow {
                         }
                         Text {
                             Layout.fillWidth: true
-                            text: i18n.tr("Sign in at bluepill.nertwork.com to copy your Relay URL & password, or connect to the live demo in one click.")
+                            text: i18n.tr("Sign in with BluePill Cloud to connect automatically, or connect to the live demo in one click.")
                             font.pixelSize: theme.fontSize - 2
                             color: theme.foreground
                             wrapMode: Text.WordWrap
@@ -9895,6 +10051,7 @@ ApplicationWindow {
                         RowLayout {
                             Layout.fillWidth: true
                             spacing: 8
+                            visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
                             Rectangle {
                                 id: cloudSignInBtn
                                 objectName: "cloudSignInBtn"
@@ -9904,7 +10061,7 @@ ApplicationWindow {
                                 color: theme.accent
                                 Text {
                                     anchors.centerIn: parent
-                                    text: i18n.tr("Sign in at bluepill.nertwork.com →")
+                                    text: i18n.tr("Sign in with BluePill Cloud →")
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.onAccent
@@ -9912,10 +10069,7 @@ ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
-                                        Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
-                                        root.showToast("🌐 " + i18n.tr("Opening bluepill.nertwork.com/portal in browser"))
-                                    }
+                                    onClicked: backend.startCloudSignIn()
                                 }
                             }
                             Rectangle {
@@ -9941,6 +10095,144 @@ ApplicationWindow {
                                     onClicked: root.connectToLiveDemo()
                                 }
                             }
+                        }
+                        ColumnLayout {
+                            id: settingsCloudPendingBox
+                            objectName: "settingsCloudPendingBox"
+                            visible: backend.cloudSignInPending
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: i18n.tr("Complete sign-in in your browser (Google, GitHub, or Email)…")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.brightForeground
+                                wrapMode: Text.WordWrap
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 8
+                                Rectangle {
+                                    objectName: "settingsOpenBrowserAgainBtn"
+                                    Layout.fillWidth: true
+                                    height: 32
+                                    radius: 6
+                                    color: theme.accent
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Open Browser Again")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.onAccent
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: if (backend.cloudSignInBrowserUrl.length > 0) Qt.openUrlExternally(backend.cloudSignInBrowserUrl)
+                                    }
+                                }
+                                Rectangle {
+                                    objectName: "settingsCancelCloudSignInBtn"
+                                    Layout.preferredWidth: settingsCancelTxt.implicitWidth + 22
+                                    height: 32
+                                    radius: 6
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        id: settingsCancelTxt
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Cancel")
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: theme.foreground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.cancelCloudSignIn()
+                                    }
+                                }
+                            }
+                        }
+                        Rectangle {
+                            id: settingsCloudSignedInBanner
+                            objectName: "settingsCloudSignedInBanner"
+                            visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length > 0
+                            Layout.fillWidth: true
+                            implicitHeight: settingsSignedInRow.implicitHeight + 14
+                            radius: 7
+                            color: Qt.rgba(48/255, 209/255, 88/255, 0.14)
+                            border.width: 1
+                            border.color: theme.green
+                            RowLayout {
+                                id: settingsSignedInRow
+                                anchors.fill: parent
+                                anchors.margins: 7
+                                spacing: 8
+                                Text {
+                                    objectName: "settingsCloudSignedInText"
+                                    Layout.fillWidth: true
+                                    text: "✓ " + i18n.tr("Signed in as ") + backend.cloudAccountEmail
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.green
+                                    elide: Text.ElideRight
+                                }
+                                Rectangle {
+                                    objectName: "settingsOpenPortalBtn"
+                                    Layout.preferredWidth: settingsOpenPortalTxt.implicitWidth + 16
+                                    height: 28
+                                    radius: 6
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        id: settingsOpenPortalTxt
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Open Portal")
+                                        font.pixelSize: theme.fontSize - 3
+                                        font.bold: true
+                                        color: theme.foreground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: Qt.openUrlExternally("https://bluepill.nertwork.com/portal")
+                                    }
+                                }
+                                Rectangle {
+                                    objectName: "settingsSignOutCloudBtn"
+                                    Layout.preferredWidth: settingsSignOutTxt.implicitWidth + 16
+                                    height: 28
+                                    radius: 6
+                                    color: Qt.rgba(255/255, 69/255, 58/255, 0.14)
+                                    border.width: 1
+                                    border.color: theme.red
+                                    Text {
+                                        id: settingsSignOutTxt
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Sign Out")
+                                        font.pixelSize: theme.fontSize - 3
+                                        font.bold: true
+                                        color: theme.red
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.signOutCloud()
+                                    }
+                                }
+                            }
+                        }
+                        Text {
+                            objectName: "settingsCloudSignInErrorText"
+                            visible: backend.cloudSignInError.length > 0
+                            Layout.fillWidth: true
+                            text: backend.cloudSignInError
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.red
+                            wrapMode: Text.WordWrap
                         }
                     }
                 }
@@ -11364,8 +11656,8 @@ ApplicationWindow {
                             }
                             Text {
                                 text: backend.clientUpdateAvailable
-                                      ? ("v" + (Qt.application.version || "1.2.6") + " → v" + backend.clientLatestVersion)
-                                      : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.6")
+                                      ? ("v" + (Qt.application.version || "1.2.7") + " → v" + backend.clientLatestVersion)
+                                      : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.7")
                                 font.pixelSize: theme.fontSize - 2
                                 color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
                             }
