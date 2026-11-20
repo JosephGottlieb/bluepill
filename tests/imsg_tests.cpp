@@ -10979,6 +10979,169 @@ private slots:
         QCOMPARE(listView->property("contentY").toReal(), baselineContentY);
     }
 
+    void testThemeModeLightDarkSystem() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        Theme theme;
+        QCOMPARE(theme.themeMode(), QStringLiteral("system"));
+
+        // Explicit Light mode: crisp macOS/Liquid Glass Light palette
+        theme.setThemeMode(QStringLiteral("light"));
+        QCOMPARE(theme.themeMode(), QStringLiteral("light"));
+        QCOMPARE(theme.mode(), QStringLiteral("light"));
+        QCOMPARE(theme.isDark(), false);
+        QCOMPARE(theme.background(), QColor(QStringLiteral("#f5f7fb")));
+        QCOMPARE(theme.darkBackground(), QColor(QStringLiteral("#ffffff")));
+        QCOMPARE(theme.brightForeground(), QColor(QStringLiteral("#0f172a")));
+        QCOMPARE(theme.darkForeground(), QColor(QStringLiteral("#475569")));
+        QCOMPARE(theme.incomingBubble(), QColor(QStringLiteral("#e2e8f0")));
+        QCOMPARE(theme.outgoingBlueBubble(), QColor(QStringLiteral("#0A84FF")));
+        QCOMPARE(theme.outgoingGreenBubble(), QColor(QStringLiteral("#30D158")));
+        QCOMPARE(theme.onAccent(), QColor(QStringLiteral("#ffffff")));
+
+        // Explicit Dark mode: signature dark palette
+        theme.setThemeMode(QStringLiteral("dark"));
+        QCOMPARE(theme.themeMode(), QStringLiteral("dark"));
+        QCOMPARE(theme.mode(), QStringLiteral("dark"));
+        QCOMPARE(theme.isDark(), true);
+        QCOMPARE(theme.background(), QColor(QStringLiteral("#1a1b26")));
+        QCOMPARE(theme.incomingBubble(), QColor(QStringLiteral("#1e2430")));
+        QCOMPARE(theme.outgoingGreenBubble(), QColor(QStringLiteral("#1B6E38")));
+
+        // System mode tracks OS preference dynamically
+        theme.setThemeMode(QStringLiteral("system"));
+        theme.setSystemColorSchemeForTest(true);
+        QCOMPARE(theme.isDark(), false);
+        QCOMPARE(theme.background(), QColor(QStringLiteral("#f5f7fb")));
+
+        theme.setSystemColorSchemeForTest(false);
+        QCOMPARE(theme.isDark(), true);
+        QCOMPARE(theme.background(), QColor(QStringLiteral("#1a1b26")));
+        theme.clearSystemColorSchemeOverrideForTest();
+
+        // Invalid input normalizes safely to "system"
+        theme.setThemeMode(QStringLiteral("invalid-mode"));
+        QCOMPARE(theme.themeMode(), QStringLiteral("system"));
+
+        // Omarchy dark theme is preserved in Dark mode, while explicit Light mode stays Light
+        const QString omarchyDir = tempDir.filePath(QStringLiteral(".config/omarchy/current/theme"));
+        QVERIFY(QDir().mkpath(omarchyDir));
+        QFile omarchyToml(omarchyDir + QStringLiteral("/colors.toml"));
+        QVERIFY(omarchyToml.open(QIODevice::WriteOnly | QIODevice::Text));
+        omarchyToml.write("mode = \"dark\"\nbackground = \"#11121a\"\naccent = \"#ff9e64\"\n");
+        omarchyToml.close();
+
+        theme.setThemeMode(QStringLiteral("dark"));
+        QCOMPARE(theme.isDark(), true);
+        QCOMPARE(theme.background(), QColor(QStringLiteral("#11121a")));
+
+        theme.setThemeMode(QStringLiteral("light"));
+        QCOMPARE(theme.isDark(), false);
+        QCOMPARE(theme.background(), QColor(QStringLiteral("#f5f7fb")));
+    }
+
+    void testThemeModePersistenceAndUiToggle() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        const QString cfgPath = tempDir.filePath(QStringLiteral("config.json"));
+        Backend b1(false);
+        Theme t1;
+        b1.setTheme(&t1);
+        b1.setConfigFilePath(cfgPath);
+        QCOMPARE(b1.themeMode(), QStringLiteral("system"));
+
+        // Persist "light" into config.json and verify reload in a fresh Backend + Theme pair
+        b1.setThemeMode(QStringLiteral("light"));
+        QCOMPARE(b1.themeMode(), QStringLiteral("light"));
+        QCOMPARE(t1.themeMode(), QStringLiteral("light"));
+        QCOMPARE(t1.isDark(), false);
+
+        QFile cfgFile(cfgPath);
+        QVERIFY(cfgFile.open(QIODevice::ReadOnly));
+        const QJsonObject savedObj = QJsonDocument::fromJson(cfgFile.readAll()).object();
+        cfgFile.close();
+        QCOMPARE(savedObj.value(QStringLiteral("themeMode")).toString(), QStringLiteral("light"));
+
+        Backend b2(false);
+        Theme t2;
+        b2.setTheme(&t2);
+        b2.setConfigFilePath(cfgPath);
+        QCOMPARE(b2.themeMode(), QStringLiteral("light"));
+        QCOMPARE(t2.themeMode(), QStringLiteral("light"));
+        QCOMPARE(t2.isDark(), false);
+        QCOMPARE(t2.background(), QColor(QStringLiteral("#f5f7fb")));
+
+        // Verify Settings -> UI & Appearance theme selector in Main.qml
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b2);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &t2);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->resize(1180, 820);
+        win->show();
+        QTest::qWait(60);
+
+        QCOMPARE(win->property("color").value<QColor>(), QColor(QStringLiteral("#f5f7fb")));
+
+        std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (!item) return nullptr;
+            if (item->objectName() == name) return item;
+            for (QQuickItem *c : item->childItems()) {
+                if (QQuickItem *f = findVisual(c, name)) return f;
+            }
+            return nullptr;
+        };
+
+        QMetaObject::invokeMethod(win, "openServerConfigModal");
+        QCoreApplication::processEvents();
+        QQuickItem *appearanceTab = findVisual(win->contentItem(), QStringLiteral("settingsTab_appearance"));
+        QVERIFY(appearanceTab != nullptr);
+        win->setProperty("settingsActiveTab", QStringLiteral("appearance"));
+        QCoreApplication::processEvents();
+        QTest::qWait(40);
+
+        QQuickItem *selector = win->findChild<QQuickItem *>(QStringLiteral("themeModeSelector"));
+        QQuickItem *sysBtn = findVisual(win->contentItem(), QStringLiteral("themeModeBtn_system"));
+        QQuickItem *darkBtn = findVisual(win->contentItem(), QStringLiteral("themeModeBtn_dark"));
+        QQuickItem *lightBtn = findVisual(win->contentItem(), QStringLiteral("themeModeBtn_light"));
+        QVERIFY(selector != nullptr);
+        QVERIFY(sysBtn != nullptr);
+        QVERIFY(darkBtn != nullptr);
+        QVERIFY(lightBtn != nullptr);
+        QCOMPARE(lightBtn->property("isSelected").toBool(), true);
+
+        // Click Dark button -> updates backend, theme, window background, and config.json
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier,
+                          darkBtn->mapToScene(QPointF(darkBtn->width() / 2.0, darkBtn->height() / 2.0)).toPoint());
+        QCoreApplication::processEvents();
+        QCOMPARE(b2.themeMode(), QStringLiteral("dark"));
+        QCOMPARE(t2.themeMode(), QStringLiteral("dark"));
+        QCOMPARE(t2.isDark(), true);
+        QCOMPARE(win->property("color").value<QColor>(), QColor(QStringLiteral("#1a1b26")));
+
+        QFile cfgAfterDark(cfgPath);
+        QVERIFY(cfgAfterDark.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(cfgAfterDark.readAll()).object().value(QStringLiteral("themeMode")).toString(),
+                 QStringLiteral("dark"));
+        cfgAfterDark.close();
+
+        // Click System button -> switches to system
+        QTest::mouseClick(win, Qt::LeftButton, Qt::NoModifier,
+                          sysBtn->mapToScene(QPointF(sysBtn->width() / 2.0, sysBtn->height() / 2.0)).toPoint());
+        QCoreApplication::processEvents();
+        QCOMPARE(b2.themeMode(), QStringLiteral("system"));
+        QCOMPARE(t2.themeMode(), QStringLiteral("system"));
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

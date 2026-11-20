@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.4)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.5)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, built-in Cloud Relay WebSocket tunnel,
@@ -54,7 +54,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.4"
+VERSION = "1.2.5"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
@@ -7896,8 +7896,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
     .webclient-shell.theme-light {
       color-scheme: light;
-      --bg-base: #f1f5f9;
-      --wc-bg: #f1f5f9;
+      --bg-base: #f5f7fb;
+      --wc-bg: #f5f7fb;
       --wc-sidebar: #ffffff;
       --wc-panel: #f8fafc;
       --wc-header: #ffffff;
@@ -7906,7 +7906,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       --wc-border: rgba(15, 23, 42, 0.12);
       --wc-border-strong: rgba(15, 23, 42, 0.22);
       --wc-text: #0f172a;
-      --wc-muted: #64748b;
+      --wc-muted: #475569;
       --wc-bubble-in: #e2e8f0;
       --wc-bubble-in-text: #0f172a;
       --wc-bubble-imsg: #0A84FF;
@@ -7914,6 +7914,29 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       --wc-bubble-out-text: #ffffff;
       --wc-accent: #0A84FF;
       background-image: none;
+    }
+    @media (prefers-color-scheme: light) {
+      .webclient-shell.theme-system:not(.theme-glass):not(.theme-matrix) {
+        color-scheme: light;
+        --bg-base: #f5f7fb;
+        --wc-bg: #f5f7fb;
+        --wc-sidebar: #ffffff;
+        --wc-panel: #f8fafc;
+        --wc-header: #ffffff;
+        --wc-card: #ffffff;
+        --wc-input: #ffffff;
+        --wc-border: rgba(15, 23, 42, 0.12);
+        --wc-border-strong: rgba(15, 23, 42, 0.22);
+        --wc-text: #0f172a;
+        --wc-muted: #475569;
+        --wc-bubble-in: #e2e8f0;
+        --wc-bubble-in-text: #0f172a;
+        --wc-bubble-imsg: #0A84FF;
+        --wc-bubble-sms: #248a3d;
+        --wc-bubble-out-text: #ffffff;
+        --wc-accent: #0A84FF;
+        background-image: none;
+      }
     }
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; }
@@ -8142,12 +8165,12 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
   </style>
 </head>
 <body>
-<div class="webclient-shell theme-glass" id="wcShell">
+<div class="webclient-shell theme-system" id="wcShell">
   <header class="wc-topbar">
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.4</span>
+      <span class="pill pill-blue">v1.2.5</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -8162,9 +8185,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     <div class="wc-auth-inline">
       <select class="wc-select" id="themeSelect" aria-label="Theme">
-        <option value="theme-glass">Liquid Glass</option>
-        <option value="theme-matrix">Matrix</option>
+        <option value="theme-system">System (Auto)</option>
+        <option value="theme-glass">Liquid Glass Dark</option>
         <option value="theme-light">Light</option>
+        <option value="theme-matrix">Matrix</option>
       </select>
       <input class="wc-input" id="apiKeyInput" type="password" placeholder="API Password / Key" style="width:155px;" />
       <button class="btn btn-primary btn-sm" type="button" onclick="connectRelay()">Connect</button>
@@ -9352,13 +9376,32 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     /* Theme Switcher & Navigation Tabs */
     const wcShell = document.getElementById('wcShell');
     const themeSelect = document.getElementById('themeSelect');
-    const savedTheme = localStorage.getItem('bp_wc_theme') || 'theme-glass';
-    if (wcShell) wcShell.className = 'webclient-shell ' + savedTheme;
+    const validThemes = new Set(['theme-system', 'theme-glass', 'theme-light', 'theme-matrix']);
+    const systemColorQuery = (typeof window !== 'undefined' && typeof window.matchMedia === 'function')
+      ? window.matchMedia('(prefers-color-scheme: light)')
+      : null;
+    function applyWebTheme(val) {
+      const chosen = validThemes.has(val) ? val : 'theme-system';
+      const effective = chosen === 'theme-system'
+        ? ((systemColorQuery && systemColorQuery.matches) ? 'theme-system theme-light' : 'theme-system theme-glass')
+        : chosen;
+      if (wcShell) wcShell.className = 'webclient-shell ' + effective;
+      if (themeSelect && themeSelect.value !== chosen) themeSelect.value = chosen;
+    }
+    const savedTheme = localStorage.getItem('bp_wc_theme') || 'theme-system';
+    applyWebTheme(savedTheme);
     if (themeSelect) {
-      themeSelect.value = savedTheme;
       themeSelect.addEventListener('change', () => {
-        wcShell.className = 'webclient-shell ' + themeSelect.value;
-        localStorage.setItem('bp_wc_theme', themeSelect.value);
+        const chosen = validThemes.has(themeSelect.value) ? themeSelect.value : 'theme-system';
+        localStorage.setItem('bp_wc_theme', chosen);
+        applyWebTheme(chosen);
+      });
+    }
+    if (systemColorQuery && typeof systemColorQuery.addEventListener === 'function') {
+      systemColorQuery.addEventListener('change', () => {
+        if ((localStorage.getItem('bp_wc_theme') || 'theme-system') === 'theme-system') {
+          applyWebTheme('theme-system');
+        }
       });
     }
 
@@ -13188,6 +13231,9 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "isStrictlyNewerProducerState",
                 "scheduleUnknownChatRefresh",
                 "Unconfirmed",
+                "theme-system",
+                "prefers-color-scheme",
+                "applyWebTheme",
             ):
                 assert ui_marker in WEB_UI_HTML, f"Missing Web UI pending-text marker: {ui_marker}"
 

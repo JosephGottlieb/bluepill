@@ -1,5 +1,5 @@
 Name:           bluepill
-Version:        %{?_version:%{_version}}%{!?_version:1.2.4}
+Version:        %{?_version:%{_version}}%{!?_version:1.2.5}
 Release:        1
 Summary:        Native Qt6/QML desktop & CLI client for iMessage, RCS, and SMS
 License:        MIT
@@ -66,6 +66,9 @@ install -Dm644 resources/imessage-notify.wav %{buildroot}%{_datadir}/imsg/imessa
 %{_datadir}/imsg/imessage-notify.wav
 
 %changelog
+* Thu Nov 19 2026 James Farr Gomez <james@nertwork.com> - 1.2.5-1
+- First-class Light / Dark / System mode across Qt6 desktop client and /web UI, plus v1.2.5 release
+
 * Thu Nov 19 2026 James Farr Gomez <james@nertwork.com> - 1.2.4-1
 - Built-in Cloud Relay tunnel, unified Liquid Glass/Matrix/Light Web UI, and v1.2.4 release
 

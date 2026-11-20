@@ -4,6 +4,17 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+## [1.2.5] - 2026-11-19
+
+### Added
+- **First-Class Light / Dark / System Mode (Qt6 Desktop Client & Local `/web` UI):**
+  - Added `themeMode` (`"system"` | `"dark"` | `"light"`, default `"system"`) to `Theme` and `Backend`, persisted in `config.json` across restarts.
+  - **Live OS Theme Tracking (`System`):** Uses `QGuiApplication::styleHints()->colorScheme()` (`colorSchemeChanged`) on Qt 6.5+ (Windows 11, macOS, Arch, Fedora) with a clean Qt 6.4 fallback (Ubuntu 24.04) to Omarchy `colors.toml` / dark default.
+  - **High-Contrast Light Palette:** Added macOS / Liquid Glass Light palette (`#f5f7fb` window background, `#ffffff` surfaces, `#0f172a` primary text, `#475569` secondary text, `#0A84FF` blue iMessage bubbles, `#30D158` green SMS bubbles, `#e2e8f0` incoming bubbles) while preserving the signature Dark palette and live Omarchy `colors.toml` theme hot-reloading.
+  - **Settings → UI & Appearance:** Added 1-click **Appearance (`System` / `Dark` / `Light`)** segmented control in `Main.qml`.
+  - **Local `bluepill-server /web` UI:** Added **System (Auto)** (`prefers-color-scheme`), **Liquid Glass Dark**, **Light**, and **Matrix** theme switching with live OS dark/light updates.
+- **GitHub Sponsors Visibility:** Added `❤️ Sponsor on GitHub` (`https://github.com/sponsors/nertwork`) links in `README.md` and `docs/index.html`.
+
 ## [1.2.4] - 2026-11-19
 
 ### Added

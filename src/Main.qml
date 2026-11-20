@@ -16,6 +16,15 @@ ApplicationWindow {
     title: "BluePill"
     color: theme.background
 
+    Connections {
+        target: backend
+        function onThemeModeChanged() {
+            if (theme.themeMode !== backend.themeMode) {
+                theme.themeMode = backend.themeMode
+            }
+        }
+    }
+
     readonly property bool isCompactWindow: root.width < 1120
     readonly property bool isNarrowWindow: root.width < 920
 
@@ -1725,7 +1734,7 @@ ApplicationWindow {
                                     objectName: "topStatusPillText"
                                     text: {
                                         var statusMatch = (backend.serverStatus || "").match(/v\d+\.\d+(?:\.\d+)?/i)
-                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.4")
+                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.5")
                                         var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
                                         var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
                                         return host.length > 0 ? (st + " · " + host) : st
@@ -1773,7 +1782,7 @@ ApplicationWindow {
                                 text: modelData.label
                                 font.pixelSize: theme.fontSize - 2
                                 font.bold: backend.filterMode === modelData.key
-                                color: backend.filterMode === modelData.key ? theme.darkerBackground : theme.foreground
+                                color: backend.filterMode === modelData.key ? theme.onAccent : theme.foreground
                             }
                             MouseArea {
                                 anchors.fill: parent
@@ -1866,7 +1875,7 @@ ApplicationWindow {
                         antialiasing: true
                         ShapePath {
                             strokeWidth: -1
-                            fillColor: composeMouse.containsMouse ? theme.darkerBackground : theme.accent
+                            fillColor: composeMouse.containsMouse ? theme.onAccent : theme.accent
                             PathSvg { path: "M5 3c-1.11 0-2 .89-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7h-2v7H5V5h7V3H5m12.78 1a.69.69 0 0 0-.48.2l-1.22 1.21 2.5 2.5L19.8 6.7c.26-.26.26-.7 0-.95L18.25 4.2c-.13-.13-.3-.2-.47-.2m-2.41 2.12L8 13.5V16h2.5l7.37-7.38-2.5-2.5z" }
                         }
                     }
@@ -1904,7 +1913,7 @@ ApplicationWindow {
                         Text {
                             text: "⚙"
                             font.pixelSize: theme.fontSize + 2
-                            color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
+                            color: root.showServerConfigModal ? theme.onAccent : theme.foreground
                         }
                         Text {
                             // Icon only (the tooltip says "Settings"); kept for tests/accessibility
@@ -1914,7 +1923,7 @@ ApplicationWindow {
                             text: i18n.tr("Settings")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
-                            color: root.showServerConfigModal ? theme.darkerBackground : theme.foreground
+                            color: root.showServerConfigModal ? theme.onAccent : theme.foreground
                         }
                     }
                     MouseArea {
@@ -1946,14 +1955,14 @@ ApplicationWindow {
                         Text {
                             text: "⌨"
                             font.pixelSize: theme.fontSize - 1
-                            color: root.showShortcutsModal ? theme.darkerBackground : theme.foreground
+                            color: root.showShortcutsModal ? theme.onAccent : theme.foreground
                         }
                         Text {
                             visible: root.width >= 820
                             text: "Ctrl+K"
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
-                            color: root.showShortcutsModal ? theme.darkerBackground : theme.foreground
+                            color: root.showShortcutsModal ? theme.onAccent : theme.foreground
                         }
                     }
                     MouseArea {
@@ -2126,8 +2135,8 @@ ApplicationWindow {
                                 activeFocusOnTab: true
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "Open iCloud Notes"
-                                color: (notesHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
-                                border.color: (notesHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                color: (notesHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : theme.subtleSurface
+                                border.color: (notesHover.containsMouse || activeFocus) ? theme.accent : theme.subtleBorder
                                 border.width: activeFocus ? 2 : 1
                                 Keys.onReturnPressed: {
                                     backend.fetchIcloudNotes()
@@ -2180,8 +2189,8 @@ ApplicationWindow {
                                 activeFocusOnTab: true
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "Open iCloud Calendar"
-                                color: (calHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
-                                border.color: (calHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                color: (calHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : theme.subtleSurface
+                                border.color: (calHover.containsMouse || activeFocus) ? theme.accent : theme.subtleBorder
                                 border.width: activeFocus ? 2 : 1
                                 Keys.onReturnPressed: {
                                     backend.fetchIcloudEvents()
@@ -2234,8 +2243,8 @@ ApplicationWindow {
                                 activeFocusOnTab: true
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "Open iCloud Photos"
-                                color: (photosHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : Qt.rgba(1, 1, 1, 0.05)
-                                border.color: (photosHover.containsMouse || activeFocus) ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                                color: (photosHover.containsMouse || activeFocus) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18) : theme.subtleSurface
+                                border.color: (photosHover.containsMouse || activeFocus) ? theme.accent : theme.subtleBorder
                                 border.width: activeFocus ? 2 : 1
                                 Keys.onReturnPressed: {
                                     backend.fetchIcloudPhotos()
@@ -2585,7 +2594,7 @@ ApplicationWindow {
                                                 anchors.centerIn: parent
                                                 text: modelData.unreadCount > 0 ? "✓" : "●"
                                                 font.pixelSize: theme.fontSize - 3
-                                                color: rowReadMouse.containsMouse ? theme.darkerBackground : theme.foreground
+                                                color: rowReadMouse.containsMouse ? theme.onAccent : theme.foreground
                                             }
                                             MouseArea {
                                                 id: rowReadMouse
@@ -2634,9 +2643,9 @@ ApplicationWindow {
                                             height: 20
                                             radius: 5
                                             z: 3
-                                            color: rowDeleteMouse.containsMouse ? "#3b1d26" : theme.background
+                                            color: rowDeleteMouse.containsMouse ? (theme.isDark ? "#3b1d26" : "#fee2e2") : theme.background
                                             border.width: 1
-                                            border.color: rowDeleteMouse.containsMouse ? "#f7768e" : theme.muted
+                                            border.color: rowDeleteMouse.containsMouse ? theme.red : theme.muted
                                             ToolTip.visible: rowDeleteMouse.containsMouse
                                             ToolTip.text: i18n.tr("Delete conversation")
                                             ToolTip.delay: 400
@@ -2644,7 +2653,7 @@ ApplicationWindow {
                                                 anchors.centerIn: parent
                                                 text: "󰆴"
                                                 font.pixelSize: theme.fontSize - 3
-                                                color: rowDeleteMouse.containsMouse ? "#f7768e" : theme.foreground
+                                                color: rowDeleteMouse.containsMouse ? theme.red : theme.foreground
                                             }
                                             MouseArea {
                                                 id: rowDeleteMouse
@@ -2672,7 +2681,7 @@ ApplicationWindow {
                                                 text: modelData.unreadCount
                                                 font.pixelSize: theme.fontSize - 3
                                                 font.bold: true
-                                                color: theme.darkerBackground
+                                                color: theme.onAccent
                                             }
                                         }
                                     }
@@ -3557,7 +3566,7 @@ ApplicationWindow {
                             text: "↑"
                             font.pixelSize: theme.fontSize - 1
                             font.bold: true
-                            color: scrollToTopArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
+                            color: scrollToTopArrowMouse.containsMouse ? theme.onAccent : theme.accent
                         }
                         MouseArea {
                             id: scrollToTopArrowMouse
@@ -3600,7 +3609,7 @@ ApplicationWindow {
                             text: "↓"
                             font.pixelSize: theme.fontSize - 1
                             font.bold: true
-                            color: scrollToBottomArrowMouse.containsMouse ? theme.darkerBackground : theme.accent
+                            color: scrollToBottomArrowMouse.containsMouse ? theme.onAccent : theme.accent
                         }
                         MouseArea {
                             id: scrollToBottomArrowMouse
@@ -4255,14 +4264,14 @@ ApplicationWindow {
                                     }
                                     color: msgDelegate.isBubbleless ? "transparent"
                                            : (modelData.isFromMe
-                                              ? (msgDelegate.isGreenService ? "#1B6E38" : "#0A84FF")
-                                              : "#1e2430")
+                                              ? (msgDelegate.isGreenService ? theme.outgoingGreenBubble : theme.outgoingBlueBubble)
+                                              : theme.incomingBubble)
                                     border.width: msgDelegate.isBubbleless ? 0 : 1  // no outline on bare photos/emoji, even with actions open
                                     border.color: (root.activeActionMessageGuid === modelData.guid)
                                                   ? theme.brightForeground
                                                   : (modelData.isFromMe
-                                                     ? (msgDelegate.isGreenService ? "#268C48" : "#0066CC")
-                                                     : "#2c3545")
+                                                     ? (msgDelegate.isGreenService ? theme.outgoingGreenBorder : theme.outgoingBlueBorder)
+                                                     : theme.incomingBubbleBorder)
                                     implicitWidth: msgDelegate.isBubbleless ? bubbleContent.width : Math.max(bubbleContent.width + 28, 96)
                                     implicitHeight: msgDelegate.isBubbleless ? bubbleContent.height : bubbleContent.height + 20
 
@@ -4763,6 +4772,9 @@ ApplicationWindow {
                                                     if (modelData.isFromMe && rawHtml.indexOf("#64B5F6") !== -1) {
                                                         return rawHtml.replace(/color:\s*#64B5F6;/gi, "color: #FFFFFF; font-weight: 600;")
                                                     }
+                                                    if (!modelData.isFromMe && !theme.isDark && rawHtml.indexOf("#64B5F6") !== -1) {
+                                                        return rawHtml.replace(/color:\s*#64B5F6;/gi, "color: #0369a1; font-weight: 600;")
+                                                    }
                                                     return rawHtml
                                                 }
                                                 textFormat: TextEdit.RichText
@@ -4830,7 +4842,7 @@ ApplicationWindow {
                                                 visible: textContainer.visible && msgDelegate.isInvisibleInkMsg && !msgDelegate.invisibleInkRevealed
                                                 clip: true
                                                 radius: 8
-                                                color: modelData.isFromMe ? (msgDelegate.isGreenService ? "#15572C" : "#0866c6") : "#252d3d"
+                                                color: modelData.isFromMe ? (msgDelegate.isGreenService ? (theme.isDark ? "#15572C" : "#22a847") : "#0866c6") : theme.invisibleInkIncoming
                                                 border.width: 1
                                                 border.color: modelData.isFromMe ? (msgDelegate.isGreenService ? "#34D399" : "#5cb3ff") : theme.accent
                                                 z: 10
@@ -4866,7 +4878,7 @@ ApplicationWindow {
                                                         text: "🕵️ Invisible Ink · " + i18n.tr("Click to reveal")
                                                         font.pixelSize: theme.fontSize - 2
                                                         font.bold: true
-                                                        color: "#ffffff"
+                                                        color: modelData.isFromMe ? "#ffffff" : theme.brightForeground
                                                     }
                                                 }
 
@@ -4917,7 +4929,7 @@ ApplicationWindow {
                                                           : ("󰆏 " + i18n.tr("Copy Code:") + " " + (modelData.verificationCode || ""))
                                                     font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
-                                                    color: "#ffffff"
+                                                    color: (otpCopyPill.justCopied || modelData.isFromMe) ? "#ffffff" : theme.brightForeground
                                                 }
                                             }
 
@@ -4952,7 +4964,7 @@ ApplicationWindow {
                                                 color: (modelData.isFailed || false)
                                                        ? theme.red
                                                        : ((modelData.isFromMe && !msgDelegate.isBubbleless)
-                                                          ? (msgDelegate.isGreenService ? "#CBEFD8" : "#d0dff7")
+                                                          ? (theme.isDark ? (msgDelegate.isGreenService ? "#CBEFD8" : "#d0dff7") : "#f0f9ff")
                                                           : theme.darkForeground)
                                             }
 
@@ -5390,7 +5402,7 @@ ApplicationWindow {
                                         text: modelData
                                         font.pixelSize: theme.fontSize - 3
                                         font.bold: root.emojiPickerCategory === modelData
-                                        color: root.emojiPickerCategory === modelData ? theme.darkerBackground : theme.foreground
+                                        color: root.emojiPickerCategory === modelData ? theme.onAccent : theme.foreground
                                     }
 
                                     MouseArea {
@@ -8648,7 +8660,7 @@ ApplicationWindow {
                         Text {
                             anchors.centerIn: parent
                             text: newChatText.text.trim().length > 0 ? i18n.tr("Send Message") : i18n.tr("Open Conversation")
-                            color: theme.darkerBackground
+                            color: theme.onAccent
                             font.pixelSize: theme.fontSize - 1
                             font.bold: true
                         }
@@ -8688,7 +8700,7 @@ ApplicationWindow {
         y: paneOrigin.y
         width: conversationPane.width
         height: conversationPane.height
-        color: "#aa0e0e14"
+        color: theme.modalScrim
         z: 997
 
         MouseArea {
@@ -8783,7 +8795,7 @@ ApplicationWindow {
                                 text: modelData
                                 font.pixelSize: theme.fontSize - 2
                                 font.bold: root.contactInfoTab === index
-                                color: root.contactInfoTab === index ? theme.darkerBackground : theme.foreground
+                                color: root.contactInfoTab === index ? theme.onAccent : theme.foreground
                             }
                             MouseArea {
                                 id: tabMouse
@@ -8858,7 +8870,7 @@ ApplicationWindow {
                                 text: backend.selectedChatHasContact ? ("✎ " + i18n.tr("Edit")) : ("＋ " + i18n.tr("Add Contact"))
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
-                                color: editInfoMouse.containsMouse ? theme.darkerBackground : theme.accent
+                                color: editInfoMouse.containsMouse ? theme.onAccent : theme.accent
                             }
                             MouseArea {
                                 id: editInfoMouse
@@ -9489,7 +9501,7 @@ ApplicationWindow {
                         Text {
                             anchors.centerIn: parent
                             text: i18n.tr("Save Contact")
-                            color: theme.darkerBackground
+                            color: theme.onAccent
                             font.pixelSize: theme.fontSize - 1
                             font.bold: true
                         }
@@ -9609,7 +9621,7 @@ ApplicationWindow {
                                 Text {
                                     id: settingsClientVersionText
                                     objectName: "settingsClientVersionText"
-                                    text: "BluePill v" + (Qt.application.version || "1.2.4")
+                                    text: "BluePill v" + (Qt.application.version || "1.2.5")
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.accent
@@ -9680,7 +9692,7 @@ ApplicationWindow {
                                     text: modelData.label
                                     font.pixelSize: theme.fontSize - 3
                                     font.bold: isCurrentTab
-                                    color: isCurrentTab ? theme.darkerBackground : theme.foreground
+                                    color: isCurrentTab ? theme.onAccent : theme.foreground
                                     elide: Text.ElideRight
                                 }
                                 MouseArea {
@@ -10356,6 +10368,77 @@ ApplicationWindow {
                         elide: Text.ElideRight
                     }
 
+                    // Appearance Theme Mode Selector (System / Dark / Light)
+                    ColumnLayout {
+                        id: themeModeSelectorCol
+                        objectName: "themeModeSelectorCol"
+                        Layout.fillWidth: true
+                        spacing: 5
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: i18n.tr("Appearance")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            Text {
+                                id: themeModeEffectiveLabel
+                                objectName: "themeModeEffectiveLabel"
+                                text: theme.themeMode === "system"
+                                      ? (i18n.tr("System") + " (" + (theme.isDark ? i18n.tr("Dark") : i18n.tr("Light")) + ")")
+                                      : (theme.isDark ? i18n.tr("Dark") : i18n.tr("Light"))
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.darkForeground
+                            }
+                        }
+
+                        RowLayout {
+                            id: themeModeSelector
+                            objectName: "themeModeSelector"
+                            Layout.fillWidth: true
+                            spacing: 6
+
+                            Repeater {
+                                model: [
+                                    { key: "system", label: "🖥 " + i18n.tr("System") },
+                                    { key: "dark",   label: "🌙 " + i18n.tr("Dark") },
+                                    { key: "light",  label: "☀ " + i18n.tr("Light") }
+                                ]
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    objectName: "themeModeBtn_" + modelData.key
+                                    Layout.fillWidth: true
+                                    height: 32
+                                    radius: 6
+                                    readonly property bool isSelected: theme.themeMode === modelData.key
+                                    color: isSelected ? theme.accent : (modeBtnMouse.containsMouse ? theme.selection : theme.lighterBackground)
+                                    border.width: 1
+                                    border.color: isSelected ? theme.accent : theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: modelData.label
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: isSelected
+                                        color: isSelected ? theme.onAccent : theme.foreground
+                                    }
+                                    MouseArea {
+                                        id: modeBtnMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            backend.themeMode = modelData.key
+                                            theme.themeMode = modelData.key
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
                     GridLayout {
                         Layout.fillWidth: true
                         columns: 2
@@ -10838,7 +10921,7 @@ ApplicationWindow {
                         Text {
                             anchors.centerIn: parent
                             text: i18n.tr("Save & Connect")
-                            color: theme.darkerBackground
+                            color: theme.onAccent
                             font.pixelSize: theme.fontSize - 1
                             font.bold: true
                         }
@@ -11191,7 +11274,7 @@ ApplicationWindow {
                                 text: modelData
                                 font.pixelSize: theme.fontSize - 4
                                 font.bold: root.tapbackEmojiCategory === modelData
-                                color: root.tapbackEmojiCategory === modelData ? theme.darkerBackground : theme.foreground
+                                color: root.tapbackEmojiCategory === modelData ? theme.onAccent : theme.foreground
                             }
                             MouseArea {
                                 anchors.fill: parent
@@ -11684,7 +11767,7 @@ ApplicationWindow {
             anchors.left: parent.left
             anchors.right: parent.right
             height: 50
-            color: "#cc131620"
+            color: theme.overlayBackground
             z: 5
             readonly property bool compactTopBar: photoViewerCard.width < 720
 
@@ -12077,7 +12160,7 @@ ApplicationWindow {
                 width: 46
                 height: 46
                 radius: 23
-                color: prevPhotoMouse.containsMouse ? theme.selection : "#cc131620"
+                color: prevPhotoMouse.containsMouse ? theme.selection : theme.overlayBackground
                 border.width: 1
                 border.color: prevPhotoMouse.containsMouse ? theme.accent : theme.muted
                 z: 4
@@ -12106,7 +12189,7 @@ ApplicationWindow {
                 width: 46
                 height: 46
                 radius: 23
-                color: nextPhotoMouse.containsMouse ? theme.selection : "#cc131620"
+                color: nextPhotoMouse.containsMouse ? theme.selection : theme.overlayBackground
                 border.width: 1
                 border.color: nextPhotoMouse.containsMouse ? theme.accent : theme.muted
                 z: 4
@@ -12135,7 +12218,7 @@ ApplicationWindow {
             anchors.left: parent.left
             anchors.right: parent.right
             height: 86
-            color: "#cc131620"
+            color: theme.overlayBackground
             z: 5
 
             MouseArea { anchors.fill: parent }

@@ -20,6 +20,8 @@
 #include <QVariantList>
 #include <QVariantMap>
 
+class Theme;
+
 struct ChatEntry {
     QString guid;
     QString chatIdentifier;
@@ -123,6 +125,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool showPinnedRow READ showPinnedRow WRITE setShowPinnedRow NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool pinnedRowFillRecent READ pinnedRowFillRecent WRITE setPinnedRowFillRecent NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool hoverMessageActions READ hoverMessageActions WRITE setHoverMessageActions NOTIFY uiPreferencesChanged)
+    Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
     Q_PROPERTY(bool syncingHistory READ syncingHistory NOTIFY syncingHistoryChanged)
     Q_PROPERTY(QString playingAudioGuid READ playingAudioGuid NOTIFY audioPlaybackChanged)
     Q_PROPERTY(bool audioPlaying READ audioPlaying NOTIFY audioPlaybackChanged)
@@ -217,6 +220,9 @@ public:
     void setPinnedRowFillRecent(bool enabled);
     bool hoverMessageActions() const { return m_hoverMessageActions; }
     void setHoverMessageActions(bool enabled);
+    QString themeMode() const { return m_themeMode; }
+    Q_INVOKABLE void setThemeMode(const QString &mode);
+    void setTheme(Theme *theme);
     bool syncingHistory() const { return m_syncingHistory; }
     QString playingAudioGuid() const { return m_playingAudioGuid; }
     bool audioPlaying() const { return m_audioPlaying; }
@@ -636,6 +642,7 @@ signals:
     void windowActiveChanged();
     void historySyncDaysChanged();
     void uiPreferencesChanged();
+    void themeModeChanged();
     void syncingHistoryChanged();
     void audioPlaybackChanged();
     void voiceRecordingChanged();
@@ -732,6 +739,7 @@ private:
     QString finalizeCapturedVoiceWav(const QString &recPath);
     void clearStagedVoiceMemo(bool removeFile);
     void saveAudioDeviceConfig();
+    void saveThemeConfig();
     QString effectiveAudioInputDevice() const;
     QString effectiveAudioOutputDevice() const;
     static QString formatAudioDuration(int totalSeconds);
@@ -993,4 +1001,6 @@ private:
     QString m_lastOpenedUrl;
     qint64 m_lastOpenedUrlTimeMs = 0;
     QPointer<QSystemTrayIcon> m_trayIcon;
+    QPointer<Theme> m_theme;
+    QString m_themeMode = QStringLiteral("system");
 };

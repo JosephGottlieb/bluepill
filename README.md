@@ -8,7 +8,11 @@
   <strong>Official Website:</strong> <a href="https://bluepill.nertwork.com"><strong>https://bluepill.nertwork.com</strong></a> ·
   <strong>Live Interactive Demo:</strong> <a href="https://bluepill.nertwork.com/demo"><strong>Try Live Demo</strong></a> ·
   <strong>Free Cloud Relay Signup:</strong> <a href="https://bluepill.nertwork.com/signup"><strong>Sign Up Free</strong></a> ·
-  <strong>Support Open-Source Development:</strong> <a href="https://bluepill.nertwork.com/#support"><strong>Sponsor BluePill</strong></a>
+  <strong>Support Open-Source Development:</strong> <a href="https://github.com/sponsors/nertwork"><strong>❤️ Sponsor on GitHub</strong></a> · <a href="https://bluepill.nertwork.com/#support"><strong>Sponsor BluePill</strong></a>
+</p>
+
+<p align="center">
+  <em>Sponsorships fund the Apple Developer Program ($99/yr), Windows Code-Signing certificates, and Cloud Relay edge infrastructure.</em>
 </p>
 
 <p align="center">
@@ -18,6 +22,7 @@
 </p>
 
 <p align="center">
+  <a href="https://github.com/sponsors/nertwork"><img src="https://img.shields.io/badge/Sponsor_on_GitHub-%E2%9D%A4%EF%B8%8F_nertwork-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor on GitHub" /></a>
   <a href="https://github.com/nertwork/bluepill/actions/workflows/ci.yml"><img src="https://github.com/nertwork/bluepill/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/nertwork/bluepill/releases/latest"><img src="https://img.shields.io/github/v/release/nertwork/bluepill?color=0a84ff&label=Release" alt="Release" /></a>
   <a href="https://aur.archlinux.org/packages/bluepill"><img src="https://img.shields.io/badge/Arch_Linux-AUR_bluepill-1793d1?logo=arch-linux&logoColor=white" alt="AUR Package" /></a>

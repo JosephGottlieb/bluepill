@@ -2,6 +2,7 @@
 #include <QMimeData>
 #include <QKeyEvent>
 #include "backend.h"
+#include "theme.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -1318,6 +1319,42 @@ void Backend::setHoverMessageActions(bool enabled) {
     emit uiPreferencesChanged();
 }
 
+void Backend::setTheme(Theme *theme) {
+    m_theme = theme;
+    if (m_theme) {
+        m_theme->setThemeMode(m_themeMode);
+    }
+}
+
+void Backend::setThemeMode(const QString &mode) {
+    const QString norm = Theme::normalizeThemeMode(mode);
+    const bool changed = (m_themeMode != norm);
+    m_themeMode = norm;
+    if (m_theme) {
+        m_theme->setThemeMode(norm);
+    }
+    saveThemeConfig();
+    if (changed) {
+        emit themeModeChanged();
+    }
+}
+
+void Backend::saveThemeConfig() {
+    const QString cfgPath = configFilePath();
+    if (cfgPath.isEmpty()) return;
+    QDir().mkpath(QFileInfo(cfgPath).absolutePath());
+    QJsonObject cfgObj;
+    QFile existingFile(cfgPath);
+    if (existingFile.exists() && existingFile.open(QIODevice::ReadOnly)) {
+        cfgObj = QJsonDocument::fromJson(existingFile.readAll()).object();
+        existingFile.close();
+    }
+    cfgObj.insert(QStringLiteral("themeMode"), m_themeMode);
+    if (!writeConfigAtomically(cfgPath, cfgObj)) {
+        emit toastMessage(QStringLiteral("⚠ Failed to save theme configuration"));
+    }
+}
+
 bool Backend::selectedChatMuted() const {
     return !m_selectedChatGuid.isEmpty() && m_mutedChats.contains(m_selectedChatGuid);
 }
@@ -2190,6 +2227,7 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
     cfgObj.insert(QStringLiteral("password"), resolvedPassword);
     cfgObj.insert(QStringLiteral("tlsVerified"), true);
     cfgObj.insert(QStringLiteral("authMethod"), QStringLiteral("tls-apikey"));
+    cfgObj.insert(QStringLiteral("themeMode"), m_themeMode);
 
     if (!writeConfigAtomically(cfgPath, cfgObj)) {
         emit toastMessage(QStringLiteral("⚠ Failed to save server configuration"));
@@ -2275,6 +2313,12 @@ void Backend::saveServerConfig(const QString &serverUrl, const QString &secondar
 
 void Backend::loadCredentials() {
     const QString prevServerUrl = m_serverUrl;
+    const QString prevThemeMode = m_themeMode;
+    m_themeMode = QStringLiteral("system");
+    const QString envThemeMode = qEnvironmentVariable("BLUEPILL_THEME_MODE").trimmed();
+    if (!envThemeMode.isEmpty()) {
+        m_themeMode = Theme::normalizeThemeMode(envThemeMode);
+    }
     m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("BLUEPILL_SERVER_URL"), false);
     if (m_serverUrl.isEmpty()) {
         m_serverUrl = normalizeServerEndpointUrl(qEnvironmentVariable("IMSG_SERVER_URL"), false);
@@ -2322,6 +2366,9 @@ void Backend::loadCredentials() {
             }
             if (obj.contains(QStringLiteral("audioOutputDevice"))) {
                 m_selectedAudioOutputDevice = obj.value(QStringLiteral("audioOutputDevice")).toString().trimmed();
+            }
+            if (envThemeMode.isEmpty() && obj.contains(QStringLiteral("themeMode"))) {
+                m_themeMode = Theme::normalizeThemeMode(obj.value(QStringLiteral("themeMode")).toString());
             }
 #ifndef Q_OS_WIN
             QFile::setPermissions(cfgPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
@@ -2407,6 +2454,12 @@ void Backend::loadCredentials() {
     m_lastConfiguredBaseUrl = m_serverUrl;
     if (m_serverUrl != prevServerUrl) {
         bumpServerEndpointGeneration();
+    }
+    if (m_theme) {
+        m_theme->setThemeMode(m_themeMode);
+    }
+    if (m_themeMode != prevThemeMode) {
+        emit themeModeChanged();
     }
     emit configChanged();
 }
