@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.3)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.4)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
-Engine.IO v4 / Socket.IO v4 push events, and Direct SSH JSON-RPC (`stdio`) mode.
+Engine.IO v4 / Socket.IO v4 push events, built-in Cloud Relay WebSocket tunnel,
+and Direct SSH JSON-RPC (`stdio`) mode.
 
 Supported & Tested Platforms:
 - macOS Sequoia (15.x), Sonoma (14.x), and Ventura (13.x) (Apple Silicon & Intel)
@@ -13,7 +14,9 @@ Supported & Tested Platforms:
 from __future__ import annotations
 
 import argparse
+import base64
 import collections
+from concurrent.futures import ThreadPoolExecutor
 from email.parser import BytesParser
 from email.policy import default as email_default_policy
 import fcntl
@@ -42,6 +45,7 @@ import sys
 import tempfile
 import threading
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -50,7 +54,8 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.3"
+VERSION = "1.2.4"
+DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 APPLE_EPOCH_OFFSET_SEC = 978307200
 APPLE_EPOCH_OFFSET_MS = 978307200000
 _VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".avi", ".mkv", ".3gp")
@@ -7835,141 +7840,367 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>BluePill Web UI — Native iMessage, SMS &amp; RCS Relay</title>
+  <title>BluePill Web Client — Native iMessage, SMS &amp; RCS Relay</title>
   <style>
     :root {
-      --bg: #0d1117;
-      --panel: #151b23;
-      --border: #262f3d;
-      --text: #e6edf3;
-      --muted: #8b949e;
-      --accent: #0A84FF;
-      --accent2: #38BDF8;
-      --green: #30D158;
-      --bubble-in: #212832;
+      --bg-base: #080c13;
+      --wc-bg: #080c13;
+      --wc-sidebar: rgba(14, 21, 33, 0.86);
+      --wc-panel: rgba(17, 25, 39, 0.72);
+      --wc-header: rgba(12, 18, 28, 0.90);
+      --wc-card: rgba(16, 23, 36, 0.78);
+      --wc-input: rgba(6, 10, 17, 0.88);
+      --wc-border: rgba(255, 255, 255, 0.09);
+      --wc-border-strong: rgba(255, 255, 255, 0.18);
+      --wc-text: #f1f5f9;
+      --wc-muted: #94a3b8;
+      --wc-bubble-in: #1c2638;
+      --wc-bubble-in-text: #eef2f7;
+      --wc-bubble-imsg: #0A84FF;
+      --wc-bubble-sms: #1B5E3A;
+      --wc-bubble-out-text: #ffffff;
+      --wc-accent: #0A84FF;
+      --bp-blue: #0A84FF;
+      --bp-blue-soft: rgba(10, 132, 255, 0.16);
+      --bp-green: #30D158;
+      --bp-green-dark: #1B5E3A;
+      --bp-green-soft: rgba(48, 209, 88, 0.16);
+      --bp-amber: #FF9F0A;
+      --bp-red: #FF453A;
+      --bp-red-soft: rgba(255, 69, 58, 0.16);
+      --font-sans: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      --shadow-sm: 0 6px 20px rgba(0, 0, 0, 0.35);
+      --shadow-lg: 0 22px 60px rgba(0, 0, 0, 0.55);
     }
-    * { box-sizing: border-box; margin: 0; padding: 0; }
+    .webclient-shell.theme-matrix {
+      --bg-base: #030a06;
+      --wc-bg: #030a06;
+      --wc-sidebar: rgba(6, 18, 10, 0.90);
+      --wc-panel: rgba(7, 21, 12, 0.82);
+      --wc-header: rgba(4, 13, 8, 0.94);
+      --wc-card: rgba(7, 23, 13, 0.86);
+      --wc-input: rgba(3, 10, 6, 0.92);
+      --wc-border: rgba(48, 209, 88, 0.24);
+      --wc-border-strong: rgba(48, 209, 88, 0.44);
+      --wc-text: #d7ffe1;
+      --wc-muted: #6ee78e;
+      --wc-bubble-in: #0d2416;
+      --wc-bubble-in-text: #d7ffe1;
+      --wc-bubble-imsg: #0A84FF;
+      --wc-bubble-sms: #1B5E3A;
+      --wc-accent: #30D158;
+      background-image:
+        radial-gradient(circle at 20% 20%, rgba(48, 209, 88, 0.12), transparent 52%),
+        linear-gradient(180deg, #030a06 0%, #051109 100%);
+    }
+    .webclient-shell.theme-light {
+      color-scheme: light;
+      --bg-base: #f1f5f9;
+      --wc-bg: #f1f5f9;
+      --wc-sidebar: #ffffff;
+      --wc-panel: #f8fafc;
+      --wc-header: #ffffff;
+      --wc-card: #ffffff;
+      --wc-input: #ffffff;
+      --wc-border: rgba(15, 23, 42, 0.12);
+      --wc-border-strong: rgba(15, 23, 42, 0.22);
+      --wc-text: #0f172a;
+      --wc-muted: #64748b;
+      --wc-bubble-in: #e2e8f0;
+      --wc-bubble-in-text: #0f172a;
+      --wc-bubble-imsg: #0A84FF;
+      --wc-bubble-sms: #248a3d;
+      --wc-bubble-out-text: #ffffff;
+      --wc-accent: #0A84FF;
+      background-image: none;
+    }
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
     body {
-      font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
-      background: var(--bg);
-      color: var(--text);
-      height: 100vh;
+      font-family: var(--font-sans);
+      background: var(--bg-base);
+      color: var(--wc-text);
+      overflow: hidden;
+      -webkit-font-smoothing: antialiased;
+    }
+    .webclient-shell {
       display: flex;
       flex-direction: column;
+      height: 100vh;
+      width: 100%;
+      background: var(--wc-bg);
+      background-image:
+        radial-gradient(ellipse 75% 45% at 15% -5%, rgba(10, 132, 255, 0.16), transparent 65%),
+        radial-gradient(ellipse 65% 45% at 88% 12%, rgba(48, 209, 88, 0.09), transparent 60%),
+        linear-gradient(180deg, #080c13 0%, #0b111b 100%);
+      color: var(--wc-text);
       overflow: hidden;
     }
-    header {
-      height: 54px;
-      background: var(--panel);
-      border-bottom: 1px solid var(--border);
+    .wc-topbar {
       display: flex;
+      flex-wrap: wrap;
       align-items: center;
       justify-content: space-between;
-      padding: 0 18px;
+      gap: 10px;
+      padding: 10px 16px;
+      background: var(--wc-header);
+      border-bottom: 1px solid var(--wc-border);
+      backdrop-filter: blur(16px);
+      -webkit-backdrop-filter: blur(16px);
+      z-index: 20;
     }
-    .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 16px; }
+    .brand { display: flex; align-items: center; gap: 10px; font-weight: 800; font-size: 15px; letter-spacing: -0.02em; }
     .pill-icon {
-      width: 28px; height: 28px; border-radius: 8px;
-      background: linear-gradient(135deg, var(--accent2), var(--accent));
+      width: 30px; height: 30px; border-radius: 9px;
+      background: linear-gradient(135deg, #38BDF8, #0A84FF);
       display: inline-flex; align-items: center; justify-content: center;
       color: #fff; font-weight: 800; font-size: 13px;
+      box-shadow: 0 4px 14px rgba(10, 132, 255, 0.35);
     }
-    .status-pill {
-      font-size: 12px; padding: 4px 10px; border-radius: 999px;
-      background: rgba(48, 209, 88, 0.14); color: var(--green); border: 1px solid rgba(48, 209, 88, 0.35);
+    .status-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; flex-shrink: 0; background: var(--bp-amber); }
+    .status-dot.online { background: var(--bp-green); box-shadow: 0 0 8px var(--bp-green); }
+    .status-dot.offline { background: var(--bp-red); box-shadow: 0 0 8px rgba(255, 69, 58, 0.65); }
+    .pill {
+      display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px; border-radius: 999px;
+      font-size: 12px; font-weight: 600; border: 1px solid var(--wc-border);
+      background: rgba(128, 128, 128, 0.12); color: var(--wc-muted); white-space: nowrap;
     }
-    .layout { flex: 1; display: flex; min-height: 0; }
-    .sidebar {
-      width: 340px; background: var(--panel); border-right: 1px solid var(--border);
-      display: flex; flex-direction: column; min-height: 0;
+    .pill-green { background: var(--bp-green-soft); border-color: rgba(48, 209, 88, 0.35); color: #70f291; }
+    .pill-blue { background: var(--bp-blue-soft); border-color: rgba(10, 132, 255, 0.4); color: #7cc0ff; }
+    .webclient-shell.theme-light .pill-green { color: #166534; }
+    .webclient-shell.theme-light .pill-blue { color: #1d4ed8; }
+    .wc-tabs {
+      display: flex; align-items: center; gap: 4px;
+      background: rgba(128, 128, 128, 0.12); padding: 4px; border-radius: 10px;
     }
-    .auth-bar { padding: 10px; border-bottom: 1px solid var(--border); display: flex; gap: 6px; }
-    .auth-bar input {
-      flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
-      padding: 7px 10px; border-radius: 8px; font-size: 12px;
+    .wc-tab {
+      border: none; background: transparent; color: var(--wc-muted);
+      font-family: var(--font-sans); font-size: 13px; font-weight: 600;
+      padding: 6px 12px; border-radius: 7px; cursor: pointer; transition: all 0.15s ease;
     }
-    .auth-bar button, .composer button {
-      background: var(--accent); color: #fff; border: none; border-radius: 8px;
-      padding: 7px 12px; font-weight: 600; font-size: 12px; cursor: pointer;
+    .wc-tab:hover { color: var(--wc-text); }
+    .wc-tab.active { background: var(--wc-accent); color: #ffffff; }
+    .wc-auth-inline { display: flex; align-items: center; gap: 6px; }
+    .wc-input, .wc-select, .wc-textarea {
+      background: var(--wc-input); border: 1px solid var(--wc-border); color: var(--wc-text);
+      border-radius: 8px; padding: 7px 10px; font-family: var(--font-sans); font-size: 13px;
+      transition: border-color 0.15s ease, box-shadow 0.15s ease;
     }
+    .wc-input:focus, .wc-select:focus, .wc-textarea:focus {
+      outline: none; border-color: var(--wc-accent); box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.18);
+    }
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      padding: 7px 13px; border-radius: 8px; border: 1px solid var(--wc-border);
+      background: rgba(128, 128, 128, 0.12); color: var(--wc-text);
+      font-family: var(--font-sans); font-size: 12.5px; font-weight: 600; cursor: pointer;
+      transition: all 0.14s ease; white-space: nowrap;
+    }
+    .btn:hover { border-color: var(--wc-border-strong); background: rgba(128, 128, 128, 0.22); }
+    .btn-primary {
+      background: linear-gradient(135deg, #1b8eff, #0A84FF); color: #fff; border-color: transparent;
+      box-shadow: 0 4px 16px rgba(10, 132, 255, 0.28);
+    }
+    .btn-primary:hover { background: linear-gradient(135deg, #339cff, #1589ff); }
+    .btn-green { background: #1B5E3A; color: #fff; border-color: rgba(48, 209, 88, 0.45); }
+    .btn-danger { background: var(--bp-red-soft); border-color: rgba(255, 69, 58, 0.4); color: #ff8a80; }
+    .webclient-shell.theme-light .btn-danger { color: #b91c1c; }
+    .btn-sm { padding: 5px 10px; font-size: 12px; border-radius: 7px; }
+    .hidden { display: none !important; }
+
+    .wc-main { flex: 1; min-height: 0; display: flex; }
+    .wc-sidebar {
+      width: 330px; flex-shrink: 0; display: flex; flex-direction: column;
+      background: var(--wc-sidebar); border-right: 1px solid var(--wc-border); min-height: 0;
+    }
+    .wc-search-box { padding: 10px 12px; border-bottom: 1px solid var(--wc-border); display: flex; flex-direction: column; gap: 6px; }
+    .wc-search-row { display: flex; gap: 6px; align-items: center; }
     .pinned-bar {
       display: flex; gap: 10px; padding: 10px 12px; overflow-x: auto;
-      border-bottom: 1px solid var(--border); min-height: 62px; align-items: center;
+      border-bottom: 1px solid var(--wc-border); min-height: 60px; align-items: center;
     }
     .pin-avatar {
-      width: 40px; height: 40px; border-radius: 50%; background: var(--accent);
+      width: 38px; height: 38px; border-radius: 50%;
+      background: linear-gradient(135deg, #0A84FF, #2563eb); color: #fff;
       display: flex; align-items: center; justify-content: center; font-size: 12px;
-      font-weight: 700; cursor: pointer; flex-shrink: 0;
+      font-weight: 700; cursor: pointer; flex-shrink: 0; box-shadow: 0 4px 12px rgba(10, 132, 255, 0.25);
     }
-    .chat-list { flex: 1; overflow-y: auto; }
+    .chat-list { flex: 1; overflow-y: auto; padding: 6px; }
     .chat-row {
-      padding: 12px 14px; border-bottom: 1px solid rgba(255,255,255,0.04);
-      cursor: pointer; transition: background 0.12s;
+      display: flex; align-items: center; gap: 10px;
+      padding: 10px 11px; border-radius: 12px; cursor: pointer;
+      border: 1px solid transparent; margin-bottom: 3px; transition: background 0.12s;
     }
-    .chat-row:hover, .chat-row.active { background: rgba(10, 132, 255, 0.14); }
-    .chat-title { font-size: 14px; font-weight: 600; margin-bottom: 3px; }
-    .chat-sub { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .main { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+    .chat-row:hover { background: rgba(128, 128, 128, 0.10); }
+    .chat-row.active { background: rgba(10, 132, 255, 0.17); border-color: rgba(10, 132, 255, 0.36); }
+    .wc-avatar {
+      width: 38px; height: 38px; border-radius: 50%; display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 13.5px; color: #fff;
+      background: linear-gradient(135deg, #0A84FF, #2563eb); flex-shrink: 0;
+    }
+    .wc-avatar.sms { background: linear-gradient(135deg, #30D158, #1B5E3A); }
+    .chat-meta-col { flex: 1; min-width: 0; }
+    .chat-title-row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+    .chat-title { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .chat-sub { font-size: 11.5px; color: var(--wc-muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; margin-top: 2px; }
+
+    .wc-thread { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--wc-panel); }
     .chat-header {
-      height: 50px; border-bottom: 1px solid var(--border);
-      display: flex; align-items: center; justify-content: space-between; padding: 0 18px; font-weight: 600;
+      min-height: 54px; border-bottom: 1px solid var(--wc-border); background: var(--wc-header);
+      display: flex; align-items: center; justify-content: space-between; padding: 8px 18px; gap: 12px;
     }
-    .messages {
-      flex: 1; overflow-y: auto; padding: 18px; display: flex; flex-direction: column; gap: 10px;
+    .wc-messages {
+      flex: 1; overflow-y: auto; padding: 18px 22px; display: flex; flex-direction: column; gap: 10px;
     }
-    .msg {
-      max-width: 68%; padding: 9px 13px; border-radius: 16px; font-size: 14px; line-height: 1.45;
-      background: var(--bubble-in); align-self: flex-start; word-break: break-word;
+    .msg-row { display: flex; flex-direction: column; max-width: 72%; position: relative; }
+    .msg-row.me { align-self: flex-end; align-items: flex-end; }
+    .msg-row.them { align-self: flex-start; align-items: flex-start; }
+    .msg-bubble {
+      position: relative; padding: 10px 14px; border-radius: 18px; font-size: 14px; line-height: 1.45;
+      word-break: break-word; background: var(--wc-bubble-in); color: var(--wc-bubble-in-text);
     }
-    .msg.me { background: var(--accent); color: #fff; align-self: flex-end; }
-    .msg.sms.me { background: #1B6E38; border: 1px solid #268C48; color: #fff; }
-    .msg img { max-width: 280px; border-radius: 10px; display: block; margin-top: 6px; }
-    .msg-meta { font-size: 11px; opacity: 0.78; margin-top: 4px; display: flex; gap: 8px; align-items: center; }
-    .otp-btn {
-      background: rgba(255,255,255,0.18); color: #fff; border: none; border-radius: 999px;
-      padding: 3px 9px; font-size: 11px; font-weight: 700; cursor: pointer; margin-top: 5px;
+    .msg-row.me .msg-bubble.imessage {
+      background: var(--wc-bubble-imsg); color: var(--wc-bubble-out-text); border-bottom-right-radius: 5px;
     }
+    .msg-row.me .msg-bubble.sms {
+      background: var(--wc-bubble-sms); color: var(--wc-bubble-out-text); border-bottom-right-radius: 5px;
+    }
+    .msg-row.them .msg-bubble { border-bottom-left-radius: 5px; }
+    .msg-bubble img { max-width: 280px; border-radius: 12px; display: block; margin-top: 6px; cursor: pointer; }
+    .msg-meta { font-size: 11px; color: var(--wc-muted); margin-top: 3px; padding: 0 4px; display: flex; gap: 6px; align-items: center; }
+    .otp-btn, .otp-pill {
+      display: inline-flex; align-items: center; gap: 6px; margin-top: 6px; padding: 5px 10px;
+      border-radius: 9px; background: rgba(48, 209, 88, 0.20); border: 1px solid rgba(48, 209, 88, 0.45);
+      color: #70f291; font-family: var(--font-mono); font-size: 12px; font-weight: 700; cursor: pointer;
+    }
+    .webclient-shell.theme-light .otp-pill { color: #166534; background: rgba(34, 197, 94, 0.16); }
+    .tapback-badges { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+    .tapback-chip {
+      font-size: 12px; padding: 2px 7px; border-radius: 999px;
+      background: rgba(10, 132, 255, 0.22); border: 1px solid rgba(10, 132, 255, 0.4); color: var(--wc-text);
+    }
+    .msg-react-bar {
+      display: none; gap: 3px; margin-top: 4px; padding: 3px 7px; border-radius: 999px;
+      background: var(--wc-header); border: 1px solid var(--wc-border-strong); box-shadow: var(--shadow-sm);
+    }
+    .msg-row:hover .msg-react-bar, .msg-row:focus-within .msg-react-bar { display: inline-flex; }
+    .react-btn {
+      border: none; background: transparent; cursor: pointer; font-size: 14px; padding: 2px 5px; border-radius: 6px;
+    }
+    .react-btn:hover { background: rgba(128, 128, 128, 0.22); }
     .composer {
-      padding: 12px 16px; border-top: 1px solid var(--border); background: var(--panel);
-      display: flex; gap: 8px;
+      padding: 11px 16px; border-top: 1px solid var(--wc-border); background: var(--wc-header);
+      display: flex; gap: 8px; align-items: center;
     }
     .composer input {
-      flex: 1; background: var(--bg); border: 1px solid var(--border); color: var(--text);
+      flex: 1; background: var(--wc-input); border: 1px solid var(--wc-border); color: var(--wc-text);
       padding: 10px 14px; border-radius: 999px; font-size: 14px;
+    }
+    .composer input:focus { outline: none; border-color: var(--wc-accent); }
+
+    /* Hub Pages (Notes, Calendar, Photos, Contacts) */
+    .hub-scroll { flex: 1; overflow-y: auto; padding: 22px; display: flex; flex-direction: column; }
+    .hub-wrap { max-width: 1040px; width: 100%; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+    .hub-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+    .glass-card {
+      background: var(--wc-card); border: 1px solid var(--wc-border); border-radius: 16px;
+      padding: 18px; backdrop-filter: blur(14px); box-shadow: var(--shadow-sm);
+    }
+    .grid-2 { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 14px; }
+    .notes-split { display: grid; grid-template-columns: 290px minmax(0, 1fr); gap: 16px; min-height: 520px; }
+
+    /* Modals & Toasts */
+    .modal-backdrop {
+      position: fixed; inset: 0; z-index: 120; background: rgba(4, 7, 12, 0.78);
+      backdrop-filter: blur(8px); display: none; align-items: center; justify-content: center; padding: 20px;
+    }
+    .modal-backdrop.open { display: flex; }
+    .modal-dialog {
+      width: 100%; max-width: 520px; max-height: 90vh; overflow-y: auto;
+      background: var(--wc-header); border: 1px solid var(--wc-border-strong);
+      border-radius: 18px; padding: 22px; box-shadow: var(--shadow-lg);
+    }
+    .modal-header { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 14px; }
+    .toast-container {
+      position: fixed; bottom: 20px; right: 20px; z-index: 200; display: flex; flex-direction: column; gap: 8px;
+    }
+    .toast {
+      padding: 10px 14px; border-radius: 10px; background: var(--wc-header); color: var(--wc-text);
+      border: 1px solid var(--wc-border-strong); border-left: 4px solid var(--bp-blue);
+      box-shadow: var(--shadow-lg); font-size: 13px;
+    }
+    .toast.success { border-left-color: var(--bp-green); }
+    .toast.error { border-left-color: var(--bp-red); }
+    @media (max-width: 820px) {
+      .wc-main { flex-direction: column; }
+      .wc-sidebar { width: 100%; max-height: 240px; border-right: none; border-bottom: 1px solid var(--wc-border); }
+      .notes-split, .grid-2 { grid-template-columns: 1fr; }
+      .msg-row { max-width: 88%; }
     }
   </style>
 </head>
 <body>
-  <header>
+<div class="webclient-shell theme-glass" id="wcShell">
+  <header class="wc-topbar">
     <div class="brand">
       <span class="pill-icon">BP</span>
-      <span>BluePill Web UI</span>
-      <span style="font-size:12px;color:var(--muted);font-weight:400;">v1.2.3 · Zero-Electron macOS Relay</span>
+      <span>BluePill</span>
+      <span class="pill pill-blue">v1.2.4</span>
+      <span class="status-dot" id="wcConnDot"></span>
+      <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
-    <div style="display:flex;gap:8px;align-items:center;">
-      <button onclick="openNotesModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📝 Notes</button>
-      <button onclick="openCalendarModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">📅 Calendar</button>
-      <button onclick="openPhotosModal()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 12px;font-size:12px;cursor:pointer;font-weight:600;display:flex;align-items:center;gap:4px;">☁️ Photos</button>
-      <span id="serverBadge" class="status-pill">Enter API Key to Connect</span>
+
+    <div class="wc-tabs" role="tablist" aria-label="BluePill views">
+      <button class="wc-tab active" type="button" data-tab="messages">Messages</button>
+      <button class="wc-tab" type="button" data-tab="notes">Notes</button>
+      <button class="wc-tab" type="button" data-tab="calendar">Calendar</button>
+      <button class="wc-tab" type="button" data-tab="photos">Photos</button>
+      <button class="wc-tab" type="button" data-tab="contacts">Contacts</button>
+    </div>
+
+    <div class="wc-auth-inline">
+      <select class="wc-select" id="themeSelect" aria-label="Theme">
+        <option value="theme-glass">Liquid Glass</option>
+        <option value="theme-matrix">Matrix</option>
+        <option value="theme-light">Light</option>
+      </select>
+      <input class="wc-input" id="apiKeyInput" type="password" placeholder="API Password / Key" style="width:155px;" />
+      <button class="btn btn-primary btn-sm" type="button" onclick="connectRelay()">Connect</button>
     </div>
   </header>
-  <div class="layout">
-    <aside class="sidebar">
-      <div class="auth-bar">
-        <input id="apiKeyInput" type="password" placeholder="API Password / Key" />
-        <button onclick="connectRelay()">Connect</button>
+
+  <!-- TAB: MESSAGES -->
+  <div class="wc-main" id="tab-messages">
+    <aside class="wc-sidebar">
+      <div class="wc-search-box">
+        <div class="wc-search-row">
+          <input class="wc-input" id="msgSearchInput" type="search" placeholder="Search messages or chats..." style="flex:1;" />
+          <button class="btn btn-primary btn-sm" id="newChatBtn" type="button" title="New Chat">+</button>
+        </div>
+        <div id="searchResultsBanner" class="hidden" style="font-size:11.5px;color:var(--bp-blue);cursor:pointer;" onclick="clearChatSearch()">
+          Showing search results · Click to clear
+        </div>
       </div>
       <div id="pinnedBar" class="pinned-bar"></div>
       <div id="chatList" class="chat-list"></div>
     </aside>
-    <main class="main">
-      <div id="chatHeader" class="chat-header" style="justify-content:space-between;">
-        <span id="chatHeaderTitle">Select a conversation</span>
-        <button id="deleteChatBtn" onclick="deleteActiveChat()" style="display:none;background:#212832;color:#f85149;border:1px solid #30363d;border-radius:6px;padding:4px 10px;font-size:12px;cursor:pointer;">🗑 Delete</button>
+
+    <section class="wc-thread">
+      <div id="chatHeader" class="chat-header">
+        <div style="display:flex;align-items:center;gap:10px;min-width:0;">
+          <div class="wc-avatar" id="threadAvatar">B</div>
+          <div style="min-width:0;">
+            <div id="chatHeaderTitle" style="font-weight:700;font-size:14.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;">Select a conversation</div>
+            <div id="threadSubtitle" style="font-size:11.5px;color:var(--wc-muted);">Ready · iMessage / SMS / RCS</div>
+          </div>
+        </div>
+        <button id="deleteChatBtn" class="btn btn-danger btn-sm" onclick="deleteActiveChat()" style="display:none;">Delete Chat</button>
       </div>
-      <div id="messagesPane" class="messages"></div>
+      <div id="messagesPane" class="wc-messages"></div>
       <div class="composer">
-        <select id="effectSelect" style="background:var(--bg);border:1px solid var(--border);color:var(--text);border-radius:8px;padding:6px;font-size:12px;">
+        <select id="effectSelect" class="wc-select" aria-label="Message Effect">
           <option value="">✨ Normal</option>
           <option value="com.apple.messages.effect.CKConfettiEffect">🎉 Confetti</option>
           <option value="com.apple.messages.effect.CKFireworksEffect">🎆 Fireworks</option>
@@ -7980,15 +8211,224 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           <option value="com.apple.MobileSMS.expressivesend.invisibleink">🕵️ Invisible Ink</option>
         </select>
         <input id="msgInput" type="text" placeholder="iMessage…" onkeydown="if(event.key==='Enter')sendMsg()" />
-        <button onclick="sendMsg()">Send</button>
+        <button class="btn btn-primary" type="button" onclick="sendMsg()">Send</button>
       </div>
-    </main>
+    </section>
   </div>
-  <script>
+
+  <!-- TAB: NOTES -->
+  <div class="wc-main hub-scroll hidden" id="tab-notes">
+    <div class="hub-wrap">
+      <div class="hub-header">
+        <div>
+          <h2 style="font-size:1.35rem;font-weight:800;">iCloud &amp; Local Hub Notes</h2>
+          <p style="font-size:12.5px;color:var(--wc-muted);">Read Apple Notes + read/write Local Hub notes via <code style="font-family:var(--font-mono);">/api/v1/icloud/notes</code></p>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <label style="font-size:12px;color:var(--wc-muted);">Per page:</label>
+          <select id="notesPageSizeSelect" class="wc-select" onchange="changeNotesPageSize(this.value)">
+            <option value="10">10</option>
+            <option value="20" selected>20</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+          <button class="btn btn-primary btn-sm" type="button" onclick="newNote()">+ New Note</button>
+        </div>
+      </div>
+
+      <div class="notes-split">
+        <div class="glass-card" style="display:flex;flex-direction:column;gap:8px;padding:12px;">
+          <input id="notesSearchInput" class="wc-input" oninput="filterNotes()" placeholder="Search notes..." />
+          <div id="notesList" style="flex:1;overflow-y:auto;max-height:420px;"></div>
+          <div style="display:flex;justify-content:space-between;align-items:center;font-size:11.5px;padding-top:6px;border-top:1px solid var(--wc-border);">
+            <button id="notesPrevBtn" class="btn btn-sm" type="button" onclick="changeNotesPage(-1)">Prev</button>
+            <span id="notesPageMeta" style="color:var(--wc-muted);">Page 1</span>
+            <button id="notesNextBtn" class="btn btn-sm" type="button" onclick="changeNotesPage(1)">Next</button>
+          </div>
+        </div>
+
+        <div class="glass-card" style="display:flex;flex-direction:column;gap:10px;">
+          <div id="noteConflictBanner" style="display:none;background:rgba(255,159,10,0.16);border:1px solid var(--bp-amber);border-radius:8px;padding:8px 10px;font-size:12px;align-items:center;justify-content:space-between;gap:8px;">
+            <span id="noteConflictText">Revision conflict: this note was updated elsewhere. Your draft is preserved.</span>
+            <div style="display:flex;gap:6px;">
+              <button id="noteConflictOverwriteBtn" class="btn btn-sm" type="button" onclick="resolveNoteConflictOverwrite()">Overwrite with Draft</button>
+              <button id="noteConflictReloadBtn" class="btn btn-sm" type="button" onclick="resolveNoteConflictReload()">Load Server Version</button>
+            </div>
+          </div>
+          <div id="noteErrorBanner" style="display:none;background:var(--bp-red-soft);border:1px solid var(--bp-red);border-radius:8px;padding:8px 10px;font-size:12px;"></div>
+          <input id="noteTitleInput" class="wc-input" oninput="noteDraftToken += 1" placeholder="Note Title" style="font-size:14.5px;font-weight:700;" />
+          <input id="noteFolderInput" class="wc-input" oninput="noteDraftToken += 1" placeholder="Folder (e.g. Notes, Work)" value="Notes" />
+          <textarea id="noteBodyInput" class="wc-textarea" oninput="noteDraftToken += 1" placeholder="Write note content..." style="flex:1;min-height:280px;resize:vertical;"></textarea>
+          <div style="display:flex;justify-content:space-between;align-items:center;">
+            <div style="display:flex;gap:8px;">
+              <button class="btn btn-green btn-sm" type="button" onclick="saveCurrentNote()">Save Note</button>
+              <button class="btn btn-sm" type="button" onclick="sendNoteToChat()">Send to Chat</button>
+            </div>
+            <button id="deleteNoteBtn" class="btn btn-danger btn-sm" type="button" onclick="deleteCurrentNote()">Delete</button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: CALENDAR -->
+  <div class="wc-main hub-scroll hidden" id="tab-calendar">
+    <div class="hub-wrap">
+      <div class="hub-header">
+        <div>
+          <h2 style="font-size:1.35rem;font-weight:800;">iCloud &amp; Local Hub Calendar</h2>
+          <p style="font-size:12.5px;color:var(--wc-muted);">Upcoming events + local event creator via <code style="font-family:var(--font-mono);">/api/v1/icloud/events</code></p>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <button class="btn btn-sm" type="button" onclick="downloadCalendarIcs()">Download .ics</button>
+          <select id="eventsPageSizeSelect" class="wc-select" onchange="changeEventsPageSize(this.value)">
+            <option value="15">15</option>
+            <option value="25" selected>25</option>
+            <option value="50">50</option>
+            <option value="100">100</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="glass-card" style="display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
+        <input id="evtTitleInput" class="wc-input" placeholder="Event title..." style="flex:2;min-width:180px;" />
+        <input id="evtCalendarInput" class="wc-input" placeholder="Calendar (Home, Work)" value="Home" style="width:140px;" />
+        <input id="evtDateInput" class="wc-input" type="datetime-local" style="width:190px;" />
+        <button class="btn btn-primary btn-sm" type="button" onclick="saveNewEvent()">+ Add Event</button>
+      </div>
+
+      <div id="eventsList" style="display:flex;flex-direction:column;gap:8px;"></div>
+
+      <div class="glass-card" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;font-size:12px;">
+        <span id="eventsPageMeta" style="color:var(--wc-muted);">Page 1</span>
+        <div style="display:flex;gap:6px;">
+          <button id="eventsPrevBtn" class="btn btn-sm" type="button" onclick="changeEventsPage(-1)">Prev</button>
+          <button id="eventsNextBtn" class="btn btn-sm" type="button" onclick="changeEventsPage(1)">Next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: PHOTOS -->
+  <div class="wc-main hub-scroll hidden" id="tab-photos">
+    <div class="hub-wrap">
+      <div class="hub-header">
+        <div>
+          <h2 style="font-size:1.35rem;font-weight:800;">iCloud Photos &amp; Attachment Gallery</h2>
+          <p style="font-size:12.5px;color:var(--wc-muted);">Click any photo for full lightbox preview or unpurge iCloud originals.</p>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <select id="photosPageSizeSelect" class="wc-select" onchange="changePhotosPageSize(this.value)">
+            <option value="24">24</option>
+            <option value="48" selected>48</option>
+            <option value="60">60</option>
+            <option value="120">120</option>
+            <option value="240">240</option>
+          </select>
+          <button id="syncPhotosBtn" class="btn btn-primary btn-sm" type="button" onclick="syncAllPhotos()">Sync All Photos</button>
+        </div>
+      </div>
+
+      <div id="photosSyncStatusBanner" class="glass-card" style="display:none;padding:10px 14px;font-size:12.5px;"></div>
+      <div id="photosGrid" class="grid-3"></div>
+
+      <div class="glass-card" style="display:flex;justify-content:space-between;align-items:center;padding:10px 14px;font-size:12px;">
+        <span id="photosPageMeta" style="color:var(--wc-muted);">Page 1</span>
+        <div style="display:flex;gap:6px;">
+          <button id="photosPrevBtn" class="btn btn-sm" type="button" onclick="changePhotosPage(-1)">Prev</button>
+          <button id="photosNextBtn" class="btn btn-sm" type="button" onclick="changePhotosPage(1)">Next</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- TAB: CONTACTS -->
+  <div class="wc-main hub-scroll hidden" id="tab-contacts">
+    <div class="hub-wrap">
+      <div class="hub-header">
+        <div>
+          <h2 style="font-size:1.35rem;font-weight:800;">Contacts</h2>
+          <p style="font-size:12.5px;color:var(--wc-muted);">macOS AddressBook handles synced from your relay.</p>
+        </div>
+        <input class="wc-input" id="contactSearchInput" type="search" placeholder="Filter contacts..." style="width:240px;" />
+      </div>
+      <div id="contactsGrid" class="grid-2"></div>
+    </div>
+  </div>
+</div>
+
+<!-- New Chat Modal -->
+<div class="modal-backdrop" id="newChatModal">
+  <div class="modal-dialog">
+    <div class="modal-header">
+      <h3 style="font-size:1.1rem;font-weight:700;">New Conversation</h3>
+      <button class="btn btn-sm" type="button" onclick="closeModal('newChatModal')">Close</button>
+    </div>
+    <form id="newChatForm" style="display:flex;flex-direction:column;gap:12px;">
+      <div style="display:flex;flex-direction:column;gap:5px;">
+        <label for="newChatAddress" style="font-size:12.5px;font-weight:600;color:var(--wc-muted);">Recipient (Phone or Apple ID Email)</label>
+        <input class="wc-input" id="newChatAddress" type="text" required placeholder="+14155550142 or alex@example.com" />
+      </div>
+      <div style="display:flex;flex-direction:column;gap:5px;">
+        <label for="newChatFirstMsg" style="font-size:12.5px;font-weight:600;color:var(--wc-muted);">Initial Message</label>
+        <input class="wc-input" id="newChatFirstMsg" type="text" required placeholder="Hello from BluePill!" />
+      </div>
+      <div style="display:flex;justify-content:flex-end;gap:8px;">
+        <button class="btn" type="button" onclick="closeModal('newChatModal')">Cancel</button>
+        <button class="btn btn-primary" type="submit">Start Chat</button>
+      </div>
+    </form>
+  </div>
+</div>
+
+<!-- Photo Lightbox Modal -->
+<div class="modal-backdrop" id="photoLightbox" onclick="if(event.target === this) closeModal('photoLightbox')">
+  <div class="modal-dialog" style="max-width:780px;">
+    <div class="modal-header">
+      <h3 id="lightboxTitle" style="font-size:1.05rem;font-weight:700;">Photo Preview</h3>
+      <button class="btn btn-sm" type="button" onclick="closeModal('photoLightbox')">Close</button>
+    </div>
+    <div id="lightboxBody" style="text-align:center;"></div>
+  </div>
+</div>
+
+<div class="toast-container" id="toastContainer"></div>
+
+<script>
     let apiKey = new URLSearchParams(location.search).get('password') || localStorage.getItem('bluepill_key') || '';
     document.getElementById('apiKeyInput').value = apiKey;
     let activeChatGuid = '';
     let contactMap = {};
+    let contactsListCache = [];
+    let allChatsCache = [];
+
+    const REACTIONS = [
+      { key: 'love', emoji: '❤️' },
+      { key: 'like', emoji: '👍' },
+      { key: 'dislike', emoji: '👎' },
+      { key: 'laugh', emoji: '😂' },
+      { key: 'emphasize', emoji: '‼️' },
+      { key: 'question', emoji: '❓' },
+    ];
+    const REACTION_EMOJI = Object.fromEntries(REACTIONS.map(r => [r.key, r.emoji]));
+
+    function openModal(id) {
+      const el = document.getElementById(id);
+      if (el && el.classList) el.classList.add('open');
+    }
+    function closeModal(id) {
+      const el = document.getElementById(id);
+      if (el && el.classList) el.classList.remove('open');
+    }
+    function showToast(msg, kind = 'info') {
+      const wrap = document.getElementById('toastContainer');
+      if (!wrap || !wrap.appendChild) return;
+      const t = document.createElement('div');
+      t.className = 'toast ' + kind;
+      t.textContent = msg;
+      wrap.appendChild(t);
+      setTimeout(() => { if (t && t.parentNode) t.parentNode.removeChild(t); }, 3200);
+    }
 
     function normAddr(a) {
       if (!a) return '';
@@ -8007,9 +8447,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       return contactMap[normAddr(id)] || id || c.guid;
     }
 
+    function isSmsChat(c, guid) {
+      const svc = String((c && (c.serviceName || c.service)) || '').toUpperCase();
+      const g = String(guid || (c && c.guid) || '');
+      return svc === 'SMS' || svc === 'RCS' || g.startsWith('SMS;') || g.startsWith('RCS;');
+    }
+
     function extractOtp(text) {
       if (!text) return '';
-      const m = text.match(/(?:code|otp|passcode|pin|verification)[^0-9]{0,20}\b([0-9]{4,8})\b/i);
+      const m = text.match(/(?:code|otp|passcode|pin|verification|2fa|auth)[^0-9]{0,20}\b((?:G-)?[0-9]{4,8})\b/i);
       return m ? m[1] : '';
     }
 
@@ -8037,32 +8483,46 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       return `${path}${sep}password=${encodeURIComponent(apiKey)}`;
     }
 
+    function setConnStatus(state, text) {
+      const badge = document.getElementById('serverBadge');
+      const dot = document.getElementById('wcConnDot');
+      if (badge) {
+        badge.textContent = text;
+        if (badge.classList) {
+          badge.className = 'pill' + (state === 'online' ? ' pill-green' : '');
+        }
+      }
+      if (dot) dot.className = 'status-dot ' + state;
+    }
+
     async function connectRelay() {
       apiKey = document.getElementById('apiKeyInput').value.trim();
       localStorage.setItem('bluepill_key', apiKey);
       if (apiKey && !isTrustedPasswordTransport()) {
         stopChatSocketIo();
         if (typeof stopPhotosSocketIo === 'function') stopPhotosSocketIo();
-        document.getElementById('serverBadge').textContent = 'HTTPS Required for Remote Password';
+        setConnStatus('offline', 'HTTPS Required for Remote Password');
         return;
       }
       try {
         const res = await fetch(apiUrl('/api/v1/server/info'));
         const j = await res.json();
         if (j && j.data) {
-          document.getElementById('serverBadge').textContent =
-            `Connected · macOS ${j.data.os_version} · BluePill v${j.data.server_version} · Private API: ${j.data.private_api ? 'Active' : 'Fallback'}`;
+          setConnStatus(
+            'online',
+            `Connected · macOS ${j.data.os_version} · BluePill v${j.data.server_version} · Private API: ${j.data.private_api ? 'Active' : 'Fallback'}`
+          );
           await loadContacts();
           await loadPinned();
           await loadChats();
           startChatSocketIo();
         } else {
           stopChatSocketIo();
-          document.getElementById('serverBadge').textContent = 'Auth Required';
+          setConnStatus('offline', 'Auth Required');
         }
       } catch (e) {
         stopChatSocketIo();
-        document.getElementById('serverBadge').textContent = 'Connection Error';
+        setConnStatus('offline', 'Connection Error');
       }
     }
 
@@ -8070,12 +8530,15 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       try {
         const res = await fetch(apiUrl('/api/v1/contact'));
         const j = await res.json();
-        (j.data || []).forEach(ct => {
+        contactsListCache = j.data || [];
+        contactMap = {};
+        contactsListCache.forEach(ct => {
           const name = ct.displayName || `${ct.firstName || ''} ${ct.lastName || ''}`.trim();
           if (!name) return;
           (ct.phoneNumbers || []).forEach(p => { contactMap[normAddr(p.address)] = name; });
           (ct.emails || []).forEach(e => { contactMap[normAddr(e.address)] = name; });
         });
+        if (typeof renderContactsGrid === 'function') renderContactsGrid(contactsListCache);
       } catch (e) {}
     }
 
@@ -8095,9 +8558,43 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       });
     }
 
-    async function loadChats() {
+    function renderChatList(chats) {
       const list = document.getElementById('chatList');
       list.innerHTML = '';
+      chats.forEach(c => {
+        const row = document.createElement('div');
+        const sms = isSmsChat(c, c.guid);
+        row.className = 'chat-row' + (c.guid === activeChatGuid ? ' active' : '');
+        const title = resolveName(c);
+        const av = document.createElement('div');
+        av.className = 'wc-avatar' + (sms ? ' sms' : '');
+        av.textContent = (title || '?').slice(0, 2).toUpperCase();
+        const col = document.createElement('div');
+        col.className = 'chat-meta-col';
+        const top = document.createElement('div');
+        top.className = 'chat-title-row';
+        const tEl = document.createElement('div');
+        tEl.className = 'chat-title';
+        tEl.textContent = title;
+        const badge = document.createElement('span');
+        badge.className = 'pill ' + (sms ? 'pill-green' : 'pill-blue');
+        badge.style.cssText = 'padding:1px 6px;font-size:10px;';
+        badge.textContent = sms ? 'SMS' : 'iMsg';
+        top.appendChild(tEl);
+        top.appendChild(badge);
+        const sub = document.createElement('div');
+        sub.className = 'chat-sub';
+        sub.textContent = (c.lastMessage && c.lastMessage.text) ? c.lastMessage.text : (c.guid || '');
+        col.appendChild(top);
+        col.appendChild(sub);
+        row.appendChild(av);
+        row.appendChild(col);
+        row.onclick = () => selectChat(c.guid, title);
+        list.appendChild(row);
+      });
+    }
+
+    async function loadChats() {
       const res = await fetch(apiUrl('/api/v1/chat/query'), {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -8105,14 +8602,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       });
       const j = await res.json();
       const chats = j.data || [];
-      chats.forEach(c => {
-        const row = document.createElement('div');
-        row.className = 'chat-row' + (c.guid === activeChatGuid ? ' active' : '');
-        const title = resolveName(c);
-        row.innerHTML = `<div class="chat-title">${title}</div><div class="chat-sub">${c.guid}</div>`;
-        row.onclick = () => selectChat(c.guid, title);
-        list.appendChild(row);
-      });
+      allChatsCache = chats;
+      renderChatList(chats);
       if (!activeChatGuid && chats.length > 0) {
         selectChat(chats[0].guid, resolveName(chats[0]));
       }
@@ -8378,46 +8869,103 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       scheduleNext(nextDelayFor(now0));
     }
 
+    function openLightbox(title, src) {
+      const titleEl = document.getElementById('lightboxTitle');
+      const bodyEl = document.getElementById('lightboxBody');
+      if (titleEl) titleEl.textContent = title || 'Photo Preview';
+      if (bodyEl) {
+        bodyEl.innerHTML = '';
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = title || 'Photo';
+        img.style.cssText = 'max-height:70vh;max-width:100%;margin:0 auto;border-radius:14px;';
+        bodyEl.appendChild(img);
+      }
+      openModal('photoLightbox');
+    }
+
+    async function sendReaction(msgGuid, reaction) {
+      if (!activeChatGuid || !msgGuid) return;
+      try {
+        await fetch(apiUrl('/api/v1/message/react'), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ chatGuid: activeChatGuid, selectedMessageGuid: msgGuid, reaction })
+        });
+        await selectChat(activeChatGuid, document.getElementById('chatHeaderTitle').textContent, { fromReconcile: true });
+      } catch (e) {
+        showToast('Reaction failed: ' + e.message, 'error');
+      }
+    }
+
     function renderMessageBubble(m, guid) {
-      const d = document.createElement('div');
-      const isSms = (m.service || '').toUpperCase() === 'SMS' || (guid || '').startsWith('SMS;');
-      d.className = 'msg' + (m.isFromMe ? ' me' : '') + (isSms ? ' sms' : '');
-      d.dataset.guid = m.guid || '';
-      d.dataset.tempGuid = m.tempGuid || '';
-      d.dataset.pending = (m.pending || m.unconfirmed) ? '1' : '0';
-      if (m.unconfirmed) d.dataset.unconfirmed = '1';
+      const row = document.createElement('div');
+      const isSms = (m.service || '').toUpperCase() === 'SMS' || (m.service || '').toUpperCase() === 'RCS' || (guid || '').startsWith('SMS;') || (guid || '').startsWith('RCS;');
+      row.className = 'msg-row ' + (m.isFromMe ? 'me' : 'them');
+      row.dataset.guid = m.guid || '';
+      row.dataset.tempGuid = m.tempGuid || '';
+      row.dataset.pending = (m.pending || m.unconfirmed) ? '1' : '0';
+      if (m.unconfirmed) row.dataset.unconfirmed = '1';
+
+      const bubble = document.createElement('div');
+      bubble.className = 'msg-bubble' + (m.isFromMe ? (isSms ? ' sms' : ' imessage') : '');
       if (m.text) {
         const t = document.createElement('div');
         t.textContent = m.text;
-        d.appendChild(t);
+        bubble.appendChild(t);
       }
       const hasAtt = m.attachments && m.attachments.length > 0;
       if (hasAtt) {
         m.attachments.forEach(a => {
           if ((a.mimeType || '').startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|gif|webp)$/i.test(a.transferName || '')) {
             const img = document.createElement('img');
-            img.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download?height=600`);
-            d.appendChild(img);
+            const srcUrl = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download?height=600`);
+            img.src = srcUrl;
+            img.onclick = () => openLightbox(a.transferName || 'Attachment', srcUrl);
+            bubble.appendChild(img);
           }
         });
       }
       const otp = extractOtp(m.text || '');
       if (otp) {
         const btn = document.createElement('button');
-        btn.className = 'otp-btn';
-        btn.textContent = `🔑 Copy ${otp}`;
-        btn.onclick = () => navigator.clipboard.writeText(otp);
-        d.appendChild(btn);
+        btn.className = 'otp-pill';
+        btn.type = 'button';
+        btn.textContent = `Copy Code: ${otp}`;
+        btn.onclick = () => {
+          if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(otp).catch(() => {});
+          }
+          showToast('Copied 2FA code: ' + otp, 'success');
+        };
+        bubble.appendChild(btn);
       }
       if (m.expressiveSendStyleId) {
         const effBadge = document.createElement('button');
         effBadge.className = 'otp-btn';
+        effBadge.type = 'button';
         effBadge.style.background = 'rgba(10, 132, 255, 0.28)';
         effBadge.style.border = '1px solid rgba(10, 132, 255, 0.5)';
         effBadge.textContent = '✨ ' + formatEffectName(m.expressiveSendStyleId);
         effBadge.onclick = (e) => { e.stopPropagation(); playWebEffect(m.expressiveSendStyleId); };
-        d.appendChild(effBadge);
+        bubble.appendChild(effBadge);
       }
+      row.appendChild(bubble);
+
+      const tapbacks = (m.reactions || m.tapbacks || []);
+      if (tapbacks.length) {
+        const tbWrap = document.createElement('div');
+        tbWrap.className = 'tapback-badges';
+        tapbacks.forEach(tb => {
+          const k = typeof tb === 'string' ? tb : (tb.reaction || tb.type || 'like');
+          const chip = document.createElement('span');
+          chip.className = 'tapback-chip';
+          chip.textContent = REACTION_EMOJI[k] || k;
+          tbWrap.appendChild(chip);
+        });
+        row.appendChild(tbWrap);
+      }
+
       const meta = document.createElement('div');
       meta.className = 'msg-meta';
       const dt = m.dateCreated ? new Date(m.dateCreated).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) : '';
@@ -8427,8 +8975,23 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (m.dateEdited > 0) badge += ' · Edited';
       if (m.error > 0) badge += ' · ⚠ Not Delivered';
       meta.textContent = badge;
-      d.appendChild(meta);
-      return d;
+      row.appendChild(meta);
+
+      if (m.guid) {
+        const reactBar = document.createElement('div');
+        reactBar.className = 'msg-react-bar';
+        REACTIONS.forEach(r => {
+          const rb = document.createElement('button');
+          rb.className = 'react-btn';
+          rb.type = 'button';
+          rb.title = r.key;
+          rb.textContent = r.emoji;
+          rb.onclick = () => sendReaction(m.guid, r.key);
+          reactBar.appendChild(rb);
+        });
+        row.appendChild(reactBar);
+      }
+      return row;
     }
 
     function upsertMessageInPane(m, chatGuid, matchedTempGuid = '') {
@@ -8614,8 +9177,18 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
       activeChatGuid = guid;
       const reqSeq = ++selectChatSeq;
-      document.getElementById('chatHeaderTitle').textContent = title || guid;
+      const dispTitle = title || guid;
+      document.getElementById('chatHeaderTitle').textContent = dispTitle;
       document.getElementById('deleteChatBtn').style.display = guid ? 'inline-block' : 'none';
+      const avEl = document.getElementById('threadAvatar');
+      const subEl = document.getElementById('threadSubtitle');
+      const chatObj = allChatsCache.find(c => c.guid === guid);
+      const sms = isSmsChat(chatObj, guid);
+      if (avEl) {
+        avEl.textContent = (dispTitle || 'B').slice(0, 2).toUpperCase();
+        avEl.className = 'wc-avatar' + (sms ? ' sms' : '');
+      }
+      if (subEl) subEl.textContent = sms ? 'SMS / RCS Carrier Relay' : 'iMessage · Apple Relay';
       const pane = document.getElementById('messagesPane');
       if (isSwitch) {
         pane.innerHTML = '';
@@ -8701,7 +9274,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           p.style.opacity = '0';
         }, 30);
       }
-      setTimeout(() => container.remove(), 2400);
+      setTimeout(() => { if (container.remove) container.remove(); }, 2400);
     }
 
     async function sendMsg() {
@@ -8773,131 +9346,158 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
 
     if (apiKey) connectRelay();
-  </script>
+</script>
 
-  <!-- Notes Modal -->
-  <div id="notesModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div id="notesModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:780px;max-width:88vw;height:520px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
-        <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📝 iCloud & Local Hub Notes</span>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <label style="font-size:12px;color:var(--muted);">Per page:</label>
-          <select id="notesPageSizeSelect" onchange="changeNotesPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
-            <option value="10">10</option>
-            <option value="20" selected>20</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
-          <button id="notesFullScreenBtn" onclick="toggleModalFullScreen('notesModalCard', 'notesFullScreenBtn', '780px', '88vw', '520px', '80vh')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">⛶ Full Screen</button>
-          <button onclick="closeNotesModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
-        </div>
-      </div>
-      <div style="display:flex;flex:1;overflow:hidden;">
-        <div style="width:270px;border-right:1px solid var(--border);display:flex;flex-direction:column;background:rgba(255,255,255,0.02);">
-          <div style="padding:10px;border-bottom:1px solid var(--border);display:flex;gap:6px;">
-            <input id="notesSearchInput" oninput="filterNotes()" placeholder="Search notes..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
-            <button onclick="newNote()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 10px;font-weight:600;font-size:12px;cursor:pointer;">+ New</button>
-          </div>
-          <div id="notesList" style="flex:1;overflow-y:scroll;padding:6px;"></div>
-          <div style="display:flex;justify-content:space-between;align-items:center;padding:6px 10px;border-top:1px solid var(--border);font-size:11px;">
-            <button id="notesPrevBtn" onclick="changeNotesPage(-1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 8px;cursor:pointer;">‹ Prev</button>
-            <span id="notesPageMeta" style="color:var(--muted);">Page 1</span>
-            <button id="notesNextBtn" onclick="changeNotesPage(1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:3px 8px;cursor:pointer;">Next ›</button>
-          </div>
-        </div>
-        <div style="flex:1;display:flex;flex-direction:column;padding:14px;gap:10px;">
-          <div id="noteConflictBanner" style="display:none;background:#3d2c12;border:1px solid #d29922;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;align-items:center;justify-content:space-between;gap:8px;">
-            <span id="noteConflictText">⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.</span>
-            <div style="display:flex;gap:6px;">
-              <button id="noteConflictOverwriteBtn" onclick="resolveNoteConflictOverwrite()" style="background:#d29922;color:#0d1117;border:none;border-radius:4px;padding:4px 8px;font-weight:600;font-size:11px;cursor:pointer;">Overwrite with Draft</button>
-              <button id="noteConflictReloadBtn" onclick="resolveNoteConflictReload()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;">Load Server Version</button>
-            </div>
-          </div>
-          <div id="noteErrorBanner" style="display:none;background:#3d1418;border:1px solid #f85149;border-radius:6px;padding:8px 10px;font-size:12px;color:#f0f6fc;"></div>
-          <input id="noteTitleInput" oninput="noteDraftToken += 1" placeholder="Note Title" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:8px 12px;color:var(--text);font-size:14px;font-weight:600;" />
-          <input id="noteFolderInput" oninput="noteDraftToken += 1" placeholder="Folder (e.g. Notes, Work)" value="Notes" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--muted);font-size:12px;" />
-          <textarea id="noteBodyInput" oninput="noteDraftToken += 1" placeholder="Write note content..." style="flex:1;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:10px;color:var(--text);font-size:13px;resize:none;font-family:inherit;overflow-y:scroll;"></textarea>
-          <div style="display:flex;justify-content:space-between;align-items:center;">
-            <div style="display:flex;gap:8px;">
-              <button onclick="saveCurrentNote()" style="background:var(--green);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">💾 Save</button>
-              <button onclick="sendNoteToChat()" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">📤 Send to Chat</button>
-            </div>
-            <button id="deleteNoteBtn" onclick="deleteCurrentNote()" style="background:#212832;color:#f85149;border:1px solid var(--border);border-radius:6px;padding:6px 12px;font-size:12px;cursor:pointer;">🗑 Delete</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  </div>
+<script>
+    /* Theme Switcher & Navigation Tabs */
+    const wcShell = document.getElementById('wcShell');
+    const themeSelect = document.getElementById('themeSelect');
+    const savedTheme = localStorage.getItem('bp_wc_theme') || 'theme-glass';
+    if (wcShell) wcShell.className = 'webclient-shell ' + savedTheme;
+    if (themeSelect) {
+      themeSelect.value = savedTheme;
+      themeSelect.addEventListener('change', () => {
+        wcShell.className = 'webclient-shell ' + themeSelect.value;
+        localStorage.setItem('bp_wc_theme', themeSelect.value);
+      });
+    }
 
-  <!-- Calendar Modal -->
-  <div id="calendarModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div id="calendarModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:740px;max-width:88vw;height:500px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
-        <div style="display:flex;align-items:center;gap:12px;">
-          <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">📅 iCloud & Local Hub Calendar</span>
-          <button onclick="downloadCalendarIcs()" style="background:#212832;color:var(--accent2);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">📥 Download .ics</button>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <label style="font-size:12px;color:var(--muted);">Per page:</label>
-          <select id="eventsPageSizeSelect" onchange="changeEventsPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
-            <option value="15">15</option>
-            <option value="25" selected>25</option>
-            <option value="50">50</option>
-            <option value="100">100</option>
-          </select>
-          <button id="calendarFullScreenBtn" onclick="toggleModalFullScreen('calendarModalCard', 'calendarFullScreenBtn', '740px', '88vw', '500px', '80vh')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">⛶ Full Screen</button>
-          <button onclick="closeCalendarModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
-        </div>
-      </div>
-      <div style="padding:12px 18px;border-bottom:1px solid var(--border);background:rgba(255,255,255,0.02);display:flex;flex-wrap:wrap;gap:8px;align-items:center;">
-        <input id="evtTitleInput" placeholder="Event title..." style="flex:2;min-width:180px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
-        <input id="evtCalendarInput" placeholder="Calendar (Home, Work)" value="Home" style="width:130px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px 10px;color:var(--text);font-size:12px;" />
-        <input id="evtDateInput" type="datetime-local" style="width:170px;background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px 8px;color:var(--text);font-size:11px;" />
-        <button onclick="saveNewEvent()" style="background:var(--accent);color:#fff;border:none;border-radius:6px;padding:6px 14px;font-weight:600;font-size:12px;cursor:pointer;">+ Add Event</button>
-      </div>
-      <div id="eventsList" style="flex:1;overflow-y:scroll;padding:12px 18px;display:flex;flex-direction:column;gap:8px;"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-top:1px solid var(--border);background:rgba(255,255,255,0.02);font-size:12px;">
-        <span id="eventsPageMeta" style="color:var(--muted);">Page 1</span>
-        <div style="display:flex;gap:6px;">
-          <button id="eventsPrevBtn" onclick="changeEventsPage(-1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">‹ Prev</button>
-          <button id="eventsNextBtn" onclick="changeEventsPage(1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">Next ›</button>
-        </div>
-      </div>
-    </div>
-  </div>
+    function switchTab(tab) {
+      document.querySelectorAll('.wc-tab').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
+      ['messages', 'notes', 'calendar', 'photos', 'contacts'].forEach(t => {
+        const el = document.getElementById('tab-' + t);
+        if (el) el.classList.toggle('hidden', t !== tab);
+      });
+      if (tab === 'notes') loadNotes();
+      if (tab === 'calendar') loadEvents();
+      if (tab === 'photos') {
+        loadPhotos(0);
+        startPhotosSocketIo();
+      } else {
+        stopPhotosSocketIo();
+      }
+      if (tab === 'contacts') loadContacts();
+    }
+    document.querySelectorAll('.wc-tab').forEach(btn => {
+      btn.addEventListener('click', () => switchTab(btn.dataset.tab));
+    });
 
-  <!-- Photos Modal -->
-  <div id="photosModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.75);z-index:9999;align-items:center;justify-content:center;">
-    <div id="photosModalCard" style="background:var(--panel);border:1px solid var(--border);border-radius:12px;width:820px;max-width:88vw;height:540px;max-height:80vh;display:flex;flex-direction:column;overflow:hidden;">
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:12px 18px;border-bottom:1px solid var(--border);gap:10px;">
-        <span style="font-weight:700;font-size:15px;display:flex;align-items:center;gap:6px;">☁️ iCloud Photos & Attachment Unpurge</span>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <label style="font-size:12px;color:var(--muted);">Per page:</label>
-          <select id="photosPageSizeSelect" onchange="changePhotosPageSize(this.value)" style="background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 8px;font-size:12px;">
-            <option value="24">24</option>
-            <option value="48" selected>48</option>
-            <option value="60">60</option>
-            <option value="120">120</option>
-            <option value="240">240</option>
-          </select>
-          <button id="syncPhotosBtn" onclick="syncAllPhotos()" style="background:#1f6feb;color:#fff;border:none;padding:5px 12px;border-radius:6px;font-size:12px;font-weight:600;cursor:pointer;">⬇ Sync All Photos</button>
-          <button id="photosFullScreenBtn" onclick="toggleModalFullScreen('photosModalCard', 'photosFullScreenBtn', '820px', '88vw', '540px', '80vh')" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px 10px;font-size:12px;cursor:pointer;">⛶ Full Screen</button>
-          <button onclick="closePhotosModal()" style="background:transparent;border:none;color:var(--muted);font-size:18px;cursor:pointer;">✕</button>
-        </div>
-      </div>
-      <div id="photosSyncStatusBanner" style="display:none;padding:8px 18px;font-size:12px;border-bottom:1px solid var(--border);"></div>
-      <div id="photosGrid" style="flex:1;overflow-y:scroll;padding:14px;display:grid;grid-template-columns:repeat(auto-fill, minmax(150px, 1fr));gap:10px;"></div>
-      <div style="display:flex;justify-content:space-between;align-items:center;padding:8px 16px;border-top:1px solid var(--border);background:rgba(255,255,255,0.02);font-size:12px;">
-        <span id="photosPageMeta" style="color:var(--muted);">Page 1</span>
-        <div style="display:flex;gap:6px;">
-          <button id="photosPrevBtn" onclick="changePhotosPage(-1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">‹ Prev</button>
-          <button id="photosNextBtn" onclick="changePhotosPage(1)" style="background:#212832;color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px 10px;font-size:11px;cursor:pointer;">Next ›</button>
-        </div>
-      </div>
-    </div>
-  </div>
+    /* Search & New Chat */
+    let searchDebounce = null;
+    function clearChatSearch() {
+      const inp = document.getElementById('msgSearchInput');
+      if (inp) inp.value = '';
+      document.getElementById('searchResultsBanner').classList.add('hidden');
+      renderChatList(allChatsCache);
+    }
+    const msgSearchInput = document.getElementById('msgSearchInput');
+    if (msgSearchInput) {
+      msgSearchInput.addEventListener('input', (e) => {
+        clearTimeout(searchDebounce);
+        const q = e.target.value.trim();
+        if (!q) { clearChatSearch(); return; }
+        searchDebounce = setTimeout(async () => {
+          try {
+            const resp = await fetch(apiUrl('/api/v1/message/search?query=' + encodeURIComponent(q)));
+            const j = await resp.json();
+            const hits = j.data || [];
+            const hitGuids = new Set();
+            hits.forEach(h => (h.chats || []).forEach(c => { if (c && c.guid) hitGuids.add(c.guid); }));
+            const filtered = allChatsCache.filter(c =>
+              resolveName(c).toLowerCase().includes(q.toLowerCase()) || hitGuids.has(c.guid)
+            );
+            document.getElementById('searchResultsBanner').classList.remove('hidden');
+            renderChatList(filtered);
+          } catch (_) {
+            const filtered = allChatsCache.filter(c => resolveName(c).toLowerCase().includes(q.toLowerCase()));
+            renderChatList(filtered);
+          }
+        }, 220);
+      });
+    }
+    document.getElementById('newChatBtn').addEventListener('click', () => openModal('newChatModal'));
+    document.getElementById('newChatForm').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const address = document.getElementById('newChatAddress').value.trim();
+      const message = document.getElementById('newChatFirstMsg').value.trim();
+      if (!address) return;
+      try {
+        const resp = await fetch(apiUrl('/api/v1/chat/new'), {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({ addresses: [address], message })
+        });
+        const j = await resp.json();
+        if (!resp.ok) throw new Error(j.message || ('HTTP ' + resp.status));
+        closeModal('newChatModal');
+        e.target.reset();
+        await loadChats();
+        if (j.data && j.data.guid) selectChat(j.data.guid, resolveName(j.data));
+      } catch (err) {
+        showToast('Could not start chat: ' + err.message, 'error');
+      }
+    });
 
-  <script>
+    /* Contacts Tab */
+    function renderContactsGrid(list) {
+      const grid = document.getElementById('contactsGrid');
+      if (!grid) return;
+      grid.innerHTML = '';
+      if (!list.length) {
+        const empty = document.createElement('div');
+        empty.style.color = 'var(--wc-muted)';
+        empty.textContent = 'No contacts matched.';
+        grid.appendChild(empty);
+        return;
+      }
+      list.slice(0, 120).forEach(ct => {
+        const card = document.createElement('div');
+        card.className = 'glass-card';
+        card.style.cssText = 'display:flex;align-items:center;justify-content:space-between;gap:12px;';
+        const left = document.createElement('div');
+        left.style.cssText = 'display:flex;align-items:center;gap:10px;min-width:0;';
+        const name = ct.displayName || `${ct.firstName || ''} ${ct.lastName || ''}`.trim() || 'Contact';
+        const addr = (ct.phoneNumbers && ct.phoneNumbers[0] && ct.phoneNumbers[0].address) || (ct.emails && ct.emails[0] && ct.emails[0].address) || '';
+        const av = document.createElement('div');
+        av.className = 'wc-avatar';
+        av.textContent = (name[0] || 'C').toUpperCase();
+        const info = document.createElement('div');
+        info.style.minWidth = '0';
+        const nEl = document.createElement('div');
+        nEl.style.fontWeight = '700';
+        nEl.textContent = name;
+        const aEl = document.createElement('div');
+        aEl.style.cssText = 'font-size:12px;color:var(--wc-muted);font-family:var(--font-mono);';
+        aEl.textContent = addr;
+        info.appendChild(nEl);
+        info.appendChild(aEl);
+        left.appendChild(av);
+        left.appendChild(info);
+        card.appendChild(left);
+        if (addr) {
+          const btn = document.createElement('button');
+          btn.className = 'btn btn-sm';
+          btn.type = 'button';
+          btn.textContent = 'Message';
+          btn.onclick = () => {
+            switchTab('messages');
+            document.getElementById('newChatAddress').value = addr;
+            openModal('newChatModal');
+          };
+          card.appendChild(btn);
+        }
+        grid.appendChild(card);
+      });
+    }
+    const contactSearchInput = document.getElementById('contactSearchInput');
+    if (contactSearchInput) {
+      contactSearchInput.addEventListener('input', (e) => {
+        const q = e.target.value.toLowerCase().trim();
+        renderContactsGrid(contactsListCache.filter(c => JSON.stringify(c).toLowerCase().includes(q)));
+      });
+    }
+
+    /* Notes Tab */
     let allNotes = [];
     let notesPage = 0;
     let notesPageSize = 20;
@@ -8917,28 +9517,6 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     let eventsPage = 0;
     let eventsPageSize = 25;
 
-    function toggleModalFullScreen(cardId, btnId, compactW, compactMaxW, compactH, compactMaxH) {
-      const card = document.getElementById(cardId);
-      const btn = document.getElementById(btnId);
-      if (!card) return;
-      const isFs = card.dataset.fullscreen === '1';
-      if (isFs) {
-        card.dataset.fullscreen = '0';
-        card.style.width = compactW;
-        card.style.maxWidth = compactMaxW;
-        card.style.height = compactH;
-        card.style.maxHeight = compactMaxH;
-        if (btn) btn.textContent = '⛶ Full Screen';
-      } else {
-        card.dataset.fullscreen = '1';
-        card.style.width = '98vw';
-        card.style.maxWidth = '98vw';
-        card.style.height = '96vh';
-        card.style.maxHeight = '96vh';
-        if (btn) btn.textContent = '🗗 Compact';
-      }
-    }
-
     function mergeServerNotesSnapshot(snapshot) {
       if (!Array.isArray(snapshot)) return;
       for (const item of snapshot) {
@@ -8954,23 +9532,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         }
       }
     }
-
-    function openNotesModal() {
-      document.getElementById('notesModal').style.display = 'flex';
-      loadNotes();
-    }
-    function closeNotesModal() {
-      document.getElementById('notesModal').style.display = 'none';
-    }
     async function loadNotes() {
       try {
         const resp = await fetch(apiUrl('/api/v1/icloud/notes'));
         const j = await resp.json();
         allNotes = j.data || [];
         for (const item of allNotes) {
-          if (item && item.id && !pendingDeleteById[item.id]) {
-            delete deletedNoteSeqById[item.id];
-          }
+          if (item && item.id && !pendingDeleteById[item.id]) delete deletedNoteSeqById[item.id];
         }
         renderNotesList();
         if (allNotes.length > 0 && !selectedNoteId) selectNote(allNotes[0].id);
@@ -8987,18 +9555,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const paged = filtered.slice(startIdx, startIdx + notesPageSize);
       const metaEl = document.getElementById('notesPageMeta');
       if (metaEl) metaEl.textContent = 'Page ' + (notesPage + 1) + ' / ' + pageCount + ' (' + filtered.length + ')';
-      const prevBtn = document.getElementById('notesPrevBtn');
-      if (prevBtn) prevBtn.disabled = (notesPage <= 0);
-      const nextBtn = document.getElementById('notesNextBtn');
-      if (nextBtn) nextBtn.disabled = ((notesPage + 1) >= pageCount);
+      document.getElementById('notesPrevBtn').disabled = (notesPage <= 0);
+      document.getElementById('notesNextBtn').disabled = ((notesPage + 1) >= pageCount);
       for (const n of paged) {
         const item = document.createElement('div');
-        item.style.cssText = 'padding:8px 10px;margin-bottom:4px;border-radius:6px;cursor:pointer;background:' + (n.id === selectedNoteId ? '#212832' : 'transparent') + ';border:1px solid ' + (n.id === selectedNoteId ? 'var(--accent)' : 'transparent') + ';';
+        item.style.cssText = 'padding:8px 10px;margin-bottom:4px;border-radius:8px;cursor:pointer;background:' + (n.id === selectedNoteId ? 'rgba(10,132,255,0.18)' : 'transparent') + ';border:1px solid ' + (n.id === selectedNoteId ? 'var(--wc-accent)' : 'transparent') + ';';
         const titleEl = document.createElement('div');
-        titleEl.style.cssText = 'font-weight:600;font-size:13px;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        titleEl.style.cssText = 'font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         titleEl.textContent = (n.syncSource === 'apple_notes_ro' ? '🍏 ' : '📝 ') + (n.title || 'Untitled');
         const previewEl = document.createElement('div');
-        previewEl.style.cssText = 'font-size:11px;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        previewEl.style.cssText = 'font-size:11px;color:var(--wc-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
         previewEl.textContent = (n.body || '').slice(0, 40);
         item.appendChild(titleEl);
         item.appendChild(previewEl);
@@ -9015,24 +9581,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       selectedNoteId = id;
       const n = allNotes.find(item => item.id === id);
       selectedNoteRevision = (n && typeof n.revision === 'number') ? n.revision : 1;
-      conflictServerRevision = null;
-      conflictNoteId = null;
-      conflictSelectionToken = 0;
-      conflictSaveAttemptSeq = 0;
-      conflictNoteDeleted = false;
-      const banner = document.getElementById('noteConflictBanner');
-      if (banner) banner.style.display = 'none';
+      conflictServerRevision = null; conflictNoteId = null; conflictSelectionToken = 0; conflictSaveAttemptSeq = 0; conflictNoteDeleted = false;
+      document.getElementById('noteConflictBanner').style.display = 'none';
       const errBanner = document.getElementById('noteErrorBanner');
-      if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
+      errBanner.style.display = 'none'; errBanner.textContent = '';
       if (n) {
         document.getElementById('noteTitleInput').value = n.title || '';
         document.getElementById('noteFolderInput').value = n.folder || 'Notes';
         document.getElementById('noteBodyInput').value = n.body || '';
       }
-      const delBtn = document.getElementById('deleteNoteBtn');
-      if (delBtn) {
-        delBtn.style.display = n ? 'inline-block' : 'none';
-      }
+      document.getElementById('deleteNoteBtn').style.display = n ? 'inline-block' : 'none';
       renderNotesList();
     }
     function newNote() {
@@ -9040,20 +9598,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       noteDraftToken = 0;
       selectedNoteId = 'note-' + Date.now();
       selectedNoteRevision = 0;
-      conflictServerRevision = null;
-      conflictNoteId = null;
-      conflictSelectionToken = 0;
-      conflictSaveAttemptSeq = 0;
-      conflictNoteDeleted = false;
-      const banner = document.getElementById('noteConflictBanner');
-      if (banner) banner.style.display = 'none';
-      const errBanner = document.getElementById('noteErrorBanner');
-      if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
+      conflictServerRevision = null; conflictNoteId = null; conflictSelectionToken = 0; conflictSaveAttemptSeq = 0; conflictNoteDeleted = false;
+      document.getElementById('noteConflictBanner').style.display = 'none';
+      document.getElementById('noteErrorBanner').style.display = 'none';
       document.getElementById('noteTitleInput').value = '';
       document.getElementById('noteFolderInput').value = 'Notes';
       document.getElementById('noteBodyInput').value = '';
-      const delBtn = document.getElementById('deleteNoteBtn');
-      if (delBtn) delBtn.style.display = 'none';
+      document.getElementById('deleteNoteBtn').style.display = 'none';
       document.getElementById('noteTitleInput').focus();
     }
     async function saveCurrentNote(forceOverwrite = false) {
@@ -9068,9 +9619,8 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const reqBody = {id: nid, title, folder, body, updatedAtMs: Date.now()};
       if (forceOverwrite === true) {
         if (reqToken !== conflictSelectionToken || nid !== conflictNoteId) return;
-        if (conflictNoteDeleted) {
-          reqBody.allowRecreate = true;
-        } else {
+        if (conflictNoteDeleted) reqBody.allowRecreate = true;
+        else {
           if (conflictServerRevision !== null) reqBody.baseRevision = conflictServerRevision;
           reqBody.forceOverwrite = true;
         }
@@ -9079,95 +9629,65 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
       const reqAttemptSeq = ++noteSaveAttemptSeq;
       const resp = await fetch(apiUrl('/api/v1/icloud/notes'), {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(reqBody)
+        method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(reqBody)
       });
       const j = await resp.json();
       const wasDeletedConcurrently = Boolean(pendingDeleteById[nid] || ((Number(deletedNoteSeqById[nid]) || 0) >= reqAttemptSeq && !reqBody.allowRecreate));
-      if (resp.ok && j.status === 200 && !wasDeletedConcurrently) {
-        delete deletedNoteSeqById[nid];
-      }
+      if (resp.ok && j.status === 200 && !wasDeletedConcurrently) delete deletedNoteSeqById[nid];
       if (reqToken !== noteSelectionToken || selectedNoteId !== nid) {
         if (Array.isArray(j.data) && !wasDeletedConcurrently) {
           const updatedTarget = j.data.find(item => item && item.id === nid);
-          if (updatedTarget) {
-            mergeServerNotesSnapshot([updatedTarget]);
-          }
+          if (updatedTarget) mergeServerNotesSnapshot([updatedTarget]);
         }
         renderNotesList();
         return;
       }
       let responseSavedNote = null;
       if (Array.isArray(j.data)) {
-        if (!wasDeletedConcurrently) {
-          responseSavedNote = j.data.find(item => item && item.id === nid) || null;
-        }
+        if (!wasDeletedConcurrently) responseSavedNote = j.data.find(item => item && item.id === nid) || null;
         mergeServerNotesSnapshot(j.data);
       }
       const banner = document.getElementById('noteConflictBanner');
       const errBanner = document.getElementById('noteErrorBanner');
       if (resp.ok && j.status === 200 && !wasDeletedConcurrently) {
-        if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
+        errBanner.style.display = 'none'; errBanner.textContent = '';
         const canClearConflict = (reqAttemptSeq >= conflictSaveAttemptSeq);
         if (canClearConflict) {
-          if (banner) banner.style.display = 'none';
-          conflictServerRevision = null;
-          conflictNoteId = null;
-          conflictSelectionToken = 0;
-          conflictSaveAttemptSeq = 0;
-          conflictNoteDeleted = false;
+          banner.style.display = 'none';
+          conflictServerRevision = null; conflictNoteId = null; conflictSelectionToken = 0; conflictSaveAttemptSeq = 0; conflictNoteDeleted = false;
         }
-        if (reqDraftToken === noteDraftToken && canClearConflict) {
-          selectNote(nid);
-        } else {
+        if (reqDraftToken === noteDraftToken && canClearConflict) selectNote(nid);
+        else {
           if (canClearConflict && !conflictNoteId && responseSavedNote && typeof responseSavedNote.revision === 'number') {
             selectedNoteRevision = Math.max(selectedNoteRevision || 0, responseSavedNote.revision);
           }
-          const delBtn = document.getElementById('deleteNoteBtn');
-          if (delBtn) delBtn.style.display = 'inline-block';
+          document.getElementById('deleteNoteBtn').style.display = 'inline-block';
           renderNotesList();
         }
+        showToast('Note saved', 'success');
       } else if (j.status === 409) {
         if (reqAttemptSeq >= conflictSaveAttemptSeq) {
-          if (errBanner) { errBanner.style.display = 'none'; errBanner.textContent = ''; }
+          errBanner.style.display = 'none';
           const srvNote = responseSavedNote;
-          const conflictText = document.getElementById('noteConflictText');
-          const overwriteBtn = document.getElementById('noteConflictOverwriteBtn');
-          const reloadBtn = document.getElementById('noteConflictReloadBtn');
-          conflictNoteId = nid;
-          conflictSelectionToken = reqToken;
-          conflictSaveAttemptSeq = reqAttemptSeq;
+          conflictNoteId = nid; conflictSelectionToken = reqToken; conflictSaveAttemptSeq = reqAttemptSeq;
           if (srvNote && typeof srvNote.revision === 'number') {
-            conflictServerRevision = srvNote.revision;
-            conflictNoteDeleted = false;
-            if (conflictText) conflictText.textContent = '⚠ Revision conflict: this note was updated elsewhere. Your draft is preserved.';
-            if (overwriteBtn) overwriteBtn.textContent = 'Overwrite with Draft';
-            if (reloadBtn) reloadBtn.style.display = 'inline-block';
+            conflictServerRevision = srvNote.revision; conflictNoteDeleted = false;
+            document.getElementById('noteConflictText').textContent = 'Revision conflict: updated elsewhere. Your draft is preserved.';
+            document.getElementById('noteConflictOverwriteBtn').textContent = 'Overwrite with Draft';
+            document.getElementById('noteConflictReloadBtn').style.display = 'inline-block';
           } else {
             allNotes = allNotes.filter(item => item && item.id !== nid);
-            conflictServerRevision = null;
-            conflictNoteDeleted = true;
-            if (conflictText) conflictText.textContent = '⚠ This note was deleted on the server. Your draft is preserved.';
-            if (overwriteBtn) overwriteBtn.textContent = 'Recreate Note';
-            if (reloadBtn) reloadBtn.style.display = 'none';
+            conflictServerRevision = null; conflictNoteDeleted = true;
+            document.getElementById('noteConflictText').textContent = 'This note was deleted on the server. Your draft is preserved.';
+            document.getElementById('noteConflictOverwriteBtn').textContent = 'Recreate Note';
+            document.getElementById('noteConflictReloadBtn').style.display = 'none';
           }
-          if (banner) banner.style.display = 'flex';
+          banner.style.display = 'flex';
         }
         renderNotesList();
       } else {
-        if (reqAttemptSeq >= conflictSaveAttemptSeq) {
-          if (banner) banner.style.display = 'none';
-          conflictServerRevision = null;
-          conflictNoteId = null;
-          conflictSelectionToken = 0;
-          conflictSaveAttemptSeq = 0;
-          conflictNoteDeleted = false;
-        }
-        if (errBanner) {
-          errBanner.textContent = j.message || ('Save failed (HTTP ' + (j.status || resp.status) + ')');
-          errBanner.style.display = 'block';
-        }
+        errBanner.textContent = j.message || ('Save failed (HTTP ' + (j.status || resp.status) + ')');
+        errBanner.style.display = 'block';
         renderNotesList();
       }
     }
@@ -9191,16 +9711,13 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         const resp = await fetch(apiUrl('/api/v1/icloud/notes/' + encodeURIComponent(delTargetId)), { method: 'DELETE' });
         const j = await resp.json();
         if (!resp.ok || j.status !== 200) return;
-        const delSeq = ++noteSaveAttemptSeq;
-        deletedNoteSeqById[delTargetId] = delSeq;
+        deletedNoteSeqById[delTargetId] = ++noteSaveAttemptSeq;
         allNotes = allNotes.filter(item => item && item.id !== delTargetId);
         mergeServerNotesSnapshot(j.data);
         if (selectedNoteId === delTargetId) {
           selectedNoteId = allNotes.length > 0 ? allNotes[0].id : null;
           if (selectedNoteId) selectNote(selectedNoteId); else newNote();
-        } else {
-          renderNotesList();
-        }
+        } else renderNotesList();
       } finally {
         delete pendingDeleteById[delTargetId];
       }
@@ -9210,33 +9727,22 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const body = document.getElementById('noteBodyInput').value;
       const fullText = (title ? title + '\n' : '') + body;
       if (!fullText) return;
+      switchTab('messages');
       const inp = document.getElementById('msgInput');
       if (inp) { inp.value = fullText; inp.focus(); }
-      closeNotesModal();
     }
 
-    function openCalendarModal() {
-      document.getElementById('calendarModal').style.display = 'flex';
-      loadEvents();
-    }
-    function closeCalendarModal() {
-      document.getElementById('calendarModal').style.display = 'none';
-    }
+    /* Calendar Tab */
     let loadEventsSeq = 0;
     async function loadEvents() {
       const mySeq = ++loadEventsSeq;
       try {
-        let all = [];
-        let off = 0;
-        const lim = 250;
-        let pageCount = 0;
+        let all = [], off = 0, lim = 250, pageCount = 0;
         while (pageCount < 20) {
           pageCount++;
           const resp = await fetch(apiUrl('/api/v1/icloud/events?offset=' + off + '&limit=' + lim));
           const j = await resp.json().catch(() => ({}));
-          if (!resp.ok || (j.status && j.status !== 200)) {
-            throw new Error(j.error || ('HTTP ' + resp.status));
-          }
+          if (!resp.ok || (j.status && j.status !== 200)) throw new Error(j.error || ('HTTP ' + resp.status));
           const batch = j.data || [];
           all = all.concat(batch);
           if (!j.hasMore || batch.length < lim) break;
@@ -9254,52 +9760,45 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       eventsPage = Math.min(Math.max(0, eventsPage), pageCount - 1);
       const startIdx = eventsPage * eventsPageSize;
       const paged = allEvents.slice(startIdx, startIdx + eventsPageSize);
-      const metaEl = document.getElementById('eventsPageMeta');
-      if (metaEl) metaEl.textContent = 'Page ' + (eventsPage + 1) + ' of ' + pageCount + ' (' + allEvents.length + ' events)';
-      const prevBtn = document.getElementById('eventsPrevBtn');
-      if (prevBtn) prevBtn.disabled = (eventsPage <= 0);
-      const nextBtn = document.getElementById('eventsNextBtn');
-      if (nextBtn) nextBtn.disabled = ((eventsPage + 1) >= pageCount);
+      document.getElementById('eventsPageMeta').textContent = 'Page ' + (eventsPage + 1) + ' of ' + pageCount + ' (' + allEvents.length + ' events)';
+      document.getElementById('eventsPrevBtn').disabled = (eventsPage <= 0);
+      document.getElementById('eventsNextBtn').disabled = ((eventsPage + 1) >= pageCount);
       for (const ev of paged) {
         const item = document.createElement('div');
-        item.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:10px 14px;display:flex;justify-content:space-between;align-items:center;';
+        item.className = 'glass-card';
+        item.style.cssText = 'padding:12px 16px;display:flex;justify-content:space-between;align-items:center;gap:12px;';
         const d = ev.startMs ? new Date(ev.startMs).toLocaleString() : 'Anytime';
         const cal = ev.calendarName || ev.calendarTitle || 'Home';
         const infoCol = document.createElement('div');
-        infoCol.style.cssText = 'flex:1;';
+        infoCol.style.flex = '1';
         const topRow = document.createElement('div');
         topRow.style.cssText = 'display:flex;gap:8px;align-items:center;';
-        const titleSpan = document.createElement('span');
-        titleSpan.style.cssText = 'font-weight:600;font-size:13px;color:var(--text);';
+        const titleSpan = document.createElement('strong');
         titleSpan.textContent = ev.title || 'Untitled Event';
         const calSpan = document.createElement('span');
-        calSpan.style.cssText = 'font-size:10px;background:#212832;color:var(--accent2);border:1px solid var(--border);border-radius:4px;padding:2px 6px;';
+        calSpan.className = 'pill pill-blue';
+        calSpan.style.cssText = 'font-size:10.5px;padding:1px 7px;';
         calSpan.textContent = cal;
-        topRow.appendChild(titleSpan);
-        topRow.appendChild(calSpan);
+        topRow.appendChild(titleSpan); topRow.appendChild(calSpan);
         const subRow = document.createElement('div');
-        subRow.style.cssText = 'font-size:11px;color:var(--muted);margin-top:2px;';
-        subRow.textContent = '🕒 ' + d + (ev.location ? ' · 📍 ' + ev.location : '');
-        infoCol.appendChild(topRow);
-        infoCol.appendChild(subRow);
-
+        subRow.style.cssText = 'font-size:12px;color:var(--wc-muted);margin-top:3px;';
+        subRow.textContent = d + (ev.location ? ' · ' + ev.location : '');
+        infoCol.appendChild(topRow); infoCol.appendChild(subRow);
         const btnGroup = document.createElement('div');
         btnGroup.style.cssText = 'display:flex;gap:6px;';
         const shareBtn = document.createElement('button');
-        shareBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;';
-        shareBtn.textContent = '📤 Share';
-        shareBtn.addEventListener('click', () => shareEvent(ev.id));
+        shareBtn.className = 'btn btn-sm';
+        shareBtn.textContent = 'Share';
+        shareBtn.onclick = () => shareEvent(ev.id);
         btnGroup.appendChild(shareBtn);
         if (!ev.syncSource || ev.syncSource === 'local_hub') {
           const delBtn = document.createElement('button');
-          delBtn.style.cssText = 'background:#212832;color:#f85149;border:1px solid var(--border);border-radius:4px;padding:4px 8px;font-size:11px;cursor:pointer;';
-          delBtn.textContent = '🗑';
-          delBtn.addEventListener('click', () => deleteEvent(ev.id));
+          delBtn.className = 'btn btn-danger btn-sm';
+          delBtn.textContent = 'Delete';
+          delBtn.onclick = () => deleteEvent(ev.id);
           btnGroup.appendChild(delBtn);
         }
-
-        item.appendChild(infoCol);
-        item.appendChild(btnGroup);
+        item.appendChild(infoCol); item.appendChild(btnGroup);
         list.appendChild(item);
       }
     }
@@ -9309,18 +9808,17 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const cal = document.getElementById('evtCalendarInput').value.trim() || 'Home';
       const dtVal = document.getElementById('evtDateInput').value;
       const startMs = dtVal ? new Date(dtVal).getTime() : Date.now() + 3600000;
-      const endMs = startMs + 3600000;
       const resp = await fetch(apiUrl('/api/v1/icloud/events'), {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({title, calendarName: cal, startMs, endMs})
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({title, calendarName: cal, startMs, endMs: startMs + 3600000})
       });
       const j = await resp.json().catch(() => ({}));
       if (!resp.ok || (j.status && j.status !== 200)) {
-        alert(j.error || j.message || ('Failed to save event (HTTP ' + resp.status + ')'));
+        showToast(j.error || j.message || ('Failed (HTTP ' + resp.status + ')'), 'error');
         return;
       }
       document.getElementById('evtTitleInput').value = '';
+      showToast('Calendar event created', 'success');
       await loadEvents();
     }
     async function deleteEvent(id) {
@@ -9336,63 +9834,38 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const ev = allEvents.find(e => e.id === id);
       if (!ev) return;
       const d = ev.startMs ? new Date(ev.startMs).toLocaleString() : '';
-      const text = '📅 ' + ev.title + (d ? ' on ' + d : '') + (ev.location ? ' at ' + ev.location : '');
+      switchTab('messages');
       const inp = document.getElementById('msgInput');
-      if (inp) { inp.value = text; inp.focus(); }
-      closeCalendarModal();
+      if (inp) { inp.value = '📅 ' + ev.title + (d ? ' on ' + d : '') + (ev.location ? ' at ' + ev.location : ''); inp.focus(); }
     }
-    function downloadCalendarIcs() {
-      window.open(apiUrl('/api/v1/icloud/calendar.ics'), '_blank');
-    }
-    function changeEventsPage(delta) {
-      eventsPage = Math.max(0, eventsPage + delta);
-      renderEventsList();
-    }
-    function changeEventsPageSize(val) {
-      eventsPageSize = Math.max(5, Number(val) || 25);
-      eventsPage = 0;
-      renderEventsList();
-    }
+    function downloadCalendarIcs() { window.open(apiUrl('/api/v1/icloud/calendar.ics'), '_blank'); }
+    function changeEventsPage(delta) { eventsPage = Math.max(0, eventsPage + delta); renderEventsList(); }
+    function changeEventsPageSize(val) { eventsPageSize = Math.max(5, Number(val) || 25); eventsPage = 0; renderEventsList(); }
 
-    let photosPage = 0;
-    let photosPageSize = 48;
-    let photosTotal = 0;
-    let photosHasMore = false;
-    let photosPollTimer = null;
-    let photosRequestSeq = 0;
-    let photosSioSid = '';
-    let photosSioLoopActive = false;
-    let photosSioGen = 0;
-    let photosSioAbort = null;
+    /* Photos Tab */
+    let photosPage = 0, photosPageSize = 48, photosTotal = 0, photosHasMore = false, photosRequestSeq = 0;
+    let photosSioSid = '', photosSioLoopActive = false, photosSioGen = 0, photosSioAbort = null;
     function updatePhotosPagination(targetPage, hasMoreOverride) {
       const pageCount = Math.max(1, Math.ceil(photosTotal / photosPageSize));
-      photosHasMore = (typeof hasMoreOverride === 'boolean')
-        ? hasMoreOverride
-        : (((targetPage + 1) * photosPageSize) < photosTotal);
-      const metaEl = document.getElementById('photosPageMeta');
-      if (metaEl) metaEl.textContent = 'Page ' + (targetPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
-      const prevBtn = document.getElementById('photosPrevBtn');
-      if (prevBtn) prevBtn.disabled = (targetPage <= 0);
-      const nextBtn = document.getElementById('photosNextBtn');
-      if (nextBtn) nextBtn.disabled = (!photosHasMore && (targetPage + 1) >= pageCount);
+      photosHasMore = (typeof hasMoreOverride === 'boolean') ? hasMoreOverride : (((targetPage + 1) * photosPageSize) < photosTotal);
+      document.getElementById('photosPageMeta').textContent = 'Page ' + (targetPage + 1) + ' of ' + pageCount + ' (' + photosTotal + ' photos)';
+      document.getElementById('photosPrevBtn').disabled = (targetPage <= 0);
+      document.getElementById('photosNextBtn').disabled = (!photosHasMore && (targetPage + 1) >= pageCount);
     }
     function formatPhotoDuration(sec) {
       const s = Math.max(0, Math.round(Number(sec) || 0));
-      const mins = Math.floor(s / 60);
-      const rem = s % 60;
-      return mins + ':' + (rem < 10 ? '0' : '') + rem;
+      return Math.floor(s / 60) + ':' + ((s % 60) < 10 ? '0' : '') + (s % 60);
     }
     function startPhotosSocketIo() {
-      if (photosSioLoopActive) return;
-      if (apiKey && !isTrustedPasswordTransport()) return;
+      if (photosSioLoopActive || (apiKey && !isTrustedPasswordTransport())) return;
       photosSioLoopActive = true;
       const myGen = ++photosSioGen;
       (async () => {
         try {
           while (photosSioLoopActive && myGen === photosSioGen) {
             try {
-              const modal = document.getElementById('photosModal');
-              if (!modal || modal.style.display === 'none') {
+              const tabEl = document.getElementById('tab-photos');
+              if (!tabEl || tabEl.classList.contains('hidden')) {
                 if (myGen === photosSioGen) photosSioLoopActive = false;
                 break;
               }
@@ -9400,60 +9873,29 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
               photosSioAbort = sioCtrl;
               if (!photosSioSid) {
                 const hs = await fetch(apiUrl('/socket.io?EIO=4&transport=polling'), { signal: sioCtrl.signal });
-                if (!photosSioLoopActive || myGen !== photosSioGen) break;
                 const hsTxt = await hs.text();
-                if (!photosSioLoopActive || myGen !== photosSioGen) break;
                 if (hsTxt && hsTxt.startsWith('0')) {
                   const hsObj = JSON.parse(hsTxt.slice(1));
                   if (hsObj && hsObj.sid) photosSioSid = hsObj.sid;
                 }
                 if (photosSioSid) {
-                  await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
-                    method: 'POST',
-                    body: '40',
-                    signal: sioCtrl.signal
-                  });
-                  if (!photosSioLoopActive || myGen !== photosSioGen) break;
+                  await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), { method: 'POST', body: '40', signal: sioCtrl.signal });
                 }
               }
-              if (!photosSioSid) {
-                await new Promise(r => setTimeout(r, 2000));
-                if (!photosSioLoopActive || myGen !== photosSioGen) break;
-                continue;
-              }
-              const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
-                signal: sioCtrl.signal
-              });
-              if (!photosSioLoopActive || myGen !== photosSioGen) break;
-              if (!pr.ok) {
-                photosSioSid = '';
-                await new Promise(r => setTimeout(r, 1500));
-                if (!photosSioLoopActive || myGen !== photosSioGen) break;
-                continue;
-              }
+              if (!photosSioSid) { await new Promise(r => setTimeout(r, 2000)); continue; }
+              const pr = await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), { signal: sioCtrl.signal });
+              if (!pr.ok) { photosSioSid = ''; await new Promise(r => setTimeout(r, 1500)); continue; }
               const raw = await pr.text();
-              if (!photosSioLoopActive || myGen !== photosSioGen) break;
               if (raw) {
                 for (const pkt of raw.split(String.fromCharCode(0x1e))) {
-                  if (!pkt) continue;
-                  if (pkt === '2') {
-                    await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), {
-                      method: 'POST',
-                      body: '3',
-                      signal: sioCtrl.signal
-                    });
-                    if (!photosSioLoopActive || myGen !== photosSioGen) break;
-                  } else if (pkt.startsWith('42')) {
+                  if (pkt === '2') await fetch(apiUrl('/socket.io?EIO=4&transport=polling&sid=' + encodeURIComponent(photosSioSid)), { method: 'POST', body: '3', signal: sioCtrl.signal });
+                  else if (pkt.startsWith('42')) {
                     try {
                       const arr = JSON.parse(pkt.slice(2));
                       if (Array.isArray(arr) && arr[0] === 'icloud-photos-updated') {
-                        const evPayload = (arr.length > 1 && arr[1]) ? arr[1] : {};
-                        if (photosPage === 0) {
-                          loadPhotos(0);
-                        } else if (typeof evPayload.total === 'number') {
-                          photosTotal = Number(evPayload.total);
-                          updatePhotosPagination(photosPage);
-                        }
+                        const evPayload = arr[1] || {};
+                        if (photosPage === 0) loadPhotos(0);
+                        else if (typeof evPayload.total === 'number') { photosTotal = Number(evPayload.total); updatePhotosPagination(photosPage); }
                       }
                     } catch (_) {}
                   }
@@ -9472,38 +9914,10 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       })();
     }
     function stopPhotosSocketIo() {
-      photosSioLoopActive = false;
-      photosSioGen += 1;
-      photosSioSid = '';
-      if (photosSioAbort) {
-        try { photosSioAbort.abort(); } catch (_) {}
-        photosSioAbort = null;
-      }
+      photosSioLoopActive = false; photosSioGen += 1; photosSioSid = '';
+      if (photosSioAbort) { try { photosSioAbort.abort(); } catch (_) {} photosSioAbort = null; }
     }
-    function openPhotosModal() {
-      document.getElementById('photosModal').style.display = 'flex';
-      loadPhotos(0);
-      startPhotosSocketIo();
-      if (photosPollTimer) clearInterval(photosPollTimer);
-      photosPollTimer = setInterval(() => {
-        const modal = document.getElementById('photosModal');
-        if (modal && modal.style.display !== 'none' && photosPage === 0) {
-          loadPhotos(0);
-        }
-      }, 15000);
-    }
-    function closePhotosModal() {
-      document.getElementById('photosModal').style.display = 'none';
-      stopPhotosSocketIo();
-      if (photosPollTimer) {
-        clearInterval(photosPollTimer);
-        photosPollTimer = null;
-      }
-    }
-    function changePhotosPageSize(val) {
-      photosPageSize = Math.max(12, Math.min(240, Number(val) || 48));
-      loadPhotos(0);
-    }
+    function changePhotosPageSize(val) { photosPageSize = Math.max(12, Math.min(240, Number(val) || 48)); loadPhotos(0); }
     function changePhotosPage(delta) {
       const next = Math.max(0, photosPage + delta);
       if (next === photosPage) return;
@@ -9525,80 +9939,60 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         updatePhotosPagination(targetPage, Boolean(j.hasMore));
         const grid = document.getElementById('photosGrid');
         grid.innerHTML = '';
-        grid.scrollTop = 0;
         for (const p of photos) {
           const card = document.createElement('div');
-          card.style.cssText = 'background:var(--bg);border:1px solid var(--border);border-radius:8px;padding:8px;display:flex;flex-direction:column;gap:6px;';
+          card.className = 'glass-card';
+          card.style.cssText = 'padding:10px;display:flex;flex-direction:column;gap:8px;';
           const liveUrl = apiUrl('/api/v1/attachment/' + encodeURIComponent(p.guid) + '/live');
           const isEvicted = Boolean(p.isCloudEvicted);
           const isVideo = Boolean(p.isVideo) || String(p.mediaType || '') === 'video';
           const hasPreview = isVideo ? Boolean(p.hasPreview && p.previewUrl) : !isEvicted;
           const thumbUrl = p.previewUrl ? apiUrl(p.previewUrl) : liveUrl;
-          const isPortrait = Boolean(p.isPortrait);
           const previewBox = document.createElement('div');
-          previewBox.style.cssText = 'width:100%;height:' + (isPortrait ? '210px' : '140px') + ';border-radius:6px;background:#151b23;display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;cursor:pointer;';
+          previewBox.style.cssText = 'width:100%;height:170px;border-radius:10px;background:rgba(0,0,0,0.28);display:flex;align-items:center;justify-content:center;overflow:hidden;position:relative;cursor:pointer;';
           previewBox.addEventListener('click', () => {
-            if (!isEvicted) window.open(liveUrl, '_blank');
+            if (!isEvicted) {
+              if (isVideo) window.open(liveUrl, '_blank');
+              else openLightbox(p.name || p.guid, liveUrl);
+            }
           });
           const fallbackIcon = document.createElement('div');
-          fallbackIcon.style.cssText = 'color:var(--muted);font-size:24px;' + (!hasPreview ? 'display:block;' : 'display:none;');
+          fallbackIcon.style.cssText = 'color:var(--wc-muted);font-size:26px;' + (!hasPreview ? 'display:block;' : 'display:none;');
           fallbackIcon.textContent = isVideo ? '🎬' : '🖼';
           if (hasPreview) {
             const imgEl = document.createElement('img');
             imgEl.src = thumbUrl;
-            imgEl.style.cssText = 'max-width:100%;max-height:100%;object-fit:cover;';
-            imgEl.addEventListener('error', () => {
-              imgEl.style.display = 'none';
-              fallbackIcon.style.display = 'block';
-            });
+            imgEl.style.cssText = 'width:100%;height:100%;object-fit:cover;';
+            imgEl.addEventListener('error', () => { imgEl.style.display = 'none'; fallbackIcon.style.display = 'block'; });
             previewBox.appendChild(imgEl);
           }
           previewBox.appendChild(fallbackIcon);
           if (isVideo) {
             const vidTag = document.createElement('div');
-            vidTag.style.cssText = 'position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,0.78);color:#fff;font-size:10px;font-weight:600;padding:2px 6px;border-radius:4px;';
-            vidTag.textContent = '🎬 ' + (Number(p.duration || 0) > 0 ? formatPhotoDuration(p.duration) : 'Video');
+            vidTag.style.cssText = 'position:absolute;bottom:6px;left:6px;background:rgba(0,0,0,0.78);color:#fff;font-size:10px;font-weight:600;padding:2px 6px;border-radius:5px;';
+            vidTag.textContent = (Number(p.duration || 0) > 0 ? formatPhotoDuration(p.duration) : 'Video');
             previewBox.appendChild(vidTag);
           }
-
           const nameEl = document.createElement('div');
-          nameEl.style.cssText = 'font-size:11px;font-weight:600;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+          nameEl.style.cssText = 'font-size:12px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
           nameEl.textContent = p.name || p.guid;
-
           const footerRow = document.createElement('div');
-          footerRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;';
-          const badgesWrapper = document.createElement('div');
-          badgesWrapper.style.cssText = 'display:flex;align-items:center;gap:4px;';
+          footerRow.style.cssText = 'display:flex;justify-content:space-between;align-items:center;gap:6px;';
           const badgeEl = document.createElement('span');
-          badgeEl.style.cssText = 'font-size:10px;padding:1px 6px;border-radius:4px;' + (isEvicted ? 'background:#3d2c12;color:#d29922;' : 'background:#1c3322;color:#3fb950;');
-          badgeEl.textContent = isEvicted ? '☁️ iCloud' : (isVideo ? '▶ Local' : '✓ Local');
-          const orientBadge = document.createElement('span');
-          orientBadge.style.cssText = 'font-size:9px;padding:1px 5px;border-radius:4px;background:#161b22;color:var(--muted);border:1px solid var(--border);';
-          orientBadge.textContent = isPortrait ? '▯ Portrait' : '▭ Landscape';
-          badgesWrapper.appendChild(badgeEl);
-          badgesWrapper.appendChild(orientBadge);
+          badgeEl.className = 'pill ' + (isEvicted ? '' : 'pill-green');
+          badgeEl.style.cssText = 'font-size:10px;padding:2px 7px;';
+          badgeEl.textContent = isEvicted ? 'iCloud' : (isVideo ? 'Video' : 'Local');
           const liveBtn = document.createElement('button');
+          liveBtn.className = 'btn btn-sm';
           const canUnpurge = p.canUnpurge !== false;
-          liveBtn.style.cssText = 'background:#212832;color:var(--text);border:1px solid var(--border);border-radius:4px;padding:2px 6px;font-size:10px;' + ((isEvicted && !canUnpurge) ? 'opacity:0.5;cursor:not-allowed;' : 'cursor:pointer;');
           if (isEvicted && !canUnpurge) {
-            liveBtn.textContent = isVideo ? '🎬 iCloud Only' : '☁️ iCloud Only';
-            liveBtn.disabled = true;
+            liveBtn.textContent = 'iCloud Only'; liveBtn.disabled = true;
           } else {
-            liveBtn.textContent = isEvicted ? '☁️ Unpurge' : (isVideo ? '▶ Play' : '⬇ Live');
-            liveBtn.addEventListener('click', () => {
-              if (isVideo && !isEvicted) {
-                window.open(liveUrl, '_blank');
-              } else {
-                downloadAttachmentLive(p.guid);
-              }
-            });
+            liveBtn.textContent = isEvicted ? 'Unpurge' : (isVideo ? 'Play' : 'Open');
+            liveBtn.onclick = () => isVideo && !isEvicted ? window.open(liveUrl, '_blank') : downloadAttachmentLive(p.guid);
           }
-          footerRow.appendChild(badgesWrapper);
-          footerRow.appendChild(liveBtn);
-
-          card.appendChild(previewBox);
-          card.appendChild(nameEl);
-          card.appendChild(footerRow);
+          footerRow.appendChild(badgeEl); footerRow.appendChild(liveBtn);
+          card.appendChild(previewBox); card.appendChild(nameEl); card.appendChild(footerRow);
           grid.appendChild(card);
         }
       } catch (err) { console.error('Error loading photos:', err); }
@@ -9607,93 +10001,549 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const btn = document.getElementById('syncPhotosBtn');
       const statusBanner = document.getElementById('photosSyncStatusBanner');
       if (statusBanner) { statusBanner.style.display = 'none'; statusBanner.textContent = ''; }
-      if (btn) { btn.disabled = true; btn.textContent = '⏳ Syncing...'; }
+      if (btn) { btn.disabled = true; btn.textContent = 'Syncing...'; }
       try {
         const resp = await fetch(apiUrl('/api/v1/icloud/photos/sync'), {
-          method: 'POST',
-          headers: {'Content-Type': 'application/json'},
-          body: JSON.stringify({limit: 250, syncAll: true})
+          method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({limit: 250, syncAll: true})
         });
-        let j = null;
-        try { j = await resp.json(); } catch (_) { j = null; }
-        if (!resp.ok || !j || (j.status !== 200 && j.status !== 202)) {
-          throw new Error((j && j.message) || ('Photo sync request failed (HTTP ' + resp.status + ')'));
-        }
-        let job = (j && j.data) ? j.data : {};
+        const j = await resp.json().catch(() => null);
+        if (!resp.ok || !j || (j.status !== 200 && j.status !== 202)) throw new Error((j && j.message) || ('HTTP ' + resp.status));
+        let job = j.data || {};
         while (job && job.state === 'running' && job.jobId) {
           await new Promise(r => setTimeout(r, 400));
           const pollResp = await fetch(apiUrl('/api/v1/icloud/photos/sync?jobId=' + encodeURIComponent(job.jobId)));
-          let pollJson = null;
-          try { pollJson = await pollResp.json(); } catch (_) { pollJson = null; }
-          if (!pollResp.ok || !pollJson || pollJson.status !== 200) {
-            throw new Error((pollJson && pollJson.message) || ('Photo sync status poll failed (HTTP ' + pollResp.status + ')'));
-          }
+          const pollJson = await pollResp.json().catch(() => null);
+          if (!pollResp.ok || !pollJson || pollJson.status !== 200) throw new Error((pollJson && pollJson.message) || ('HTTP ' + pollResp.status));
           job = pollJson.data || {};
-          if (btn && typeof job.processed === 'number') {
-            btn.textContent = '⏳ Syncing (' + job.processed + ')...';
-          }
+          if (btn && typeof job.processed === 'number') btn.textContent = 'Syncing (' + job.processed + ')...';
         }
         await loadPhotos();
-        const failedCount = Number((job && job.failed) || 0);
-        const syncedCount = Number((job && job.synced) || 0);
-        if (job && (job.state === 'failed' || job.status === 'error' || job.status === 'partial' || failedCount > 0)) {
-          const detailMsg = job.error || (Array.isArray(job.errors) && job.errors[0] && job.errors[0].error) || (failedCount + ' photo(s) failed to sync');
-          if (statusBanner) {
-            statusBanner.style.background = syncedCount > 0 ? '#3d2c12' : '#3d1518';
-            statusBanner.style.color = syncedCount > 0 ? '#d29922' : '#f85149';
-            statusBanner.textContent = (syncedCount > 0
-              ? ('⚠ Partial sync (' + syncedCount + ' synced, ' + failedCount + ' failed): ')
-              : '⚠ Photo sync failed: ') + detailMsg;
-            statusBanner.style.display = 'block';
-          }
-        }
       } catch (e) {
-        console.error('Photo sync error:', e);
-        if (statusBanner) {
-          statusBanner.style.background = '#3d1518';
-          statusBanner.style.color = '#f85149';
-          statusBanner.textContent = '⚠ ' + ((e && e.message) ? e.message : String(e));
-          statusBanner.style.display = 'block';
-        }
+        if (statusBanner) { statusBanner.textContent = 'Photo sync error: ' + e.message; statusBanner.style.display = 'block'; }
       } finally {
-        if (btn) { btn.disabled = false; btn.textContent = '⬇ Sync All Photos'; }
+        if (btn) { btn.disabled = false; btn.textContent = 'Sync All Photos'; }
       }
     }
-
     async function downloadAttachmentLive(guid) {
-      const statusBanner = document.getElementById('photosSyncStatusBanner');
-      if (statusBanner) { statusBanner.style.display = 'none'; statusBanner.textContent = ''; }
       try {
         const resp = await fetch(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/download'), { method: 'POST' });
-        let j = null;
-        try { j = await resp.json(); } catch (_) { j = null; }
+        const j = await resp.json().catch(() => null);
         const d = (j && j.data) ? j.data : {};
         if (!resp.ok || d.downloaded !== true) {
-          const msg = (d && (d.error || d.message)) || (j && j.message) || ('Attachment download failed (HTTP ' + resp.status + ')');
-          if (statusBanner) {
-            statusBanner.style.background = '#3d1518';
-            statusBanner.style.color = '#f85149';
-            statusBanner.textContent = '⚠ ' + msg;
-            statusBanner.style.display = 'block';
-          }
+          showToast((d && (d.error || d.message)) || 'Download failed', 'error');
           return;
         }
-        window.open(apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'), '_blank');
+        openLightbox(guid, apiUrl('/api/v1/attachment/' + encodeURIComponent(guid) + '/live'));
         await loadPhotos(photosPage);
-      } catch (e) {
-        if (statusBanner) {
-          statusBanner.style.background = '#3d1518';
-          statusBanner.style.color = '#f85149';
-          statusBanner.textContent = '⚠ ' + ((e && e.message) ? e.message : String(e));
-          statusBanner.style.display = 'block';
-        }
-      }
+      } catch (e) { showToast(e.message, 'error'); }
     }
-  </script>
-
+</script>
 </body>
 </html>
 """
+
+WS_GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
+WS_OPCODE_CONT = 0x0
+WS_OPCODE_TEXT = 0x1
+WS_OPCODE_BINARY = 0x2
+WS_OPCODE_CLOSE = 0x8
+WS_OPCODE_PING = 0x9
+WS_OPCODE_PONG = 0xA
+
+
+def _mask_secret_token(tok: str) -> str:
+    s = str(tok or "").strip()
+    if not s:
+        return ""
+    if len(s) <= 12:
+        return "***"
+    return f"{s[:6]}...{s[-4:]}"
+
+
+def get_relay_config_path() -> str:
+    override = os.environ.get("BLUEPILL_RELAY_CONFIG", "").strip()
+    return os.path.expanduser(override or "~/.config/bluepill/relay.json")
+
+
+def load_relay_config(path: Optional[str] = None) -> Dict[str, Any]:
+    cfg_path = os.path.expanduser(path or get_relay_config_path())
+    default_cfg: Dict[str, Any] = {
+        "enabled": False,
+        "url": DEFAULT_CLOUD_RELAY_URL,
+        "token": "",
+    }
+    if not os.path.exists(cfg_path):
+        return default_cfg
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        if isinstance(loaded, dict):
+            return {
+                "enabled": bool(loaded.get("enabled", False)),
+                "url": str(loaded.get("url") or DEFAULT_CLOUD_RELAY_URL).strip(),
+                "token": str(loaded.get("token") or "").strip(),
+            }
+    except Exception:
+        pass
+    return default_cfg
+
+
+def save_relay_config(cfg: Dict[str, Any], path: Optional[str] = None) -> str:
+    cfg_path = os.path.expanduser(path or get_relay_config_path())
+    cfg_dir = os.path.dirname(cfg_path)
+    if cfg_dir:
+        os.makedirs(cfg_dir, exist_ok=True)
+        try:
+            os.chmod(cfg_dir, 0o700)
+        except OSError:
+            pass
+    payload = {
+        "enabled": bool(cfg.get("enabled", False)),
+        "url": str(cfg.get("url") or DEFAULT_CLOUD_RELAY_URL).strip(),
+        "token": str(cfg.get("token") or "").strip(),
+    }
+    tmp_path = f"{cfg_path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(payload, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, cfg_path)
+    return cfg_path
+
+
+def save_server_password(password: str, path: Optional[str] = None) -> str:
+    cfg_path = os.path.expanduser(path or "~/.config/bluepill/server.json")
+    cfg_dir = os.path.dirname(cfg_path)
+    if cfg_dir:
+        os.makedirs(cfg_dir, exist_ok=True)
+        try:
+            os.chmod(cfg_dir, 0o700)
+        except OSError:
+            pass
+    existing: Dict[str, Any] = {}
+    if os.path.exists(cfg_path):
+        try:
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+            if isinstance(loaded, dict):
+                existing = loaded
+        except Exception:
+            existing = {}
+    existing["password"] = str(password)
+    tmp_path = f"{cfg_path}.tmp.{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(existing, f, indent=2)
+        f.write("\n")
+    os.chmod(tmp_path, 0o600)
+    os.replace(tmp_path, cfg_path)
+    return cfg_path
+
+
+def encode_ws_frame(payload: bytes, opcode: int = WS_OPCODE_TEXT, mask: bool = True) -> bytes:
+    """Encode a single RFC 6455 WebSocket frame (masked when client->server)."""
+    first_byte = 0x80 | (opcode & 0x0F)
+    length = len(payload)
+    mask_bit = 0x80 if mask else 0x00
+
+    header = bytearray([first_byte])
+    if length < 126:
+        header.append(mask_bit | length)
+    elif length < 65536:
+        header.append(mask_bit | 126)
+        header.extend(struct.pack("!H", length))
+    else:
+        header.append(mask_bit | 127)
+        header.extend(struct.pack("!Q", length))
+
+    if mask:
+        mask_key = os.urandom(4)
+        header.extend(mask_key)
+        masked = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+        return bytes(header) + masked
+    return bytes(header) + payload
+
+
+def _ws_recv_exact(sock: socket.socket, n: int) -> bytes:
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError("WebSocket connection closed by peer")
+        buf.extend(chunk)
+    return bytes(buf)
+
+
+def decode_ws_frame(sock: socket.socket) -> Tuple[bool, int, bytes]:
+    """Read and decode one RFC 6455 WebSocket frame from a connected socket."""
+    b1, b2 = _ws_recv_exact(sock, 2)
+    fin = bool(b1 & 0x80)
+    opcode = b1 & 0x0F
+    masked = bool(b2 & 0x80)
+    length = b2 & 0x7F
+    if length == 126:
+        (length,) = struct.unpack("!H", _ws_recv_exact(sock, 2))
+    elif length == 127:
+        (length,) = struct.unpack("!Q", _ws_recv_exact(sock, 8))
+    mask_key = _ws_recv_exact(sock, 4) if masked else b""
+    payload = _ws_recv_exact(sock, length) if length else b""
+    if masked:
+        payload = bytes(b ^ mask_key[i % 4] for i, b in enumerate(payload))
+    return fin, opcode, payload
+
+
+def compute_ws_accept_key(sec_ws_key: str) -> str:
+    """Compute RFC 6455 Sec-WebSocket-Accept header value."""
+    digest = hashlib.sha1((sec_ws_key + WS_GUID).encode("ascii")).digest()
+    return base64.b64encode(digest).decode("ascii")
+
+
+class BluePillTunnelClient:
+    """Threaded pure-stdlib RFC 6455 TLS WebSocket reverse tunnel client."""
+
+    def __init__(
+        self,
+        *,
+        url: str,
+        token: str,
+        local_url: str = "http://127.0.0.1:1235",
+        local_password: str = "",
+        heartbeat_interval: float = 15.0,
+        insecure_tls: bool = False,
+        insecure_local_tls: bool = True,
+        logger: Optional[logging.Logger] = None,
+        engine: Optional["BluePillEngine"] = None,
+    ) -> None:
+        self.url = url.strip() or DEFAULT_CLOUD_RELAY_URL
+        self.token = token.strip()
+        self.local_url = local_url.strip().rstrip("/")
+        self.local_password = local_password
+        self.heartbeat_interval = heartbeat_interval
+        self.insecure_tls = insecure_tls
+        self.insecure_local_tls = insecure_local_tls
+        self.logger = logger or logging.getLogger("bluepill-relay")
+        self.engine = engine
+        self._stop_event = threading.Event()
+        self._send_lock = threading.Lock()
+        self._sock: Optional[socket.socket] = None
+        self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bp-relay-http")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        sock = self._sock
+        if sock is not None:
+            try:
+                with self._send_lock:
+                    sock.sendall(encode_ws_frame(b"", opcode=WS_OPCODE_CLOSE))
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+        try:
+            self._executor.shutdown(wait=False)
+        except Exception:
+            pass
+
+    def _connect_ws(self, timeout_s: float = 15.0) -> socket.socket:
+        raw_url = self.url
+        if raw_url.startswith("https://"):
+            raw_url = "wss://" + raw_url[len("https://"):]
+        elif raw_url.startswith("http://"):
+            raw_url = "ws://" + raw_url[len("http://"):]
+        parsed = urllib.parse.urlparse(raw_url)
+        if parsed.scheme not in {"wss", "ws"}:
+            raise ValueError(f"Unsupported tunnel URL scheme: {parsed.scheme}")
+        host = parsed.hostname or ""
+        port = parsed.port or (443 if parsed.scheme == "wss" else 80)
+        path = parsed.path if parsed.path and parsed.path != "/" else "/tunnel/connect"
+        query_dict = urllib.parse.parse_qs(parsed.query)
+        query_dict["token"] = [self.token]
+        query = urllib.parse.urlencode(query_dict, doseq=True)
+        request_target = f"{path}?{query}"
+
+        raw_sock = socket.create_connection((host, port), timeout=timeout_s)
+        if parsed.scheme == "wss":
+            ctx = ssl.create_default_context()
+            if self.insecure_tls:
+                ctx.check_hostname = False
+                ctx.verify_mode = ssl.CERT_NONE
+            sock: socket.socket = ctx.wrap_socket(raw_sock, server_hostname=host)
+        else:
+            sock = raw_sock
+
+        sec_key = base64.b64encode(os.urandom(16)).decode("ascii")
+        host_header = f"{host}:{port}" if parsed.port else host
+        req = (
+            f"GET {request_target} HTTP/1.1\r\n"
+            f"Host: {host_header}\r\n"
+            f"Upgrade: websocket\r\n"
+            f"Connection: Upgrade\r\n"
+            f"Sec-WebSocket-Key: {sec_key}\r\n"
+            f"Sec-WebSocket-Version: 13\r\n"
+            f"User-Agent: bluepill-server/{VERSION}\r\n"
+            f"\r\n"
+        ).encode("ascii")
+        sock.sendall(req)
+
+        resp_buf = bytearray()
+        while b"\r\n\r\n" not in resp_buf:
+            chunk = sock.recv(4096)
+            if not chunk:
+                sock.close()
+                raise ConnectionError("EOF during WebSocket handshake")
+            resp_buf.extend(chunk)
+            if len(resp_buf) > 32768:
+                sock.close()
+                raise ConnectionError("Oversized WebSocket handshake response")
+
+        header_block = resp_buf.split(b"\r\n\r\n", 1)[0].decode("iso-8859-1")
+        lines = header_block.split("\r\n")
+        status_line = lines[0] if lines else ""
+        if " 101 " not in status_line:
+            sock.close()
+            raise ConnectionError(f"WebSocket upgrade rejected: {status_line}")
+
+        headers: Dict[str, str] = {}
+        for line in lines[1:]:
+            if ":" in line:
+                k, v = line.split(":", 1)
+                headers[k.strip().lower()] = v.strip()
+        if headers.get("sec-websocket-accept") != compute_ws_accept_key(sec_key):
+            sock.close()
+            raise ConnectionError("Invalid Sec-WebSocket-Accept from server")
+
+        sock.settimeout(None)
+        return sock
+
+    def _send_json(self, sock: socket.socket, data: Dict[str, Any]) -> None:
+        raw = json.dumps(data).encode("utf-8")
+        frame = encode_ws_frame(raw, opcode=WS_OPCODE_TEXT, mask=True)
+        with self._send_lock:
+            sock.sendall(frame)
+
+    def _local_ssl_context(self) -> Optional[ssl.SSLContext]:
+        if not self.local_url.startswith("https://"):
+            return None
+        if self.insecure_local_tls:
+            ctx = ssl._create_unverified_context()
+            return ctx
+        return ssl.create_default_context()
+
+    def _probe_local(self) -> Tuple[bool, Optional[str], Optional[float]]:
+        t0 = time.perf_counter()
+        ok = False
+        local_headers: Dict[str, str] = {}
+        if self.local_password:
+            local_headers["X-BlueBubbles-Auth"] = self.local_password
+        ctx = self._local_ssl_context()
+        try:
+            req = urllib.request.Request(f"{self.local_url}/api/v1/ping", headers=local_headers, method="GET")
+            with urllib.request.urlopen(req, timeout=4.0, context=ctx) as resp:
+                ok = 200 <= resp.status < 500
+        except urllib.error.HTTPError as err:
+            ok = 200 <= err.code < 500
+        except Exception:
+            if self.engine is not None:
+                return True, VERSION, round((time.perf_counter() - t0) * 1000.0, 2)
+            return False, None, None
+        latency_ms = round((time.perf_counter() - t0) * 1000.0, 2)
+        server_version: Optional[str] = VERSION if self.engine is not None else None
+        try:
+            info_req = urllib.request.Request(
+                f"{self.local_url}/api/v1/server/info",
+                headers=local_headers,
+                method="GET",
+            )
+            with urllib.request.urlopen(info_req, timeout=4.0, context=ctx) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                server_version = (data.get("data") or {}).get("server_version") or server_version
+        except Exception:
+            pass
+        return ok, server_version, latency_ms
+
+    def test_connection(self, timeout_s: float = 10.0) -> Tuple[bool, str]:
+        """Connect, authenticate via heartbeat handshake, and close cleanly."""
+        sock = self._connect_ws(timeout_s=timeout_s)
+        try:
+            sock.settimeout(timeout_s)
+            local_ok, server_version, latency_ms = self._probe_local()
+            self._send_json(
+                sock,
+                {
+                    "type": "heartbeat",
+                    "local_ok": local_ok,
+                    "server_version": server_version or VERSION,
+                    "latency_ms": latency_ms,
+                },
+            )
+            deadline = time.monotonic() + timeout_s
+            while time.monotonic() < deadline:
+                _fin, opcode, payload = decode_ws_frame(sock)
+                if opcode == WS_OPCODE_PING:
+                    with self._send_lock:
+                        sock.sendall(encode_ws_frame(payload, opcode=WS_OPCODE_PONG, mask=True))
+                    continue
+                if opcode == WS_OPCODE_CLOSE:
+                    code = struct.unpack("!H", payload[:2])[0] if len(payload) >= 2 else 1000
+                    reason = payload[2:].decode("utf-8", errors="replace") if len(payload) > 2 else "Closed"
+                    return False, f"Relay closed connection (code={code}: {reason})"
+                if opcode == WS_OPCODE_TEXT:
+                    try:
+                        msg = json.loads(payload.decode("utf-8"))
+                    except Exception:
+                        msg = {}
+                    if isinstance(msg, dict) and msg.get("type") == "heartbeat_ack":
+                        return True, f"Connected and authenticated ({self.url})"
+                    return True, f"Connected ({self.url})"
+            return False, "Timed out waiting for Cloud Relay heartbeat_ack"
+        finally:
+            try:
+                sock.sendall(encode_ws_frame(b"", opcode=WS_OPCODE_CLOSE, mask=True))
+            except OSError:
+                pass
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def _handle_http_req(self, sock: socket.socket, frame_msg: Dict[str, Any]) -> None:
+        req_id = frame_msg.get("id", "")
+        method = str(frame_msg.get("method", "GET")).upper()
+        path = str(frame_msg.get("path", "/"))
+        headers = frame_msg.get("headers") or {}
+        body_b64 = frame_msg.get("body_b64") or ""
+        body = base64.b64decode(body_b64.encode("ascii")) if body_b64 else None
+
+        target_url = f"{self.local_url}{path}"
+        fwd_headers = {
+            str(k): str(v)
+            for k, v in headers.items()
+            if str(k).lower() not in {"host", "content-length", "connection"}
+        }
+        req = urllib.request.Request(target_url, data=body, headers=fwd_headers, method=method)
+        ctx = self._local_ssl_context()
+        try:
+            with urllib.request.urlopen(req, timeout=20.0, context=ctx) as resp:
+                resp_status = resp.status
+                resp_headers = dict(resp.headers.items())
+                resp_body = resp.read()
+        except urllib.error.HTTPError as err:
+            resp_status = err.code
+            resp_headers = dict(err.headers.items()) if err.headers else {}
+            resp_body = err.read() if err.fp else b""
+        except Exception as exc:
+            resp_status = 502
+            resp_headers = {"Content-Type": "application/json"}
+            resp_body = json.dumps(
+                {
+                    "status": 502,
+                    "error": "local_bluepill_unreachable",
+                    "message": f"Local bluepill-server at {self.local_url} unreachable: {exc}",
+                }
+            ).encode("utf-8")
+
+        res_msg = {
+            "type": "http_res",
+            "id": req_id,
+            "status": resp_status,
+            "headers": resp_headers,
+            "body_b64": base64.b64encode(resp_body).decode("ascii") if resp_body else "",
+        }
+        try:
+            self._send_json(sock, res_msg)
+        except OSError as exc:
+            self.logger.debug("[relay] Failed to send http_res %s: %s", req_id, exc)
+
+    def _heartbeat_loop(self, sock: socket.socket, conn_closed: threading.Event) -> None:
+        while not self._stop_event.is_set() and not conn_closed.is_set():
+            local_ok, server_version, latency_ms = self._probe_local()
+            hb = {
+                "type": "heartbeat",
+                "local_ok": local_ok,
+                "server_version": server_version or VERSION,
+                "latency_ms": latency_ms,
+            }
+            try:
+                self._send_json(sock, hb)
+            except OSError:
+                break
+            conn_closed.wait(self.heartbeat_interval)
+
+    def run_once(self) -> None:
+        sock = self._connect_ws()
+        self._sock = sock
+        self.logger.info("[relay] Connected to %s -> forwarding to %s", self.url, self.local_url)
+        conn_closed = threading.Event()
+        hb_thread = threading.Thread(target=self._heartbeat_loop, args=(sock, conn_closed), daemon=True)
+        hb_thread.start()
+
+        fragments: List[bytes] = []
+        try:
+            while not self._stop_event.is_set():
+                fin, opcode, payload = decode_ws_frame(sock)
+                if opcode == WS_OPCODE_PING:
+                    with self._send_lock:
+                        sock.sendall(encode_ws_frame(payload, opcode=WS_OPCODE_PONG, mask=True))
+                    continue
+                if opcode == WS_OPCODE_CLOSE:
+                    self.logger.info("[relay] Server requested WebSocket close")
+                    break
+                if opcode in {WS_OPCODE_TEXT, WS_OPCODE_BINARY, WS_OPCODE_CONT}:
+                    fragments.append(payload)
+                    if not fin:
+                        continue
+                    full_payload = b"".join(fragments)
+                    fragments.clear()
+                    try:
+                        msg = json.loads(full_payload.decode("utf-8"))
+                    except (ValueError, UnicodeDecodeError):
+                        continue
+                    if isinstance(msg, dict) and msg.get("type") == "http_req":
+                        self._executor.submit(self._handle_http_req, sock, msg)
+        finally:
+            conn_closed.set()
+            self._sock = None
+            try:
+                sock.close()
+            except OSError:
+                pass
+
+    def run_forever(self) -> None:
+        backoff = 1.0
+        while not self._stop_event.is_set():
+            try:
+                self.run_once()
+                backoff = 1.0
+            except Exception as exc:
+                if self._stop_event.is_set():
+                    break
+                self.logger.warning("[relay] Tunnel disconnected (%s); reconnecting in %.1fs...", exc, backoff)
+                self._stop_event.wait(backoff)
+                backoff = min(backoff * 2.0, 30.0)
+
+
+def resolve_relay_runtime(args: argparse.Namespace) -> Tuple[bool, str, str, str]:
+    """Return (enabled, url, token, source) for Cloud Relay tunnel in serve mode."""
+    if getattr(args, "no_relay", False):
+        return False, "", "", "disabled_flag"
+    cfg = load_relay_config()
+    cli_token = str(getattr(args, "relay_token", "") or "").strip()
+    env_token = str(
+        os.environ.get("BLUEPILL_RELAY_TOKEN") or os.environ.get("BLUEPILL_TUNNEL_TOKEN") or ""
+    ).strip()
+    cli_url = str(getattr(args, "relay_url", "") or "").strip()
+    env_url = str(
+        os.environ.get("BLUEPILL_RELAY_URL") or os.environ.get("BLUEPILL_TUNNEL_URL") or ""
+    ).strip()
+    url = cli_url or env_url or str(cfg.get("url") or DEFAULT_CLOUD_RELAY_URL)
+    if cli_token:
+        return True, url, cli_token, "cli"
+    if env_token:
+        return True, url, env_token, "env"
+    if cfg.get("enabled") and cfg.get("token"):
+        return True, url, str(cfg["token"]), "config"
+    return False, url, "", "unconfigured"
 
 
 class FastThreadingHTTPServer(ThreadingHTTPServer):
@@ -13834,6 +14684,92 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
         srv.server_close()
         shutil.rmtree(test_eng._config_dir, ignore_errors=True)
 
+    # Built-in Cloud Relay config & RFC 6455 WebSocket forwarder self-test
+    relay_tmp_dir = tempfile.mkdtemp(prefix="bp_relay_selftest_")
+    try:
+        relay_cfg_file = os.path.join(relay_tmp_dir, "relay.json")
+        save_relay_config(
+            {"enabled": True, "url": DEFAULT_CLOUD_RELAY_URL, "token": "bp_selftest_tok_123456"},
+            path=relay_cfg_file,
+        )
+        assert (os.stat(relay_cfg_file).st_mode & 0o777) == 0o600, "relay.json must be 0600"
+        loaded_relay = load_relay_config(path=relay_cfg_file)
+        assert loaded_relay["enabled"] is True and loaded_relay["token"] == "bp_selftest_tok_123456"
+
+        # Spin up a tiny loopback HTTP target + tiny RFC 6455 WS server to verify end-to-end tunnel forwarding
+        relay_http_srv = FastThreadingHTTPServer(("127.0.0.1", 0), BluePillHTTPHandler)
+        BluePillHTTPHandler.engine = engine
+        relay_http_port = relay_http_srv.server_address[1]
+        threading.Thread(target=relay_http_srv.serve_forever, daemon=True).start()
+
+        ws_srv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        ws_srv_sock.bind(("127.0.0.1", 0))
+        ws_srv_sock.listen(1)
+        ws_port = ws_srv_sock.getsockname()[1]
+        ws_results: Dict[str, Any] = {}
+
+        def _mock_ws_server() -> None:
+            conn, _ = ws_srv_sock.accept()
+            with conn:
+                conn.settimeout(5.0)
+                buf = bytearray()
+                while b"\r\n\r\n" not in buf:
+                    buf.extend(conn.recv(4096))
+                hdrs = buf.decode("iso-8859-1")
+                m_key = re.search(r"Sec-WebSocket-Key:\s*([^\r\n]+)", hdrs, re.I)
+                acc = compute_ws_accept_key(m_key.group(1).strip()) if m_key else ""
+                conn.sendall(
+                    (
+                        "HTTP/1.1 101 Switching Protocols\r\n"
+                        "Upgrade: websocket\r\n"
+                        "Connection: Upgrade\r\n"
+                        f"Sec-WebSocket-Accept: {acc}\r\n\r\n"
+                    ).encode("ascii")
+                )
+                # Receive initial heartbeat
+                _f, _op, hb_raw = decode_ws_frame(conn)
+                ws_results["heartbeat"] = json.loads(hb_raw.decode("utf-8"))
+                conn.sendall(encode_ws_frame(json.dumps({"type": "heartbeat_ack"}).encode("utf-8"), mask=False))
+                # Forward /api/v1/ping through the tunnel
+                req_frame = {
+                    "type": "http_req",
+                    "id": "selftest-req-1",
+                    "method": "GET",
+                    "path": f"/api/v1/ping?password={urllib.parse.quote(engine.password)}",
+                    "headers": {},
+                    "body_b64": "",
+                }
+                conn.sendall(encode_ws_frame(json.dumps(req_frame).encode("utf-8"), mask=False))
+                _f2, _op2, res_raw = decode_ws_frame(conn)
+                ws_results["http_res"] = json.loads(res_raw.decode("utf-8"))
+                conn.sendall(encode_ws_frame(b"", opcode=WS_OPCODE_CLOSE, mask=False))
+
+        ws_t = threading.Thread(target=_mock_ws_server, daemon=True)
+        ws_t.start()
+        tunnel_cli = BluePillTunnelClient(
+            url=f"ws://127.0.0.1:{ws_port}/tunnel/connect",
+            token="bp_selftest_tok_123456",
+            local_url=f"http://127.0.0.1:{relay_http_port}",
+            local_password=engine.password,
+            heartbeat_interval=5.0,
+        )
+        try:
+            tunnel_cli.run_once()
+        finally:
+            tunnel_cli.stop()
+            ws_t.join(timeout=3.0)
+            ws_srv_sock.close()
+            relay_http_srv.shutdown()
+            relay_http_srv.server_close()
+
+        assert ws_results.get("heartbeat", {}).get("server_version") == VERSION, f"Bad tunnel heartbeat: {ws_results}"
+        res_obj = ws_results.get("http_res") or {}
+        assert res_obj.get("id") == "selftest-req-1" and res_obj.get("status") == 200, f"Bad tunnel http_res: {res_obj}"
+        res_body = json.loads(base64.b64decode(res_obj["body_b64"]).decode("utf-8"))
+        assert res_body.get("data") == "pong", f"Unexpected ping response via tunnel: {res_body}"
+    finally:
+        shutil.rmtree(relay_tmp_dir, ignore_errors=True)
+
     info = engine.get_server_info()
     print(
         json.dumps(
@@ -13931,23 +14867,188 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
     return 0
 
 
+def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int:
+    cfg_path = get_relay_config_path()
+    existing = load_relay_config(cfg_path)
+    if getattr(args, "disable", False):
+        existing["enabled"] = False
+        saved_path = save_relay_config(existing, cfg_path)
+        payload = {"status": "ok", "enabled": False, "config_path": saved_path, "url": existing.get("url")}
+        if args.json:
+            print(json.dumps(payload, indent=2))
+        else:
+            print(f"BluePill Cloud Relay disabled (saved {saved_path}).")
+        return 0
+
+    token = str(
+        getattr(args, "token", "")
+        or getattr(args, "relay_token", "")
+        or os.environ.get("BLUEPILL_RELAY_TOKEN")
+        or os.environ.get("BLUEPILL_TUNNEL_TOKEN")
+        or existing.get("token")
+        or ""
+    ).strip()
+    url = str(
+        getattr(args, "url", "")
+        or getattr(args, "relay_url", "")
+        or os.environ.get("BLUEPILL_RELAY_URL")
+        or os.environ.get("BLUEPILL_TUNNEL_URL")
+        or existing.get("url")
+        or DEFAULT_CLOUD_RELAY_URL
+    ).strip()
+
+    if not token:
+        msg = "Missing --token (or BLUEPILL_RELAY_TOKEN). Get one at https://bluepill.nertwork.com/signup"
+        if args.json:
+            print(json.dumps({"status": "error", "error": msg}))
+        else:
+            print(f"Error: {msg}", file=sys.stderr)
+        return 2
+
+    saved_path = save_relay_config({"enabled": True, "url": url, "token": token}, cfg_path)
+    pw_updated = False
+    relay_pw = str(getattr(args, "relay_password", "") or "").strip()
+    if relay_pw:
+        save_server_password(relay_pw)
+        engine.password = relay_pw
+        pw_updated = True
+
+    local_scheme = "https" if (args.tls_cert and args.tls_key) else "http"
+    local_url = f"{local_scheme}://127.0.0.1:{args.port}"
+    check_ok = True
+    check_detail = "Skipped connectivity check"
+    if not getattr(args, "no_check", False):
+        client = BluePillTunnelClient(
+            url=url,
+            token=token,
+            local_url=local_url,
+            local_password=engine.password,
+            insecure_tls=bool(getattr(args, "insecure_relay_tls", False)),
+            logger=engine.logger,
+            engine=engine,
+        )
+        try:
+            check_ok, check_detail = client.test_connection(timeout_s=10.0)
+        except Exception as exc:
+            check_ok = False
+            check_detail = str(exc)
+
+    out = {
+        "status": "ok" if check_ok else "error",
+        "enabled": True,
+        "config_path": saved_path,
+        "url": url,
+        "token_preview": _mask_secret_token(token),
+        "password_updated": pw_updated,
+        "connectivity_ok": check_ok,
+        "detail": check_detail,
+    }
+    if args.json:
+        print(json.dumps(out, indent=2))
+    else:
+        print(f"Saved Cloud Relay config: {saved_path} (mode 0600)")
+        print(f"  URL:   {url}")
+        print(f"  Token: {_mask_secret_token(token)}")
+        if pw_updated:
+            print("  Relay API password updated in ~/.config/bluepill/server.json (mode 0600)")
+        print(f"  Check: {'PASS' if check_ok else 'FAIL'} — {check_detail}")
+    return 0 if check_ok else 1
+
+
+def run_relay_status_cli(args: argparse.Namespace, engine: BluePillEngine) -> int:
+    cfg_path = get_relay_config_path()
+    cfg = load_relay_config(cfg_path)
+    env_tok = str(os.environ.get("BLUEPILL_RELAY_TOKEN") or os.environ.get("BLUEPILL_TUNNEL_TOKEN") or "").strip()
+    eff_tok = env_tok or str(cfg.get("token") or "").strip()
+    eff_url = str(
+        getattr(args, "url", "")
+        or getattr(args, "relay_url", "")
+        or os.environ.get("BLUEPILL_RELAY_URL")
+        or os.environ.get("BLUEPILL_TUNNEL_URL")
+        or cfg.get("url")
+        or DEFAULT_CLOUD_RELAY_URL
+    ).strip()
+    enabled = bool(cfg.get("enabled") and eff_tok) or bool(env_tok)
+
+    local_scheme = "https" if (args.tls_cert and args.tls_key) else "http"
+    local_url = f"{local_scheme}://127.0.0.1:{args.port}"
+    local_running = False
+    try:
+        hdrs = {"X-BlueBubbles-Auth": engine.password} if engine.password else {}
+        req = urllib.request.Request(f"{local_url}/api/v1/ping", headers=hdrs, method="GET")
+        ctx = ssl._create_unverified_context() if local_scheme == "https" else None
+        with urllib.request.urlopen(req, timeout=3.0, context=ctx) as resp:
+            local_running = 200 <= resp.status < 500
+    except urllib.error.HTTPError as err:
+        local_running = 200 <= err.code < 500
+    except Exception:
+        local_running = False
+
+    cloud_health_ok = False
+    cloud_detail = "not checked"
+    try:
+        parsed = urllib.parse.urlparse(eff_url)
+        http_scheme = "https" if parsed.scheme in {"wss", "https"} else "http"
+        health_url = f"{http_scheme}://{parsed.netloc}/healthz"
+        req = urllib.request.Request(health_url, method="GET")
+        ctx = ssl._create_unverified_context() if getattr(args, "insecure_relay_tls", False) else None
+        with urllib.request.urlopen(req, timeout=5.0, context=ctx) as resp:
+            cloud_health_ok = resp.status == 200
+            cloud_detail = f"HTTP {resp.status}"
+    except Exception as exc:
+        cloud_detail = str(exc)
+
+    report = {
+        "status": "ok" if (enabled and local_running and cloud_health_ok) else ("configured" if enabled else "disabled"),
+        "enabled": enabled,
+        "config_path": cfg_path,
+        "config_exists": os.path.exists(cfg_path),
+        "url": eff_url,
+        "token_preview": _mask_secret_token(eff_tok),
+        "local_server_url": local_url,
+        "local_server_reachable": local_running,
+        "cloud_relay_reachable": cloud_health_ok,
+        "cloud_relay_detail": cloud_detail,
+    }
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(f"BluePill Cloud Relay Status (v{VERSION})")
+        print(f"  Enabled:            {enabled}")
+        print(f"  Config file:        {cfg_path} (exists={os.path.exists(cfg_path)})")
+        print(f"  Relay URL:          {eff_url}")
+        print(f"  Token:              {_mask_secret_token(eff_tok) or '(not set)'}")
+        print(f"  Local server:       {'reachable' if local_running else 'not listening'} ({local_url})")
+        print(f"  Cloud Relay health: {'ok' if cloud_health_ok else 'unreachable'} ({cloud_detail})")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
-        description="BluePill Headless macOS Relay Server + Web UI (v1.2.3)",
+        description=f"BluePill Headless macOS Relay Server + Cloud Relay + Web UI (v{VERSION})",
     )
     parser.add_argument(
         "command",
         nargs="?",
         default="serve",
-        help="serve | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
+        help="serve | relay-setup | relay-status | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
     )
     parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1234")))
+    parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
     parser.add_argument("--password", default=os.environ.get("BLUEPILL_PASSWORD", ""))
     parser.add_argument("--db-path", default=os.environ.get("BLUEPILL_DB_PATH", ""))
     parser.add_argument("--tls-cert", default=os.environ.get("BLUEPILL_TLS_CERT", ""), help="Optional TLS certificate path for HTTPS listener")
     parser.add_argument("--tls-key", default=os.environ.get("BLUEPILL_TLS_KEY", ""), help="Optional TLS private key path for HTTPS listener")
+    parser.add_argument("--token", default="", help="Cloud Relay tunnel token for 'relay-setup'")
+    parser.add_argument("--url", default="", help=f"Cloud Relay WebSocket URL for 'relay-setup' (default: {DEFAULT_CLOUD_RELAY_URL})")
+    parser.add_argument("--relay-token", default="", help="Cloud Relay tunnel token override for 'serve'")
+    parser.add_argument("--relay-url", default="", help="Cloud Relay WebSocket URL override for 'serve'")
+    parser.add_argument("--relay-password", default="", help="Optional API password to save into server.json during 'relay-setup'")
+    parser.add_argument("--disable", action="store_true", help="Disable Cloud Relay in ~/.config/bluepill/relay.json during 'relay-setup'")
+    parser.add_argument("--no-relay", action="store_true", help="Run 'serve' in local-only mode without Cloud Relay")
+    parser.add_argument("--no-check", action="store_true", help="Skip live WebSocket check during 'relay-setup'")
+    parser.add_argument("--insecure-relay-tls", action="store_true", help="Disable TLS verification for Cloud Relay WebSocket (testing only)")
     parser.add_argument("-n", "--lines", type=int, default=100, help="Number of log lines to display for 'logs'")
     parser.add_argument("--stdio", action="store_true", help="Run JSON-RPC over stdin/stdout (Direct SSH mode)")
     parser.add_argument(
@@ -13964,7 +15065,7 @@ def main() -> int:
     parser.add_argument("--enable-photos", action="store_true", help="Enable iCloud Photos hub module")
     parser.add_argument("--disable-photos", action="store_true", help="Disable iCloud Photos hub module")
     parser.add_argument("--selftest", action="store_true", help="Run built-in self-test suite and exit")
-    parser.add_argument("--json", action="store_true", help="Format status/doctor/preflight/logs output as JSON")
+    parser.add_argument("--json", action="store_true", help="Format status/doctor/preflight/logs/relay output as JSON")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     args = parser.parse_args()
 
@@ -13977,7 +15078,19 @@ def main() -> int:
         or args.stdio
         or args.preflight
         or args.sync_icloud_photos
-        or args.command in ("selftest", "status", "doctor", "preflight", "logs", "stdio", "sync-icloud-photos")
+        or args.command
+        in (
+            "selftest",
+            "status",
+            "doctor",
+            "preflight",
+            "logs",
+            "stdio",
+            "sync-icloud-photos",
+            "relay-setup",
+            "relay-status",
+            "version",
+        )
     )
     engine = BluePillEngine(
         db_path=args.db_path or None,
@@ -14038,6 +15151,12 @@ def main() -> int:
     if args.selftest or args.command == "selftest":
         return run_selftest(engine)
 
+    if args.command == "relay-setup":
+        return run_relay_setup_cli(args, engine)
+
+    if args.command == "relay-status":
+        return run_relay_status_cli(args, engine)
+
     if args.command == "logs":
         return run_logs(engine, args.lines, args.json)
 
@@ -14063,11 +15182,44 @@ def main() -> int:
         f"BluePill Server v{VERSION} listening on {scheme}://{args.host}:{args.port} (Web UI: {scheme}://{args.host}:{args.port}/web)",
         flush=True,
     )
+
+    relay_client: Optional[BluePillTunnelClient] = None
+    relay_enabled, relay_url, relay_token, relay_source = resolve_relay_runtime(args)
+    if relay_enabled:
+        local_loopback_host = "127.0.0.1" if args.host in ("0.0.0.0", "::", "") else args.host
+        local_relay_target = f"{scheme}://{local_loopback_host}:{httpd.server_port}"
+        relay_client = BluePillTunnelClient(
+            url=relay_url,
+            token=relay_token,
+            local_url=local_relay_target,
+            local_password=engine.password,
+            insecure_tls=bool(getattr(args, "insecure_relay_tls", False)),
+            logger=engine.logger,
+            engine=engine,
+        )
+        threading.Thread(
+            target=relay_client.run_forever,
+            name="bp-cloud-relay",
+            daemon=True,
+        ).start()
+        engine.logger.info(
+            "[relay] Cloud Relay enabled (source=%s url=%s local=%s)",
+            relay_source,
+            relay_url,
+            local_relay_target,
+        )
+        print(
+            f"BluePill Cloud Relay active ({relay_url} -> {local_relay_target})",
+            flush=True,
+        )
+
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:
         pass
     finally:
+        if relay_client is not None:
+            relay_client.stop()
         httpd.server_close()
     return 0
 

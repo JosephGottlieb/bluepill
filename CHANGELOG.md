@@ -4,6 +4,13 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+## [1.2.4] - 2026-11-19
+
+### Added
+- **Built-In BluePill Cloud Relay (`bluepill-server` & Homebrew):** Ported the pure Python 3 stdlib RFC 6455 TLS WebSocket tunnel client directly into `server/bluepill_server.py`. Added `bluepill-server relay-setup` (`~/.config/bluepill/relay.json` with `0600` permissions + immediate WebSocket auth check) and `bluepill-server relay-status`. `bluepill-server serve` (and `brew services start bluepill`) now connects automatically to `wss://api.bluepill.nertwork.com/tunnel/connect` when configured (`--no-relay` for local-only mode).
+- **Unified Liquid Glass / Matrix / Light Web Client (`/web`):** Upgraded `WEB_UI_HTML` in `bluepill-server` with zero external CDN dependencies to match the unified BluePill Cloud Web Client design: theme switcher (`Liquid Glass`, `Matrix`, `Light`), tabbed **Messages, Notes, Calendar, Photos, and Contacts** hub, message search, New Chat modal, blue/green iMessage/SMS bubbles, inline hover tapback reaction bar, 1-click 2FA OTP copy pills, and photo lightbox.
+- **Cross-Platform Packaging & Documentation Sync:** Updated `v1.2.4` across CMake, Homebrew formula (`Formula/bluepill.rb`), Arch AUR (`PKGBUILD` / `PKGBUILD.aur` / `.SRCINFO`), Debian `.deb`, Fedora `.rpm`, Windows Inno Setup `.exe`, GitHub Pages (`docs/index.html` + `sync_gh_pages.py`), and `support@nertwork.com` contact links.
+
 ### Changed
 - **No more Home page:** with no conversation open, the right pane shows a short hint instead of a dashboard that repeated the top bar and the chat list. Its pieces moved:
   - The conversation count is now part of the filter (**All (N)**).

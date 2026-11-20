@@ -4,9 +4,9 @@
 
 | Version | Supported |
 | :--- | :--- |
-| `1.1.x` (`main` / AUR `bluepill` / Homebrew `nertwork/tap/bluepill`) | :white_check_mark: |
-| `1.0.x` | :white_check_mark: |
-| `< 1.0.0` | :x: |
+| `1.2.x` (`main` / AUR `bluepill` / Homebrew `nertwork/tap/bluepill`) | :white_check_mark: |
+| `1.1.x` | :white_check_mark: |
+| `< 1.1.0` | :x: |
 
 ## Security Architecture Highlights
 
@@ -23,6 +23,6 @@ Please **do not** open a public GitHub issue for sensitive security vulnerabilit
 
 Instead, report vulnerabilities via:
 1. **GitHub Private Vulnerability Reporting:** [Report a vulnerability on `nertwork/bluepill`](https://github.com/nertwork/bluepill/security/advisories/new)
-2. **Email:** `james@nertwork.com`
+2. **Email:** `support@nertwork.com` (`james@nertwork.com`)
 
 We will acknowledge receipt within 48 hours and coordinate a coordinated fix and release disclosure.

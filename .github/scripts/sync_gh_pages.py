@@ -68,6 +68,7 @@ def main():
 
     # Files to sync: (source_rel, dest_filename, html_filename)
     sync_map = [
+        ("docs/index.html", "index.html", None),
         ("docs/AGENT_INSTALL_PLAYBOOK.md", "AGENT_INSTALL_PLAYBOOK.md", "AGENT_INSTALL_PLAYBOOK.html"),
         ("docs/ARCHITECTURE.md", "ARCHITECTURE.md", "ARCHITECTURE.html"),
         ("docs/BLUEBUBBLES_SETUP_GUIDE.md", "BLUEBUBBLES_SETUP_GUIDE.md", "BLUEBUBBLES_SETUP_GUIDE.html"),
@@ -79,13 +80,16 @@ def main():
     for src_rel, dest_md, dest_html in sync_map:
         src_full = os.path.join(repo_root, src_rel)
         dest_md_full = os.path.join(target_dir, dest_md)
-        dest_html_full = os.path.join(target_dir, dest_html)
 
         if os.path.isfile(src_full):
             shutil.copyfile(src_full, dest_md_full)
-            if os.path.isfile(dest_html_full):
-                convert_and_embed_html(dest_md_full, dest_html_full)
-                print(f"Synced & converted {dest_md} -> {dest_html}")
+            if dest_html:
+                dest_html_full = os.path.join(target_dir, dest_html)
+                if os.path.isfile(dest_html_full):
+                    convert_and_embed_html(dest_md_full, dest_html_full)
+                    print(f"Synced & converted {dest_md} -> {dest_html}")
+                else:
+                    print(f"Synced {dest_md}")
             else:
                 print(f"Synced {dest_md}")
 

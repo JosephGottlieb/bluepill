@@ -1725,7 +1725,7 @@ ApplicationWindow {
                                     objectName: "topStatusPillText"
                                     text: {
                                         var statusMatch = (backend.serverStatus || "").match(/v\d+\.\d+(?:\.\d+)?/i)
-                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.3")
+                                        var ver = statusMatch ? statusMatch[0] : (Qt.application.version ? ("v" + Qt.application.version) : "v1.2.4")
                                         var st = backend.connected ? (i18n.tr("Connected") + " " + ver) : i18n.tr("Disconnected")
                                         var host = (backend.serverUrl || "").replace(/^https?:\/\//i, "").replace(/^ssh:\/\//i, "").replace(/\/.*$/, "")
                                         return host.length > 0 ? (st + " · " + host) : st
@@ -9609,7 +9609,7 @@ ApplicationWindow {
                                 Text {
                                     id: settingsClientVersionText
                                     objectName: "settingsClientVersionText"
-                                    text: "BluePill v" + (Qt.application.version || "1.2.3")
+                                    text: "BluePill v" + (Qt.application.version || "1.2.4")
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.accent
