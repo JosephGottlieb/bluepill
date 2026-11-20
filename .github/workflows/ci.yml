@@ -289,7 +289,6 @@ jobs:
         run: |
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
               choco install ffmpeg -y --no-progress
-              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
           }
           .\build\imsg_tests.exe -o -,txt
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

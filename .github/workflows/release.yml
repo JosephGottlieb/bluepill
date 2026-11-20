@@ -185,7 +185,6 @@ jobs:
           }
           if (-not (Get-Command ffmpeg -ErrorAction SilentlyContinue)) {
               choco install ffmpeg -y --no-progress
-              $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
           }
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
