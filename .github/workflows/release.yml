@@ -190,8 +190,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cmake --build build --parallel
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          .\build\imsg_tests.exe -o -,txt
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .\build\imsg_tests.exe -o build\imsg_tests.log,txt
+          $rc = $LASTEXITCODE
+          if (Test-Path build\imsg_tests.log) { Get-Content build\imsg_tests.log }
+          if ($rc -ne 0) { exit $rc }
 
       - name: Deploy Qt6 Runtime & Build Inno Setup Installer
         shell: pwsh

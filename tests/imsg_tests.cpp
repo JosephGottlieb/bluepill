@@ -24,6 +24,27 @@
 #include "theme.h"
 #include "translator.h"
 
+struct ScopedTestHome {
+    QByteArray prevHome = qgetenv("HOME");
+    QByteArray prevUserProfile = qgetenv("USERPROFILE");
+    QByteArray prevAppData = qgetenv("APPDATA");
+    explicit ScopedTestHome(const QString &path) {
+        const QByteArray utf8 = path.toUtf8();
+        qputenv("HOME", utf8);
+#ifdef Q_OS_WIN
+        qputenv("USERPROFILE", utf8);
+        qputenv("APPDATA", (path + QStringLiteral("/AppData/Roaming")).toUtf8());
+#endif
+    }
+    ~ScopedTestHome() {
+        if (prevHome.isEmpty()) qunsetenv("HOME"); else qputenv("HOME", prevHome);
+#ifdef Q_OS_WIN
+        if (prevUserProfile.isEmpty()) qunsetenv("USERPROFILE"); else qputenv("USERPROFILE", prevUserProfile);
+        if (prevAppData.isEmpty()) qunsetenv("APPDATA"); else qputenv("APPDATA", prevAppData);
+#endif
+    }
+};
+
 class ImsgTests : public QObject {
     Q_OBJECT
 
@@ -1400,7 +1421,7 @@ private slots:
     void testV158FastSendAttachmentIsolationAndActionMenuSafety() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         // Start a mock BlueBubbles HTTP server that stalls attachment downloads on purpose
         // while responding immediately to POST /api/v1/message/text and /api/v1/chat/new
@@ -1742,7 +1763,7 @@ private slots:
     void testV161BackgroundImagePrefetchAndRetry() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
@@ -1920,7 +1941,7 @@ private slots:
     void testV163DelayedSmsLookbackAndUnreadReconcile() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         qint64 observedAfterMs = 0;
@@ -2101,7 +2122,7 @@ private slots:
     void testV163SocketIoPushDelivery() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
         bool receivedConnectPacket = false;
@@ -2827,9 +2848,9 @@ private slots:
         auto restoreEnv = qScopeGuard([&]() {
             for (const char *k : credVars) qunsetenv(k);
             for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
-            qputenv("HOME", savedHome);
         });
-        qputenv("HOME", tempDir.path().toUtf8());  // avatar cache lives under ~/.cache
+        Q_UNUSED(savedHome);
+        ScopedTestHome testHome(tempDir.path());  // avatar cache lives under ~/.cache
 
         QImage face(24, 24, QImage::Format_RGB32);
         face.fill(Qt::darkCyan);
@@ -3042,8 +3063,9 @@ private slots:
         QVERIFY(!win->property("contactInfoDetails").toMap().value(QStringLiteral("found")).toBool());
 
         // Esc closes the card itself last, and focus returns to the composer
+        QTRY_VERIFY(infoModal->hasActiveFocus());
         QTest::keyClick(win, Qt::Key_Escape);
-        QVERIFY(!win->property("showContactInfo").toBool());
+        QTRY_VERIFY(!win->property("showContactInfo").toBool());
     }
 
     void testQuotedReplyOpensThreadAndJumpsToOriginal() {
@@ -3241,7 +3263,7 @@ private slots:
     void testDisguisedHeicJpegMagicByteConversionGroupChat() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         // Generate a real tiny HEIC image via magick (or heif-enc fallback) so we have authentic ftypheic magic bytes
         const QString sampleHeicPath = tempDir.filePath(QStringLiteral("sample_group.heic"));
@@ -3333,7 +3355,7 @@ private slots:
     void testTapbackScrollPositionPreservedAndAllGroupImagesResolved() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         // Generate a real tiny JPEG image via magick (or Qt QImage fallback) for fast attachment resolution
         const QString sampleJpgPath = tempDir.filePath(QStringLiteral("sample_alpine.jpg"));
@@ -3523,7 +3545,7 @@ private slots:
     void testReactionPillHoverTooltipAndGroupSenderNames() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        qputenv("HOME", tempDir.path().toUtf8());
+        ScopedTestHome testHome(tempDir.path());
 
         const QString alpineChatGuid = QStringLiteral("RCS;+;chat555000111222333444");
         Backend b(false);
@@ -7837,12 +7859,8 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        const QByteArray prevHome = qgetenv("HOME");
-        qputenv("HOME", tempDir.path().toUtf8());
-        auto restoreHome = qScopeGuard([&prevHome]() {
-            if (prevHome.isEmpty()) qunsetenv("HOME");
-            else qputenv("HOME", prevHome);
-        });
+        Q_UNUSED(qgetenv("HOME"));
+        ScopedTestHome testHome(tempDir.path());
 
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_vm_bind.json")));
@@ -8064,12 +8082,8 @@ private slots:
 
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
-        const QByteArray prevHome = qgetenv("HOME");
-        qputenv("HOME", tempDir.path().toUtf8());
-        auto restoreHome = qScopeGuard([&prevHome]() {
-            if (prevHome.isEmpty()) qunsetenv("HOME");
-            else qputenv("HOME", prevHome);
-        });
+        Q_UNUSED(qgetenv("HOME"));
+        ScopedTestHome testHome(tempDir.path());
 
         Backend b(false);
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_merge.json")));
@@ -8360,9 +8374,7 @@ private slots:
     void testResolvedAttachmentDoesNotResetTimeline() {
         QTemporaryDir home;
         QVERIFY(home.isValid());
-        const QByteArray savedHome = qgetenv("HOME");
-        qputenv("HOME", home.path().toLocal8Bit());
-        auto restoreHome = qScopeGuard([&]() { qputenv("HOME", savedHome); });
+        ScopedTestHome testHome(home.path());
         // No server: the resolve must come from the disk cache, not a download
         // that an earlier test's credentials would start.
         const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
