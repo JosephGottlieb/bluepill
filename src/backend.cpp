@@ -9102,7 +9102,7 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
     // Request /api/v1/attachment/%1/live so macOS bluepill-server converts .heic/.tiff to cached JPEG via sips
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/attachment/%1/download?force=false&original=true").arg(encoded));
     req.setPriority(highPriority ? QNetworkRequest::HighPriority : QNetworkRequest::LowPriority);
-    req.setTransferTimeout(15000);
+    req.setTransferTimeout(45000);
     QNetworkReply *reply = m_mediaNam.get(req);
     connect(reply, &QNetworkReply::finished, this, [this, reply, attachmentGuid, transferName, highPriority, destPath, resolveOrConvertAsync]() {
         reply->deleteLater();
@@ -9114,7 +9114,7 @@ void Backend::downloadAttachment(const QString &attachmentGuid, const QString &t
             const bool isLiveIncoming = m_liveIncomingAttachments.contains(attachmentGuid);
             const bool permanentlyMissingOnDisk = bytes.contains("does not exist") && !isLiveIncoming;
             const int retries = m_attachmentRetryCount.value(attachmentGuid, 0);
-            const bool isPermanentMissing = (httpStatus == 410 || permanentlyMissingOnDisk ||
+            const bool isPermanentMissing = (httpStatus == 410 || httpStatus == 413 || permanentlyMissingOnDisk ||
                                              (httpStatus == 404 && (!isLiveIncoming || retries >= 6)));
             if (!isPermanentMissing && retries < 6) {
                 m_attachmentRetryCount.insert(attachmentGuid, retries + 1);
@@ -9844,7 +9844,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     sendReq.setPriority(QNetworkRequest::HighPriority);
     sendReq.setTransferTimeout(45000);
     QNetworkReply *reply = m_sendNam.post(sendReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, sendChatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             const QByteArray errBytes = reply->isOpen() ? reply->readAll() : QByteArray();
@@ -9858,6 +9858,33 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                 markOptimisticFailed();
                 loadChatMessages(canonicalGuid);
                 finishSendTrack();
+                return;
+            }
+
+            // If the Cloud Relay returned a transient 502/503/504 (e.g. Mac tunnel reconnecting),
+            // wait 1.2s and retry the same private-api request once before falling back to AppleScript / chat/new.
+            if (status == 502 || status == 503 || status == 504) {
+                QTimer::singleShot(1200, this, [this, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+                    QNetworkRequest retryReq = makeRequest(QStringLiteral("/api/v1/message/text"));
+                    retryReq.setPriority(QNetworkRequest::HighPriority);
+                    retryReq.setTransferTimeout(45000);
+                    QNetworkReply *retryReply = m_sendNam.post(retryReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+                    connect(retryReply, &QNetworkReply::finished, this, [this, retryReply, canonicalGuid, sendChatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+                        retryReply->deleteLater();
+                        if (retryReply->error() == QNetworkReply::NoError && finalizeSentMessage(retryReply->readAll(), tempGuid)) {
+                            finishSendTrack();
+                            return;
+                        }
+                        const QByteArray retryErr = retryReply->isOpen() ? retryReply->readAll() : QByteArray();
+                        if (!retryErr.contains("Message send failed") && sendChatGuid.contains(QStringLiteral(";-;"))) {
+                            sendViaNewChat();
+                            return;
+                        }
+                        markOptimisticFailed();
+                        loadChatMessages(canonicalGuid);
+                        finishSendTrack();
+                    });
+                });
                 return;
             }
 

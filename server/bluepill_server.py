@@ -10526,6 +10526,8 @@ class BluePillTunnelClient:
         self._stop_event = threading.Event()
         self._send_lock = threading.Lock()
         self._sock: Optional[socket.socket] = None
+        self._supports_chunked_res: bool = False
+        self._max_ws_bytes: int = 15_728_640
         self._executor = ThreadPoolExecutor(max_workers=16, thread_name_prefix="bp-relay-http")
 
     def stop(self) -> None:
@@ -10725,7 +10727,7 @@ class BluePillTunnelClient:
         req = urllib.request.Request(target_url, data=body, headers=fwd_headers, method=method)
         ctx = self._local_ssl_context()
         try:
-            with urllib.request.urlopen(req, timeout=20.0, context=ctx) as resp:
+            with urllib.request.urlopen(req, timeout=40.0, context=ctx) as resp:
                 resp_status = resp.status
                 resp_headers = dict(resp.headers.items())
                 resp_body = resp.read()
@@ -10744,14 +10746,71 @@ class BluePillTunnelClient:
                 }
             ).encode("utf-8")
 
-        res_msg = {
-            "type": "http_res",
-            "id": req_id,
-            "status": resp_status,
-            "headers": resp_headers,
-            "body_b64": base64.b64encode(resp_body).decode("ascii") if resp_body else "",
-        }
+        chunk_threshold = 262_144  # 256 KiB raw -> ~349 KiB base64 per WS frame
+        max_ws = max(1_048_576, int(self._max_ws_bytes))
         try:
+            if self._supports_chunked_res and len(resp_body) > chunk_threshold:
+                if len(resp_body) > max_ws:
+                    self._send_json(
+                        sock,
+                        {
+                            "type": "http_res",
+                            "id": req_id,
+                            "status": 413,
+                            "headers": {"Content-Type": "application/json"},
+                            "body_b64": base64.b64encode(
+                                json.dumps(
+                                    {
+                                        "status": 413,
+                                        "error": "payload_too_large",
+                                        "message": f"Attachment ({len(resp_body)} bytes) exceeds relay limit ({max_ws} bytes)",
+                                    }
+                                ).encode("utf-8")
+                            ).decode("ascii"),
+                        },
+                    )
+                    return
+                self._send_json(
+                    sock,
+                    {
+                        "type": "http_res_start",
+                        "id": req_id,
+                        "status": resp_status,
+                        "headers": resp_headers,
+                    },
+                )
+                for offset in range(0, len(resp_body), chunk_threshold):
+                    chunk = resp_body[offset : offset + chunk_threshold]
+                    self._send_json(
+                        sock,
+                        {
+                            "type": "http_res_chunk",
+                            "id": req_id,
+                            "data_b64": base64.b64encode(chunk).decode("ascii"),
+                        },
+                    )
+                self._send_json(sock, {"type": "http_res_end", "id": req_id})
+                return
+
+            est_frame_bytes = (len(resp_body) * 4) // 3 + 4096
+            if est_frame_bytes > max_ws:
+                resp_status = 413
+                resp_headers = {"Content-Type": "application/json"}
+                resp_body = json.dumps(
+                    {
+                        "status": 413,
+                        "error": "payload_too_large",
+                        "message": f"Attachment ({len(resp_body)} bytes) exceeds single-frame relay limit",
+                    }
+                ).encode("utf-8")
+
+            res_msg = {
+                "type": "http_res",
+                "id": req_id,
+                "status": resp_status,
+                "headers": resp_headers,
+                "body_b64": base64.b64encode(resp_body).decode("ascii") if resp_body else "",
+            }
             self._send_json(sock, res_msg)
         except OSError as exc:
             self.logger.debug("[relay] Failed to send http_res %s: %s", req_id, exc)
@@ -10774,6 +10833,8 @@ class BluePillTunnelClient:
     def run_once(self) -> None:
         sock = self._connect_ws()
         self._sock = sock
+        self._supports_chunked_res = False
+        self._max_ws_bytes = 15_728_640
         self.logger.info("[relay] Connected to %s -> forwarding to %s", self.url, self.local_url)
         conn_closed = threading.Event()
         hb_thread = threading.Thread(target=self._heartbeat_loop, args=(sock, conn_closed), daemon=True)
@@ -10800,8 +10861,14 @@ class BluePillTunnelClient:
                         msg = json.loads(full_payload.decode("utf-8"))
                     except (ValueError, UnicodeDecodeError):
                         continue
-                    if isinstance(msg, dict) and msg.get("type") == "http_req":
-                        self._executor.submit(self._handle_http_req, sock, msg)
+                    if isinstance(msg, dict):
+                        mtype = msg.get("type")
+                        if mtype == "http_req":
+                            self._executor.submit(self._handle_http_req, sock, msg)
+                        elif mtype == "heartbeat_ack":
+                            self._supports_chunked_res = bool(msg.get("supports_chunked_res", False))
+                            if isinstance(msg.get("max_ws_bytes"), int) and msg["max_ws_bytes"] > 0:
+                                self._max_ws_bytes = int(msg["max_ws_bytes"])
         finally:
             conn_closed.set()
             self._sock = None
