@@ -41,8 +41,9 @@ Rectangle {
         id: effectHost
         anchors.fill: photo
         visible: avatar.hasPhoto && avatar.canMask && avatar.hasEffectMask
-        Component.onCompleted: {
-            if (!avatar.canMask) return
+        property var fxItem: null
+        function ensureEffect() {
+            if (fxItem || !avatar.hasPhoto || !avatar.canMask) return
             try {
                 var fx = Qt.createQmlObject(
                     'import QtQuick; import QtQuick.Effects; MultiEffect { anchors.fill: parent; maskEnabled: true }',
@@ -52,10 +53,20 @@ Rectangle {
                 if (fx) {
                     fx.source = photo
                     fx.maskSource = circleMask
+                    fxItem = fx
                     avatar.hasEffectMask = true
                 }
             } catch (e) {
                 avatar.hasEffectMask = false
+            }
+        }
+        Component.onCompleted: ensureEffect()
+        Connections {
+            target: avatar
+            function onHasPhotoChanged() {
+                if (avatar.hasPhoto) {
+                    effectHost.ensureEffect()
+                }
             }
         }
     }
@@ -63,7 +74,7 @@ Rectangle {
     Item {
         id: circleMask
         anchors.fill: parent
-        layer.enabled: true
+        layer.enabled: avatar.hasPhoto && avatar.canMask && avatar.hasEffectMask
         visible: false
         Rectangle {
             anchors.fill: parent

@@ -11520,6 +11520,17 @@ private slots:
         QVERIFY(!closedSock.waitForConnected(300));
     }
 
+    void testLocalFileUrlAndGroup404NoStorm() {
+        QCOMPARE(Backend::localFileUrl(QString()), QString());
+        QCOMPARE(Backend::localFileUrl(QStringLiteral("file:///C:/Users/Edgar/a.png")),
+                 QStringLiteral("file:///C:/Users/Edgar/a.png"));
+        QCOMPARE(Backend::localFileUrl(QStringLiteral("https://example.com/a.png")),
+                 QStringLiteral("https://example.com/a.png"));
+        const QString unixUrl = Backend::localFileUrl(QStringLiteral("/tmp/pic.png"));
+        QVERIFY2(unixUrl.startsWith(QStringLiteral("file:///")), qPrintable(unixUrl));
+        QVERIFY2(unixUrl.endsWith(QStringLiteral("/tmp/pic.png")), qPrintable(unixUrl));
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

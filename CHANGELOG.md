@@ -4,6 +4,15 @@ All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this
 
 ## [Unreleased]
 
+## [1.2.8] - 2026-11-21
+
+### Fixed
+- **Windows Client & Cloud Tunnel Responsiveness (`server/bluepill_server.py`, `src/backend.{h,cpp}`, `src/RoundAvatar.qml`, `src/RoundedCornerMask.qml`, `src/Main.qml`):**
+  - **Eliminated 50ms Socket.IO Busy-Loop (`server/bluepill_server.py`):** Replaced `sess.pop_packets(timeout=0.05)` with configurable long-polling (`BLUEPILL_SOCKETIO_POLL_TIMEOUT`, default `15.0s`, immediate `<1ms` wakeup on new events), reducing idle Cloud tunnel Socket.IO traffic by >99%.
+  - **Fixed Reverse-Proxy Semicolon Truncation & 404 Group-Chat Storm (`server/bluepill_server.py`, `src/backend.cpp`):** Switched HTTP request path parsing from `urllib.parse.urlparse()` to `urllib.parse.urlsplit()` so unencoded `;` in chat GUIDs (`iMessage;+;...`, `SMS;-;...`, `RCS;+;...`) forwarded through BluePill Cloud / FastAPI is never stripped into `parsed.params`; updated `Backend::fetchMissingGroupParticipants()` to skip groups with existing `participantHandles` and stop retrying terminal HTTP `404` responses.
+  - **Prevented Overlapping Poll Stacking (`src/backend.cpp`):** Added `m_pollDeltaInFlight` and `m_pollRowIdInFlight` guards in `Backend::pollDelta()` so slow Cloud links never stack concurrent `/api/v1/message/query` requests.
+  - **Windows Direct3D 11 UI & File-Handling Fixes (`src/RoundAvatar.qml`, `src/RoundedCornerMask.qml`, `src/Main.qml`, `src/backend.cpp`):** Deferred `MultiEffect` / `layer.enabled` FBO allocation in `RoundAvatar.qml` until a contact photo is actually loaded, set `RoundedCornerMask.qml` `ShaderEffectSource` to `live: false` with on-demand `scheduleUpdate()`, lowered `chatListView.cacheBuffer` (`2000 -> 400`), fixed Windows `file:///C:/...` staged attachment preview URLs via `Backend::localFileUrl()`, serialized async `messages_cache.json` writes with `QSaveFile`, and guarded POSIX `setPermissions` calls with `#ifndef Q_OS_WIN`.
+
 ## [1.2.7] - 2026-11-20
 
 ### Added

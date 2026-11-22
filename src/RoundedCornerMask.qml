@@ -14,10 +14,16 @@ MultiEffect {
     maskThresholdMin: 0.5
     maskSpreadAtMin: 1.0
     maskSource: ShaderEffectSource {
+        id: maskTexture
         sourceItem: maskShape
         hideSource: true
-        live: true
+        live: false
     }
+
+    onWidthChanged: maskTexture.scheduleUpdate()
+    onHeightChanged: maskTexture.scheduleUpdate()
+    onCornerRadiusChanged: maskTexture.scheduleUpdate()
+    Component.onCompleted: maskTexture.scheduleUpdate()
 
     Rectangle {
         id: maskShape
@@ -26,7 +32,6 @@ MultiEffect {
         radius: fx.cornerRadius
         antialiasing: true
         color: "black"
-        layer.enabled: true
         visible: false
     }
 }

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-BluePill Headless macOS Relay Server (`bluepill-server` v1.2.7)
+BluePill Headless macOS Relay Server (`bluepill-server` v1.2.8)
 Zero-Electron, single-file Python 3 stdlib relay for Apple Messages (`chat.db`),
 macOS Contacts (`AddressBook-v22.abcddb`), Pinned Chats (`com.apple.messages.pinning.plist`),
 Engine.IO v4 / Socket.IO v4 push events, built-in Cloud Relay WebSocket tunnel,
@@ -57,7 +57,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
@@ -487,6 +487,12 @@ class BluePillEngine:
 
         self._sessions: Dict[str, SocketIOSession] = {}
         self._sessions_lock = threading.Lock()
+        try:
+            self.socketio_poll_timeout: float = max(
+                0.05, min(20.0, float(os.environ.get("BLUEPILL_SOCKETIO_POLL_TIMEOUT", "15.0")))
+            )
+        except ValueError:
+            self.socketio_poll_timeout = 15.0
 
         self._helper_clients: List[socket.socket] = []
         self._helper_lock = threading.Lock()
@@ -8422,7 +8428,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.7</span>
+      <span class="pill pill-blue">v1.2.8</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -11033,7 +11039,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:
         self._req_t0 = time.time()
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
         if path in ("/", "/web", "/ui"):
             self._send_html(WEB_UI_HTML, head_only=True)
@@ -11043,7 +11049,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:
         self._req_t0 = time.time()
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
 
         if path in ("/", "/web", "/ui"):
@@ -11084,7 +11090,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                     self.engine._sessions[sid] = sess
                 else:
                     sess.icloud_authorized = icloud_auth
-            pkts = sess.pop_packets(timeout=0.05)
+            pkts = sess.pop_packets(timeout=self.engine.socketio_poll_timeout)
             if not icloud_auth:
                 pkts = [
                     pkt
@@ -11449,7 +11455,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self._req_t0 = time.time()
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
 
         if path == "/socket.io":
@@ -11676,7 +11682,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
     def do_DELETE(self) -> None:
         self._req_t0 = time.time()
-        parsed = urllib.parse.urlparse(self.path)
+        parsed = urllib.parse.urlsplit(self.path)
         if not self._check_auth(parsed):
             self._send_json(401, None, "Unauthorized")
             return
@@ -13902,6 +13908,20 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
         finally:
             if os.path.exists(tmp_db_path):
                 os.remove(tmp_db_path)
+
+        # Verify unencoded semicolons in chat GUIDs (e.g. from reverse proxies / FastAPI) are NOT truncated
+        raw_del_req = urllib.request.Request(
+            f"http://127.0.0.1:{port}/api/v1/chat/iMessage;+;selftestgroup1?password=selftest-secret",
+            method="DELETE",
+        )
+        with urllib.request.urlopen(raw_del_req, timeout=5.0) as raw_del_resp:
+            raw_del_json = json.loads(raw_del_resp.read().decode("utf-8"))
+        assert raw_del_json["status"] == 200 and raw_del_json["data"]["deleted"] is True, (
+            f"Unencoded semicolon chat DELETE failed: {raw_del_json}"
+        )
+        assert "iMessage;+;selftestgroup1" in test_eng.deleted_chat_guids, (
+            f"Unencoded semicolon chat GUID was truncated: {test_eng.deleted_chat_guids}"
+        )
 
         del_req = urllib.request.Request(
             f"http://127.0.0.1:{port}/api/v1/chat/iMessage%3B-%3B%2B14155550140?password=selftest-secret",

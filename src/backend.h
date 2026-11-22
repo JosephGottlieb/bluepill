@@ -371,6 +371,7 @@ public:
     Q_INVOKABLE void refreshAll();
     // file:// URL of an attachment already on disk, or "".
     Q_INVOKABLE QString cachedAttachmentUrl(const QString &attachmentGuid) const;
+    Q_INVOKABLE static QString localFileUrl(const QString &filePath);
     Q_INVOKABLE void selectChat(const QString &chatGuid);
     Q_INVOKABLE bool isSameConversation(const QString &guidA, const QString &guidB) const;
     Q_INVOKABLE QString resolveCanonicalChatGuid(const QString &chatGuid) const;
@@ -991,6 +992,10 @@ private:
     QHash<QString, qint64> m_localReadMutationTimeMs;
     QHash<QString, qint64> m_recentlySentMessageAtMs;
     int m_pollTickCount = 0;
+    bool m_pollDeltaInFlight = false;
+    bool m_pollRowIdInFlight = false;
+    mutable std::atomic<bool> m_cacheFlushInFlight{false};
+    mutable std::atomic<bool> m_cacheFlushPending{false};
     QSet<QString> m_downloadingAttachments;
     QSet<QString> m_attemptedAttachments;
     QSet<QString> m_missingAttachments;

@@ -2479,7 +2479,7 @@ ApplicationWindow {
                         clip: true
                         model: backend.chats
                         spacing: 2
-                        cacheBuffer: 2000
+                        cacheBuffer: 400
 
                         ScrollBar.vertical: ScrollBar {
                             policy: ScrollBar.AsNeeded
@@ -5855,7 +5855,7 @@ ApplicationWindow {
                             Image {
                                 anchors.fill: parent
                                 fillMode: Image.PreserveAspectCrop
-                                source: root.stagedAttachmentPath.length > 0 ? ("file://" + root.stagedAttachmentPath) : ""
+                                source: root.stagedAttachmentPath.length > 0 ? backend.localFileUrl(root.stagedAttachmentPath) : ""
                                 asynchronous: true
                             }
                         }

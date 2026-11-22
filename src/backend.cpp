@@ -1146,13 +1146,22 @@ void Backend::flushMessagesCacheNow(bool async) const {
     const QString cachePath = messagesCacheFilePath();
     if (cachePath.isEmpty()) return;
 
+    if (async) {
+        bool expected = false;
+        if (!m_cacheFlushInFlight.compare_exchange_strong(expected, true)) {
+            m_cacheFlushPending.store(true);
+            return;
+        }
+    }
+
     const auto cacheSnapshot = m_chatMessagesCache;
     const auto chatsSnapshot = m_chats;
     const int historySyncDays = m_historySyncDays;
     const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
     const qint64 cutoffMs = nowMs - (static_cast<qint64>(historySyncDays) * 86400LL * 1000LL);
+    QPointer<const Backend> selfGuard(this);
 
-    auto buildAndWriteFn = [cachePath, cacheSnapshot, chatsSnapshot, historySyncDays, nowMs, cutoffMs]() {
+    auto buildAndWriteFn = [selfGuard, async, cachePath, cacheSnapshot, chatsSnapshot, historySyncDays, nowMs, cutoffMs]() {
         QHash<QString, QJsonObject> chatMetaMap;
         chatMetaMap.reserve(chatsSnapshot.size());
         for (const ChatEntry &ce : chatsSnapshot) {
@@ -1268,14 +1277,24 @@ void Backend::flushMessagesCacheNow(bool async) const {
         const QByteArray payload = QJsonDocument(root).toJson(QJsonDocument::Compact);
         QFileInfo fi(cachePath);
         QDir().mkpath(fi.absolutePath());
-        const QString tmpPath = cachePath + QStringLiteral(".tmp");
-        QFile f(tmpPath);
+        QSaveFile f(cachePath);
         if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-            f.write(payload);
-            f.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
-            f.close();
-            QFile::remove(cachePath);
-            QFile::rename(tmpPath, cachePath);
+            if (f.write(payload) == payload.size()) {
+#ifndef Q_OS_WIN
+                f.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+#endif
+                f.commit();
+            } else {
+                f.cancelWriting();
+            }
+        }
+        if (async && selfGuard) {
+            selfGuard->m_cacheFlushInFlight.store(false);
+            if (selfGuard->m_cacheFlushPending.exchange(false)) {
+                QMetaObject::invokeMethod(const_cast<Backend *>(selfGuard.data()), [selfGuard]() {
+                    if (selfGuard) selfGuard->saveMessagesCache();
+                }, Qt::QueuedConnection);
+            }
         }
     };
 
@@ -1664,6 +1683,18 @@ int Backend::computeTextPartIndex(const QJsonObject &msgObj) {
         return 1;
     }
     return 0;
+}
+
+QString Backend::localFileUrl(const QString &filePath) {
+    const QString trimmed = filePath.trimmed();
+    if (trimmed.isEmpty()) return QString();
+    if (trimmed.startsWith(QStringLiteral("file://"), Qt::CaseInsensitive) ||
+        trimmed.startsWith(QStringLiteral("http://"), Qt::CaseInsensitive) ||
+        trimmed.startsWith(QStringLiteral("https://"), Qt::CaseInsensitive) ||
+        trimmed.startsWith(QStringLiteral("qrc:/"), Qt::CaseInsensitive)) {
+        return trimmed;
+    }
+    return QUrl::fromLocalFile(trimmed).toString();
 }
 
 QString Backend::defaultBluepillConfigPath() {
@@ -4403,7 +4434,9 @@ void Backend::fetchContactsRemote() {
         QFile f(configPath);
         if (f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             f.write(bytes);
+#ifndef Q_OS_WIN
             f.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+#endif
             f.close();
         }
 
@@ -4485,7 +4518,7 @@ void Backend::fetchMissingGroupParticipants() {
 
     int dispatched = 0;
     for (const ChatEntry &c : m_chats) {
-        if (!c.isGroup || !c.displayName.isEmpty()) continue;
+        if (!c.isGroup || !c.displayName.isEmpty() || !c.participantHandles.isEmpty()) continue;
         if (m_fetchedChatParticipantGuids.contains(c.guid)) continue;
 
         m_fetchedChatParticipantGuids.insert(c.guid);
@@ -4496,7 +4529,10 @@ void Backend::fetchMissingGroupParticipants() {
         connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid]() {
             reply->deleteLater();
             if (reply->error() != QNetworkReply::NoError) {
-                m_fetchedChatParticipantGuids.remove(chatGuid);
+                const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                if (httpStatus != 404 && reply->error() != QNetworkReply::ContentNotFoundError) {
+                    m_fetchedChatParticipantGuids.remove(chatGuid);
+                }
                 return;
             }
             const QJsonObject dataObj = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toObject();
@@ -5236,23 +5272,27 @@ void Backend::pollDelta() {
         QStringLiteral("attributedbody")
     });
 
-    QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
-                                      QJsonDocument(body).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) {
-            handleNetworkFailure(QStringLiteral("pollDelta"));
-            return;
-        }
-        handleNetworkSuccess();
-        const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
-        processIncomingMessages(arr, false);
-    });
+    if (!m_pollDeltaInFlight) {
+        m_pollDeltaInFlight = true;
+        QNetworkReply *reply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
+                                          QJsonDocument(body).toJson(QJsonDocument::Compact));
+        connect(reply, &QNetworkReply::finished, this, [this, reply]() {
+            m_pollDeltaInFlight = false;
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) {
+                handleNetworkFailure(QStringLiteral("pollDelta"));
+                return;
+            }
+            handleNetworkSuccess();
+            const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
+            processIncomingMessages(arr, false);
+        });
+    }
 
     // Also poll by SQLite ROWID > m_highestMessageRowId so delayed SMS or CloudKit
     // (Messages in iCloud) backfills with creation timestamps older than 1 hour are
     // ingested immediately without waiting for an app restart.
-    if (m_highestMessageRowId > 0 && (m_pollTickCount % 2 == 0)) {
+    if (m_highestMessageRowId > 0 && (m_pollTickCount % 2 == 0) && !m_pollRowIdInFlight) {
         QJsonObject whereClause;
         whereClause.insert(QStringLiteral("statement"), QStringLiteral("message.ROWID > :minRowId"));
         QJsonObject argsObj;
@@ -5271,9 +5311,11 @@ void Backend::pollDelta() {
             QStringLiteral("attributedbody")
         });
 
+        m_pollRowIdInFlight = true;
         QNetworkReply *rowReply = m_nam.post(makeRequest(QStringLiteral("/api/v1/message/query")),
                                              QJsonDocument(rowBody).toJson(QJsonDocument::Compact));
         connect(rowReply, &QNetworkReply::finished, this, [this, rowReply]() {
+            m_pollRowIdInFlight = false;
             rowReply->deleteLater();
             if (rowReply->error() != QNetworkReply::NoError) return;
             const QJsonArray arr = QJsonDocument::fromJson(rowReply->readAll()).object().value(QStringLiteral("data")).toArray();
@@ -7134,7 +7176,9 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
         QFile wf(cfgPath);
         if (wf.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
             wf.write(QJsonDocument(existingContacts).toJson(QJsonDocument::Indented));
+#ifndef Q_OS_WIN
             wf.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+#endif
             wf.close();
         }
     }
