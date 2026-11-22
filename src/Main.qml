@@ -1797,7 +1797,11 @@ ApplicationWindow {
                             anchors.centerIn: parent
                             spacing: 5
                             Text {
-                                text: "↑ " + i18n.tr("Update v%1").arg(backend.clientUpdateAvailable ? backend.clientLatestVersion : backend.serverLatestVersion)
+                                text: "↑ " + (backend.clientUpdateAvailable && backend.serverUpdateAvailable
+                                      ? i18n.tr("App & Server Update")
+                                      : (backend.clientUpdateAvailable
+                                         ? i18n.tr("App Update v%1").arg(backend.clientLatestVersion)
+                                         : i18n.tr("Server Update v%1").arg(backend.serverLatestVersion)))
                                 font.pixelSize: theme.fontSize - 3
                                 font.bold: true
                                 color: theme.accent
@@ -2348,121 +2352,135 @@ ApplicationWindow {
                         }
                     }
 
-                    // Pinned Conversations Bar (synced from macOS pinning.plist / user pins)
+                    // Pinned Conversations Grid (macOS Messages-style 3-column grid, up to 15 pins)
                     Rectangle {
                         id: pinnedChatsBar
                         objectName: "pinnedChatsBar"
                         visible: backend.showPinnedRow && backend.pinnedChats.length > 0 && backend.searchQuery.length === 0
                         Layout.fillWidth: true
-                        Layout.preferredHeight: visible ? 76 : 0
+                        readonly property int pinRows: Math.max(1, Math.ceil(backend.pinnedChats.length / 3))
+                        Layout.preferredHeight: visible ? Math.min(236, pinRows * 76 + 8) : 0
                         color: "transparent"
+                        clip: true
 
-                        RowLayout {
+                        Flickable {
                             anchors.fill: parent
                             anchors.leftMargin: 10
                             anchors.rightMargin: 10
-                            spacing: 6
+                            anchors.topMargin: 4
+                            contentWidth: width
+                            contentHeight: pinnedChatsGrid.implicitHeight
+                            interactive: contentHeight > height
+                            clip: true
 
-                            Repeater {
-                                model: backend.pinnedChats
-                                delegate: Item {
-                                    required property var modelData
-                                    Layout.fillWidth: true
-                                    Layout.preferredHeight: 68
+                            Grid {
+                                id: pinnedChatsGrid
+                                width: parent.width
+                                columns: 3
+                                columnSpacing: 4
+                                rowSpacing: 4
 
-                                    ColumnLayout {
-                                        anchors.centerIn: parent
-                                        spacing: 4
+                                Repeater {
+                                    model: backend.pinnedChats
+                                    delegate: Item {
+                                        required property var modelData
+                                        width: Math.max(64, Math.floor((pinnedChatsGrid.width - 8) / 3))
+                                        height: 72
 
-                                        Rectangle {
-                                            Layout.alignment: Qt.AlignHCenter
-                                            width: 42
-                                            height: 42
-                                            radius: 21
-                                            color: modelData.avatarColor || theme.accent
-                                            border.width: modelData.guid === backend.selectedChatGuid ? 2 : (pinTileMouse.containsMouse ? 1 : 0)
-                                            border.color: modelData.guid === backend.selectedChatGuid ? theme.brightForeground : theme.accent
+                                        ColumnLayout {
+                                            anchors.centerIn: parent
+                                            spacing: 4
 
-                                            RoundAvatar {
-                                                anchors.fill: parent
-                                                color: "transparent"
-                                                source: modelData.avatarUrl || ""
-                                                initials: modelData.initials || "#"
-                                                fontPixelSize: theme.fontSize - 1
-                                            }
-
-                                            // Unread badge dot on pinned avatar
                                             Rectangle {
-                                                visible: (modelData.unreadCount || 0) > 0
-                                                anchors.right: parent.right
-                                                anchors.top: parent.top
-                                                anchors.rightMargin: -2
-                                                anchors.topMargin: -2
-                                                width: 16
-                                                height: 16
-                                                radius: 8
-                                                color: theme.accent
-                                                border.width: 2
-                                                border.color: theme.darkBackground
-                                                Text {
-                                                    anchors.centerIn: parent
-                                                    text: modelData.unreadCount > 9 ? "9+" : modelData.unreadCount
-                                                    font.pixelSize: 9
-                                                    font.bold: true
-                                                    color: "#ffffff"
+                                                Layout.alignment: Qt.AlignHCenter
+                                                width: 48
+                                                height: 48
+                                                radius: 24
+                                                color: modelData.avatarColor || theme.accent
+                                                border.width: modelData.guid === backend.selectedChatGuid ? 2 : (pinTileMouse.containsMouse ? 1 : 0)
+                                                border.color: modelData.guid === backend.selectedChatGuid ? theme.brightForeground : theme.accent
+
+                                                RoundAvatar {
+                                                    anchors.fill: parent
+                                                    color: "transparent"
+                                                    source: modelData.avatarUrl || ""
+                                                    initials: modelData.initials || "#"
+                                                    fontPixelSize: theme.fontSize
+                                                }
+
+                                                // Unread badge dot on pinned avatar
+                                                Rectangle {
+                                                    visible: (modelData.unreadCount || 0) > 0
+                                                    anchors.right: parent.right
+                                                    anchors.top: parent.top
+                                                    anchors.rightMargin: -2
+                                                    anchors.topMargin: -2
+                                                    width: 16
+                                                    height: 16
+                                                    radius: 8
+                                                    color: theme.accent
+                                                    border.width: 2
+                                                    border.color: theme.darkBackground
+                                                    Text {
+                                                        anchors.centerIn: parent
+                                                        text: modelData.unreadCount > 9 ? "9+" : modelData.unreadCount
+                                                        font.pixelSize: 9
+                                                        font.bold: true
+                                                        color: "#ffffff"
+                                                    }
+                                                }
+
+                                                // Subtle pin badge when explicitly pinned
+                                                Rectangle {
+                                                    objectName: "pinnedTilePinBadge"
+                                                    visible: Boolean(modelData.isPinned)
+                                                    anchors.right: parent.right
+                                                    anchors.bottom: parent.bottom
+                                                    anchors.rightMargin: -2
+                                                    anchors.bottomMargin: -2
+                                                    width: 15
+                                                    height: 15
+                                                    radius: 7.5
+                                                    color: theme.darkBackground
+                                                    border.width: 1
+                                                    border.color: theme.accent
+                                                    Text {
+                                                        anchors.centerIn: parent
+                                                        text: "📌"
+                                                        font.pixelSize: 8
+                                                    }
                                                 }
                                             }
-                               
-                                            // Subtle pin badge when explicitly pinned (vs recent backfill)
-                                            Rectangle {
-                                                objectName: "pinnedTilePinBadge"
-                                                visible: Boolean(modelData.isPinned)
-                                                anchors.right: parent.right
-                                                anchors.bottom: parent.bottom
-                                                anchors.rightMargin: -2
-                                                anchors.bottomMargin: -2
-                                                width: 15
-                                                height: 15
-                                                radius: 7.5
-                                                color: theme.darkBackground
-                                                border.width: 1
-                                                border.color: theme.accent
-                                                Text {
-                                                    anchors.centerIn: parent
-                                                    text: "📌"
-                                                    font.pixelSize: 8
-                                                }
+
+                                            Text {
+                                                Layout.alignment: Qt.AlignHCenter
+                                                Layout.maximumWidth: Math.max(60, parent.parent.width - 6)
+                                                elide: Text.ElideRight
+                                                horizontalAlignment: Text.AlignHCenter
+                                                text: modelData.shortTitle || modelData.title || ""
+                                                font.pixelSize: theme.fontSize - 4
+                                                font.bold: modelData.guid === backend.selectedChatGuid || (modelData.unreadCount || 0) > 0
+                                                color: modelData.guid === backend.selectedChatGuid ? theme.accent : theme.foreground
                                             }
                                         }
 
-                                        Text {
-                                            Layout.alignment: Qt.AlignHCenter
-                                            Layout.maximumWidth: 64
-                                            elide: Text.ElideRight
-                                            horizontalAlignment: Text.AlignHCenter
-                                            text: modelData.shortTitle || modelData.title || ""
-                                            font.pixelSize: theme.fontSize - 4
-                                            font.bold: modelData.guid === backend.selectedChatGuid || (modelData.unreadCount || 0) > 0
-                                            color: modelData.guid === backend.selectedChatGuid ? theme.accent : theme.foreground
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        id: pinTileMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: function(mouse) {
-                                            if (mouse.button === Qt.RightButton) {
-                                                // Same menu as the chat list (with Unpin)
-                                                var p = pinTileMouse.mapToItem(root.contentItem, mouse.x, mouse.y)
-                                                chatContextMenuPopup.openForChat(modelData, p.x, p.y)
-                                            } else {
-                                                var win = root
-                                                var pinGuid = modelData.guid
-                                                backend.selectChat(pinGuid)
-                                                if (win) Qt.callLater(function() { win.focusAndScrollChat() })
+                                        MouseArea {
+                                            id: pinTileMouse
+                                            anchors.fill: parent
+                                            hoverEnabled: true
+                                            acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: function(mouse) {
+                                                if (mouse.button === Qt.RightButton) {
+                                                    // Same menu as the chat list (with Unpin)
+                                                    var p = pinTileMouse.mapToItem(root.contentItem, mouse.x, mouse.y)
+                                                    chatContextMenuPopup.openForChat(modelData, p.x, p.y)
+                                                } else {
+                                                    var win = root
+                                                    var pinGuid = modelData.guid
+                                                    backend.selectChat(pinGuid)
+                                                    if (win) Qt.callLater(function() { win.focusAndScrollChat() })
+                                                }
                                             }
                                         }
                                     }
@@ -5353,6 +5371,41 @@ ApplicationWindow {
                                 MouseArea {
                                     anchors.fill: parent
                                     onClicked: root.clearActionMenu()
+                                }
+                            }
+                        }
+
+                        // Resend button for failed outgoing messages (macOS Messages-style)
+                        RowLayout {
+                            visible: Boolean(modelData.isFromMe && modelData.isFailed && (modelData.text || "").trim().length > 0)
+                            Layout.alignment: Qt.AlignRight
+                            Layout.topMargin: 2
+                            spacing: 6
+
+                            Rectangle {
+                                objectName: "resendMessageBtn"
+                                height: 24
+                                implicitWidth: resendLabel.implicitWidth + 16
+                                radius: 12
+                                color: resendMouse.containsMouse ? theme.red : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
+                                border.width: 1
+                                border.color: theme.red
+
+                                Text {
+                                    id: resendLabel
+                                    anchors.centerIn: parent
+                                    text: "↻ " + i18n.tr("Resend")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: resendMouse.containsMouse ? "#ffffff" : theme.red
+                                }
+
+                                MouseArea {
+                                    id: resendMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.resendMessage(backend.selectedChatGuid, modelData.guid || "", modelData.text || "")
                                 }
                             }
                         }
@@ -10063,6 +10116,7 @@ ApplicationWindow {
                 ColumnLayout {
                     id: serverSyncSection
                     objectName: "serverSyncSection"
+                    property bool advancedServerExpanded: false
                     visible: root.settingsActiveTab === "server"
                     Layout.fillWidth: true
                     spacing: 12
@@ -10514,10 +10568,45 @@ ApplicationWindow {
                     }
                 }
 
-                // Primary Server URL + Port
+                // Collapsible Advanced Settings Toggle (keeps startup/settings clean: BluePill Cloud + Tailscale first)
+                Rectangle {
+                    id: advancedServerToggleBtn
+                    objectName: "advancedServerToggleBtn"
+                    Layout.fillWidth: true
+                    height: 36
+                    radius: 8
+                    color: advancedToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: serverSyncSection.advancedServerExpanded ? theme.accent : theme.muted
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 8
+                        Text {
+                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Advanced Settings (Manual Server URL, Port & Failover)")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+                    }
+                    MouseArea {
+                        id: advancedToggleMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
+                    }
+                }
+
+                // Primary Server URL + Port (inside Advanced Settings)
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
+                    visible: serverSyncSection.advancedServerExpanded
                     // ssh://... or scheme-less user@host (same rule as the backend)
                     readonly property bool isSshUrl: backend.isSshStyleServerUrl(serverUrlInput.text)
                     id: primaryServerFields
@@ -10652,10 +10741,11 @@ ApplicationWindow {
                     }
                 }
 
-                // Secondary / Failover Server URL
+                // Secondary / Failover Server URL (inside Advanced Settings)
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
+                    visible: serverSyncSection.advancedServerExpanded
                     Text {
                         Layout.fillWidth: true
                         text: i18n.tr("Failover Server URL (Optional)")
@@ -10703,10 +10793,11 @@ ApplicationWindow {
                     }
                 }
 
-                // API Password / Key
+                // API Password / Key (visible when Advanced is expanded or when user has a non-Cloud server selected)
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
+                    visible: serverSyncSection.advancedServerExpanded || !backend.cloudLoggedIn
                     Text {
                         Layout.fillWidth: true
                         text: i18n.tr("API Password / Key")
@@ -11776,7 +11867,7 @@ ApplicationWindow {
                             Text {
                                 id: confirmClientTxt
                                 anchors.centerIn: parent
-                                text: i18n.tr("Confirm & Update App")
+                                text: backend.silentAutoUpdateSupported ? i18n.tr("Update & Restart") : i18n.tr("Confirm & Update App")
                                 font.pixelSize: theme.fontSize - 2
                                 font.bold: true
                                 color: theme.onAccent

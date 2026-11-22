@@ -57,7 +57,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.8"
+VERSION = "1.2.9"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600

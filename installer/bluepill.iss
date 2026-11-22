@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.2.8"
+  #define AppVersion "1.2.9"
 #endif
 
 #ifndef DistDir
@@ -28,7 +28,10 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-PrivilegesRequired=admin
+PrivilegesRequired=lowest
+PrivilegesRequiredOverridesAllowed=dialog
+CloseApplications=yes
+RestartApplications=yes
 ChangesEnvironment=no
 
 [Languages]

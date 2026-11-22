@@ -4103,19 +4103,20 @@ private slots:
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
         b.loadDemoData();
 
-        // With pinnedRowFillRecent == true (default), 3 Mac pins + 1 recent backfill = 4 slots
-        QCOMPARE(b.pinnedRowFillRecent(), true);
-        const QVariantList defaultSlots = b.pinnedChats();
-        QCOMPARE(defaultSlots.size(), 4);
-        QCOMPARE(defaultSlots.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
-        QCOMPARE(defaultSlots.at(3).toMap().value(QStringLiteral("isPinned")).toBool(), false);
-
-        // With pinnedRowFillRecent == false, the row shows only explicit Mac/user pins
-        b.setPinnedRowFillRecent(false);
+        // Default pinnedRowFillRecent == false: only explicit Mac/user pins are shown (no recent backfill)
+        QCOMPARE(b.pinnedRowFillRecent(), false);
         const QVariantList macPins = b.pinnedChats();
         QCOMPARE(macPins.size(), 3);
         QCOMPARE(macPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
         const QString alexGuid = macPins.first().toMap().value(QStringLiteral("guid")).toString();
+
+        // With pinnedRowFillRecent == true (opt-in), 3 Mac pins + 1 recent backfill = 4 slots
+        b.setPinnedRowFillRecent(true);
+        const QVariantList filledSlots = b.pinnedChats();
+        QCOMPARE(filledSlots.size(), 4);
+        QCOMPARE(filledSlots.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
+        QCOMPARE(filledSlots.at(3).toMap().value(QStringLiteral("isPinned")).toBool(), false);
+        b.setPinnedRowFillRecent(false);
 
         // No Mac pins and none added here (when pinnedRowFillRecent == false): the row is empty
         b.setMacPins({});
@@ -6989,6 +6990,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(b.pendingDeliveryCountForTest(), 1, 8000);
 
         // Once a later incoming reply arrives, pend-fresh-2 expires locally without another network query
+        const int queryCountBeforeLocalExpiry = queryCount;
         QJsonObject laterReply{
             {QStringLiteral("guid"), QStringLiteral("later-reply-batch-1")},
             {QStringLiteral("text"), QStringLiteral("Reply arrived")},
@@ -6999,7 +7001,7 @@ private slots:
         b.ingestMessagesForTest(QJsonArray{laterReply}, false);
         b.checkPendingDeliveryStatusesForTest();
         QCOMPARE(b.pendingDeliveryCountForTest(), 0);
-        QCOMPARE(queryCount, 1);
+        QCOMPARE(queryCount, queryCountBeforeLocalExpiry);
     }
 
     void testVoiceMemoCapturePreviewCancelAndPlayback() {
@@ -10587,11 +10589,13 @@ private slots:
         QCOMPARE(b.historySyncDays(), 60);
         QCOMPARE(b.showTopBarStatusPill(), false);
         QCOMPARE(b.showPinnedRow(), true);
-        QCOMPARE(b.pinnedRowFillRecent(), true);
+        QCOMPARE(b.pinnedRowFillRecent(), false);
         QCOMPARE(b.hoverMessageActions(), true);
 
-        // 2. pinnedChats 4-slot recent backfill (0 pinned -> 4 recent; 1 pinned -> 1 pinned + 3 recent; false -> only pinned)
+        // 2. pinnedChats: default shows only explicit pins; opt-in pinnedRowFillRecent == true backfills 4 slots
         b.setMacPins({});
+        QCOMPARE(b.pinnedChats().size(), 0);
+        b.setPinnedRowFillRecent(true);
         QVariantList fill0 = b.pinnedChats();
         QCOMPARE(fill0.size(), 4);
         for (const QVariant &v : fill0) {
@@ -10615,7 +10619,6 @@ private slots:
         QCOMPARE(explicitOnly.size(), 1);
         QCOMPARE(explicitOnly.at(0).toMap().value(QStringLiteral("guid")).toString(), thirdChatGuid);
         QCOMPARE(explicitOnly.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
-        b.setPinnedRowFillRecent(true);
 
         // 3. Load Main.qml and verify ThemedComboBox pre-populated "60 days", Settings banner/tabs/toggles, top bar status pill, sidebar 4 hover buttons + tooltips, and custom emoji tapbacks
         Theme theme;

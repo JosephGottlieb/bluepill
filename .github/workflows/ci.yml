@@ -312,6 +312,21 @@ jobs:
                   Copy-Item $_.FullName build-win-dist\ -Force
               }
           }
+          # Bundle ffmpeg.exe + ffplay.exe (and any sibling DLLs) so Windows plays iMessage .caf/.m4a/.wav audio messages inline
+          foreach ($tool in @("ffmpeg", "ffplay")) {
+              $cmd = Get-Command $tool -ErrorAction SilentlyContinue
+              if ($cmd -and (Test-Path $cmd.Source)) {
+                  $realPath = (Get-Item $cmd.Source).Target
+                  if (-not $realPath -or -not (Test-Path $realPath)) { $realPath = $cmd.Source }
+                  $chocoFfmpegBin = "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\$tool.exe"
+                  if (Test-Path $chocoFfmpegBin) { $realPath = $chocoFfmpegBin }
+                  Copy-Item $realPath "build-win-dist\$tool.exe" -Force
+                  $toolDir = Split-Path $realPath -Parent
+                  Get-ChildItem -Path $toolDir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
+                      Copy-Item $_.FullName build-win-dist\ -Force
+                  }
+              }
+          }
 
           $env:QT_QPA_PLATFORM = "offscreen"
           & build-win-dist\bluepill.exe --version

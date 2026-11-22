@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
 #endif
         QCoreApplication app(argc, argv);
         app.setApplicationName(QStringLiteral("imsg"));
-        app.setApplicationVersion(QStringLiteral("1.2.8"));
+        app.setApplicationVersion(QStringLiteral("1.2.9"));
         Backend backend(false);
         const bool asJson = rawArgs.contains(QStringLiteral("--json"));
         const QString cmd = rawArgs.first();
@@ -134,7 +134,7 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("imsg"));
-    app.setApplicationVersion(QStringLiteral("1.2.8"));
+    app.setApplicationVersion(QStringLiteral("1.2.9"));
     app.setDesktopFileName(QStringLiteral("bluepill"));
     app.setWindowIcon(QIcon(QStringLiteral(":/bluepill.svg")));
     app.setOrganizationName(QStringLiteral("Omarchy"));

@@ -550,7 +550,7 @@ void Backend::setStateFilePath(const QString &path) {
     m_historySyncDays = 60;
     m_showTopBarStatusPill = false;
     m_showPinnedRow = true;
-    m_pinnedRowFillRecent = true;
+    m_pinnedRowFillRecent = false;
     m_hoverMessageActions = true;
     m_stayOnHomePage = false;
     m_mutedChats.clear();
@@ -637,7 +637,7 @@ void Backend::loadAppState() {
         m_showPinnedRow = obj.value(QStringLiteral("showPinnedRow")).toBool(true);
     }
     if (obj.contains(QStringLiteral("pinnedRowFillRecent"))) {
-        m_pinnedRowFillRecent = obj.value(QStringLiteral("pinnedRowFillRecent")).toBool(true);
+        m_pinnedRowFillRecent = obj.value(QStringLiteral("pinnedRowFillRecent")).toBool(false);
     }
     if (obj.contains(QStringLiteral("hoverMessageActions"))) {
         m_hoverMessageActions = obj.value(QStringLiteral("hoverMessageActions")).toBool(true);
@@ -2375,7 +2375,7 @@ void Backend::checkForCloudUpdates(bool manual) {
             return;
         }
         QNetworkReply *srvReply = manual ? m_nam.post(srvReq, QByteArray("{}")) : m_nam.get(srvReq);
-        connect(srvReply, &QNetworkReply::finished, this, [this, srvReply, epGen]() {
+        connect(srvReply, &QNetworkReply::finished, this, [this, srvReply, epGen, manual]() {
             srvReply->deleteLater();
             m_updateChecking = false;
             if (epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
@@ -2392,13 +2392,30 @@ void Backend::checkForCloudUpdates(bool manual) {
                 m_updateApplying = data.value(QStringLiteral("applying")).toBool(false);
             }
             if (anyUpdateAvailable()) {
-                m_updateStatusText = QStringLiteral("Stable update ready — review and confirm below.");
+                if (clientUpdateAvailable() && serverUpdateAvailable()) {
+                    m_updateStatusText = QStringLiteral("Client (v%1) & Mac Server (v%2) updates ready.").arg(m_clientLatestVersion, m_serverLatestVersion);
+                } else if (clientUpdateAvailable()) {
+                    m_updateStatusText = QStringLiteral("Client update v%1 ready.").arg(m_clientLatestVersion);
+                } else {
+                    m_updateStatusText = QStringLiteral("Mac Server update v%1 ready.").arg(m_serverLatestVersion);
+                }
+                if (!manual) {
+                    emit toastMessage(QStringLiteral("↑ ") + m_updateStatusText);
+                }
             } else {
                 m_updateStatusText = QStringLiteral("Up to date.");
             }
             emit updateStateChanged();
         });
     });
+}
+
+bool Backend::silentAutoUpdateSupported() const {
+#ifdef Q_OS_WIN
+    return QFileInfo(QCoreApplication::applicationDirPath()).isWritable();
+#else
+    return false;
+#endif
 }
 
 void Backend::confirmClientUpdate() {
@@ -2443,9 +2460,23 @@ void Backend::confirmClientUpdate() {
         }
         f.write(bytes);
         f.close();
-        QProcess::startDetached(outPath, {});
-        m_updateStatusText = QStringLiteral("Launched BluePill v%1 installer.").arg(m_clientLatestVersion);
-        emit updateStateChanged();
+        if (silentAutoUpdateSupported()) {
+            // Standalone per-user install (%LOCALAPPDATA%\Programs\BluePill): silent zero-admin update + auto-relaunch
+            QProcess::startDetached(outPath, {
+                QStringLiteral("/VERYSILENT"),
+                QStringLiteral("/SUPPRESSMSGBOXES"),
+                QStringLiteral("/NORESTART"),
+                QStringLiteral("/CLOSEAPPLICATIONS"),
+                QStringLiteral("/RESTARTAPPLICATIONS"),
+            });
+            m_updateStatusText = QStringLiteral("Installing BluePill v%1 silently and restarting...").arg(m_clientLatestVersion);
+            emit updateStateChanged();
+            QTimer::singleShot(400, qApp, &QCoreApplication::quit);
+        } else {
+            QProcess::startDetached(outPath, {});
+            m_updateStatusText = QStringLiteral("Launched BluePill v%1 installer.").arg(m_clientLatestVersion);
+            emit updateStateChanged();
+        }
     });
 #else
     const QString targetUrl = m_clientUpdateUrl.isEmpty()
@@ -6858,8 +6889,9 @@ QVariantList Backend::pinnedChats() const {
         map.insert(QStringLiteral("muted"), m_mutedChats.contains(c.guid));
         result.append(map);
     };
-    // The Mac's pins (in its order), minus any unpinned here, then pins added here.
+    // The Mac's pins (in its order), minus any unpinned here, then pins added here (up to 15).
     for (const QString &pinGuid : effectivePinnedChatGuids()) {
+        if (result.size() >= 15) break;
         for (const ChatEntry &c : m_chats) {
             if (c.guid == pinGuid) {
                 appendEntry(c, true);
@@ -9880,30 +9912,50 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                 return;
             }
 
-            // If the Cloud Relay returned a transient 502/503/504 (e.g. Mac tunnel reconnecting),
-            // wait 1.2s and retry the same private-api request once before falling back to AppleScript / chat/new.
-            if (status == 502 || status == 503 || status == 504) {
-                QTimer::singleShot(1200, this, [this, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
-                    QNetworkRequest retryReq = makeRequest(QStringLiteral("/api/v1/message/text"));
-                    retryReq.setPriority(QNetworkRequest::HighPriority);
-                    retryReq.setTransferTimeout(45000);
-                    QNetworkReply *retryReply = m_sendNam.post(retryReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-                    connect(retryReply, &QNetworkReply::finished, this, [this, retryReply, canonicalGuid, sendChatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
-                        retryReply->deleteLater();
-                        if (retryReply->error() == QNetworkReply::NoError && finalizeSentMessage(retryReply->readAll(), tempGuid)) {
+            // If the Cloud Relay returned a transient 502/503/504 or connection drop (e.g. Mac tunnel reconnecting),
+            // retry up to 2 more times with backoff (1.0s, 2.5s = 3 total attempts) before falling back.
+            const bool transientNetErr = (status == 502 || status == 503 || status == 504 ||
+                                          reply->error() == QNetworkReply::RemoteHostClosedError ||
+                                          reply->error() == QNetworkReply::TemporaryNetworkFailureError);
+            if (transientNetErr) {
+                auto attemptRetry = std::make_shared<std::function<void(int)>>();
+                *attemptRetry = [this, attemptRetry, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, extractSendError, sendViaNewChat, finishSendTrack](int attemptNum) {
+                    const int delayMs = (attemptNum == 1) ? 1000 : 2500;
+                    QTimer::singleShot(delayMs, this, [this, attemptRetry, attemptNum, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, extractSendError, sendViaNewChat, finishSendTrack]() {
+                        QNetworkRequest retryReq = makeRequest(QStringLiteral("/api/v1/message/text"));
+                        retryReq.setPriority(QNetworkRequest::HighPriority);
+                        retryReq.setTransferTimeout(45000);
+                        QNetworkReply *retryReply = m_sendNam.post(retryReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+                        connect(retryReply, &QNetworkReply::finished, this, [this, retryReply, attemptRetry, attemptNum, canonicalGuid, sendChatGuid, trimmed, tempGuid, finalizeSentMessage, markOptimisticFailed, extractSendError, sendViaNewChat, finishSendTrack]() {
+                            retryReply->deleteLater();
+                            if (retryReply->error() == QNetworkReply::NoError && finalizeSentMessage(retryReply->readAll(), tempGuid)) {
+                                finishSendTrack();
+                                return;
+                            }
+                            const int rStatus = retryReply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+                            const QByteArray retryErr = retryReply->isOpen() ? retryReply->readAll() : QByteArray();
+                            const bool stillTransient = (rStatus == 502 || rStatus == 503 || rStatus == 504 ||
+                                                         retryReply->error() == QNetworkReply::RemoteHostClosedError ||
+                                                         retryReply->error() == QNetworkReply::TemporaryNetworkFailureError);
+                            if (stillTransient && attemptNum < 2) {
+                                (*attemptRetry)(attemptNum + 1);
+                                return;
+                            }
+                            if (!retryErr.contains("Message send failed") && sendChatGuid.contains(QStringLiteral(";-;"))) {
+                                sendViaNewChat();
+                                return;
+                            }
+                            const QString detail = extractSendError(retryErr);
+                            markOptimisticFailed();
+                            if (!detail.isEmpty()) {
+                                emit toastMessage(QStringLiteral("⚠ ") + detail);
+                            }
+                            loadChatMessages(canonicalGuid);
                             finishSendTrack();
-                            return;
-                        }
-                        const QByteArray retryErr = retryReply->isOpen() ? retryReply->readAll() : QByteArray();
-                        if (!retryErr.contains("Message send failed") && sendChatGuid.contains(QStringLiteral(";-;"))) {
-                            sendViaNewChat();
-                            return;
-                        }
-                        markOptimisticFailed();
-                        loadChatMessages(canonicalGuid);
-                        finishSendTrack();
+                        });
                     });
-                });
+                };
+                (*attemptRetry)(1);
                 return;
             }
 
@@ -9946,6 +9998,29 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         }
         finishSendTrack();
     });
+}
+
+void Backend::resendMessage(const QString &chatGuid, const QString &failedGuid, const QString &text) {
+    const QString trimmed = text.trimmed();
+    const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid.isEmpty() ? m_selectedChatGuid : chatGuid);
+    if (canonicalGuid.isEmpty() || trimmed.isEmpty()) return;
+
+    // Remove the failed optimistic row before re-sending so we don't leave a duplicate bubble
+    if (!failedGuid.isEmpty()) {
+        if (m_chatMessagesCache.contains(canonicalGuid)) {
+            m_chatMessagesCache[canonicalGuid].remove(failedGuid);
+        }
+        if (canonicalGuid == m_selectedChatGuid) {
+            for (int i = m_messages.size() - 1; i >= 0; --i) {
+                if (m_messages[i].toMap().value(QStringLiteral("guid")).toString() == failedGuid) {
+                    m_messages.removeAt(i);
+                    emit messagesChanged();
+                    break;
+                }
+            }
+        }
+    }
+    sendMessage(canonicalGuid, trimmed);
 }
 
 void Backend::sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction) {
@@ -13550,24 +13625,64 @@ bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackG
         }
         args << localFile;
     } else {
+#ifdef Q_OS_WIN
+        // Native Windows inline playback fallback when bundled ffplay.exe is unavailable
+        const QString psBin = QStandardPaths::findExecutable(QStringLiteral("powershell"));
+        if (!psBin.isEmpty()) {
+            QString playPath = localFile;
+            const QString ffmpegBin = findBundledOrSystemExecutable(QStringLiteral("ffmpeg"));
+            if (!ffmpegBin.isEmpty() && !localFile.endsWith(QStringLiteral(".wav"), Qt::CaseInsensitive) &&
+                !localFile.endsWith(QStringLiteral(".mp3"), Qt::CaseInsensitive) &&
+                !localFile.endsWith(QStringLiteral(".m4a"), Qt::CaseInsensitive)) {
+                const QString wavPath = QDir::temp().filePath(QStringLiteral("bluepill_play_%1.wav").arg(playbackGen));
+                QProcess conv;
+                conv.start(ffmpegBin, {QStringLiteral("-y"), QStringLiteral("-i"), localFile, QStringLiteral("-ar"), QStringLiteral("44100"), QStringLiteral("-ac"), QStringLiteral("2"), wavPath});
+                if (conv.waitForFinished(8000) && QFileInfo::exists(wavPath)) {
+                    playPath = wavPath;
+                }
+            }
+            bin = psBin;
+            QString escapedPath = playPath;
+            escapedPath.replace(QLatin1Char('\''), QStringLiteral("''"));
+            const QString psScript = QStringLiteral(
+                "Add-Type -AssemblyName PresentationCore; "
+                "$p = New-Object System.Windows.Media.MediaPlayer; "
+                "$p.Open([Uri]'%1'); "
+                "$p.Play(); "
+                "$w = 0; while (-not $p.NaturalDuration.HasTimeSpan -and $w -lt 50) { Start-Sleep -Milliseconds 100; $w++ }; "
+                "$ms = if ($p.NaturalDuration.HasTimeSpan) { [int]$p.NaturalDuration.TimeSpan.TotalMilliseconds } else { 15000 }; "
+                "Start-Sleep -Milliseconds ([Math]::Min([Math]::Max($ms + 250, 500), 600000)); "
+                "$p.Stop(); $p.Close()"
+            ).arg(escapedPath);
+            args << QStringLiteral("-NoProfile") << QStringLiteral("-NonInteractive") << QStringLiteral("-WindowStyle") << QStringLiteral("Hidden") << QStringLiteral("-Command") << psScript;
+        } else {
+            m_audioPlaying = false;
+            m_audioPlaybackTimer.stop();
+            m_audioProgress = 0.0;
+            m_audioPlaybackElapsedMs = 0;
+            m_audioSeekOffsetMs = 0;
+            emit audioPlaybackChanged();
+            emit toastMessage(QStringLiteral("⚠ Unable to play audio attachment on Windows"));
+            return false;
+        }
+#else
         m_audioPlaying = false;
         m_audioPlaybackTimer.stop();
         m_audioProgress = 0.0;
         m_audioPlaybackElapsedMs = 0;
         m_audioSeekOffsetMs = 0;
         emit audioPlaybackChanged();
-#ifdef Q_OS_WIN
-        if (QDesktopServices::openUrl(QUrl::fromLocalFile(localFile))) {
-            return true;
-        }
-        emit toastMessage(QStringLiteral("⚠ Unable to open audio attachment"));
-#else
         emit toastMessage(QStringLiteral("⚠ No audio player found (ffplay/pw-play/paplay)"));
-#endif
         return false;
+#endif
     }
 
     QProcess *proc = new QProcess(this);
+#ifdef Q_OS_WIN
+    proc->setCreateProcessArgumentsModifier([](QProcess::CreateProcessArguments *cpa) {
+        cpa->flags |= 0x08000000; // CREATE_NO_WINDOW — never flash a console window during inline audio playback
+    });
+#endif
     proc->setProcessEnvironment(env);
     m_audioProcess = proc;
     connect(proc, &QProcess::errorOccurred, this,

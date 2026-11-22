@@ -2,6 +2,20 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.9] - 2026-11-22
+
+### Added
+- **Windows Per-User Standalone Installer & Silent Auto-Updates:** Switched Inno Setup to `PrivilegesRequired=lowest` (installing to `%LOCALAPPDATA%\Programs\BluePill` with zero UAC prompts, matching VS Code User Setup) and added silent `/VERYSILENT /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS` updates with automatic relaunch.
+- **Failed Message Auto-Retry & Resend Button:** Transient send errors now retry up to 3 times with backoff (`1.0s`, `2.5s`), and failed outgoing bubbles display a macOS Messages-style `↻ Resend` button.
+- **macOS Messages Automation Check (`bluepill-server doctor` / `preflight`):** Automatically probes `Messages.app` Automation permission on macOS and surfaces actionable error toasts in the desktop client if Automation is denied or pending.
+- **Chunked Cloud Relay Streaming:** Interleaved 256 KiB WebSocket tunnel response chunks eliminate head-of-line blocking and `16 MiB` frame disconnects during large attachment downloads.
+
+### Changed
+- **Windows Inline Audio Message Playback:** Bundled `ffmpeg.exe` + `ffplay.exe` in Windows release/CI builds with hidden-window execution (`CREATE_NO_WINDOW`) plus native Windows MediaPlayer fallback so iMessage `.caf`/`.m4a`/`.wav` audio messages play directly inside the client.
+- **Mac-like Pinned Chats Grid:** Disabled automatic recent-chat backfill by default (`pinnedRowFillRecent=false`) and replaced the stretched single row with a clean 3-column macOS Messages-style grid supporting up to 15 pins.
+- **Streamlined Initial Setup & Settings:** Keeps BluePill Cloud and Tailscale discovery front-and-center while tucking manual Server URL, Port, and Failover fields under a collapsible **Advanced Settings** section.
+- **Clear Client vs. Mac Server Update Prompts:** Top-bar update pill and toast notifications explicitly distinguish whether the Desktop App, Mac Server, or both have updates available.
+
 ## [Unreleased]
 
 ## [1.2.8] - 2026-11-21

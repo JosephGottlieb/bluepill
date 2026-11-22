@@ -81,7 +81,7 @@ brew services start bluepill
 - **Arch Linux / Omarchy (`x86_64` & `aarch64`):** `yay -S bluepill`
 - **Debian / Ubuntu (`.deb`):** Download `bluepill_<version>_amd64.deb` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (`sudo apt install ./bluepill_*.deb`)
 - **Fedora / RHEL (`.rpm`):** Download `bluepill-<version>-1.fc41.x86_64.rpm` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (`sudo dnf install ./bluepill-*.rpm`)
-- **Windows (`x86_64` `.exe`):** Download `BluePill-Setup-<version>-win64.exe` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)**
+- **Windows (`x86_64` `.exe` — Per-User Standalone, No Admin Required):** Download `BluePill-Setup-<version>-win64.exe` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (installs to `%LOCALAPPDATA%\Programs\BluePill` like VS Code User Setup with silent zero-UAC auto-updates and bundled `ffmpeg`/`ffplay` for inline audio message playback)
 
 ```bash
 # Launch the GUI — click "Sign in at bluepill.nertwork.com →" (default) or "Try Live Demo"
@@ -136,7 +136,10 @@ bluepill --webui
 ## Configuring Your Endpoint, Apple Account & Relay Settings
 
 1. **Sign into Apple Messages on your Mac:** Open `Messages.app`, sign in with your Apple Account, and (optionally, for SMS/RCS) enable **Settings → Apps → Messages → Text Message Forwarding** on your iPhone.
-2. **Grant Full Disk Access & Start the Relay:** Enable **Full Disk Access** for your terminal / Python under **System Settings → Privacy & Security → Full Disk Access**, then run `bluepill-server init` and `brew services start bluepill` (config stored in `~/.config/bluepill/server.json`).
+2. **Grant macOS Permissions & Start the Relay:** Under **System Settings → Privacy & Security**, enable:
+   - **Full Disk Access** for Terminal / Homebrew Python (`chat.db`, Notes, Calendar, Photos)
+   - **Automation → Messages** for Python / `bluepill-server` (required for sending when Private API is not enabled)
+   Then run `brew services start bluepill` and verify with `bluepill-server doctor` (`Messages Automation: ok`).
 3. **Connect Your Linux Desktop Client:** Launch `bluepill` and press **`Ctrl+,`** (or click **`⚙ Settings`**) to enter your **Primary Server URL** (`http://<mac-ip>:1235`, `https://your-relay.example.com`, or Direct SSH `ssh://user@mac-host`), optional **Failover URL**, and **API Password**, or pre-configure `~/.config/bluepill/config.json` (`0600`) or environment variables (`BLUEPILL_SERVER_URL`, `BLUEPILL_PASSWORD`).
 
 ### Local Database & Credential Privacy

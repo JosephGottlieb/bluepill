@@ -104,6 +104,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool updateApplying READ updateApplying NOTIFY updateStateChanged)
     Q_PROPERTY(QString updateStatusText READ updateStatusText NOTIFY updateStateChanged)
     Q_PROPERTY(bool anyUpdateAvailable READ anyUpdateAvailable NOTIFY updateStateChanged)
+    Q_PROPERTY(bool silentAutoUpdateSupported READ silentAutoUpdateSupported CONSTANT)
     Q_PROPERTY(QVariantList tailscaleRelays READ tailscaleRelays NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(QString tailscaleStatus READ tailscaleStatus NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(bool tailscaleScanning READ tailscaleScanning NOTIFY tailscaleRelaysChanged)
@@ -383,6 +384,7 @@ public:
     Q_INVOKABLE void toggleChatReadUnread(const QString &chatGuid);
     Q_INVOKABLE void toggleChatRead(const QString &chatGuid) { toggleChatReadUnread(chatGuid); }
     Q_INVOKABLE void sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid = QString());
+    Q_INVOKABLE void resendMessage(const QString &chatGuid, const QString &failedGuid, const QString &text);
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
     Q_INVOKABLE void unsendMessage(const QString &messageGuid, const QString &chatGuid = QString());
@@ -424,6 +426,7 @@ public:
     bool updateApplying() const { return m_updateApplying; }
     QString updateStatusText() const { return m_updateStatusText; }
     bool anyUpdateAvailable() const { return clientUpdateAvailable() || serverUpdateAvailable(); }
+    bool silentAutoUpdateSupported() const;
     Q_INVOKABLE static int compareSemver(const QString &a, const QString &b);
     Q_INVOKABLE void checkForUpdatesNow();
     Q_INVOKABLE void confirmClientUpdate();
@@ -919,7 +922,7 @@ private:
     int m_historySyncDays = 60;
     bool m_showTopBarStatusPill = false;
     bool m_showPinnedRow = true;
-    bool m_pinnedRowFillRecent = true;
+    bool m_pinnedRowFillRecent = false;
     bool m_hoverMessageActions = true;
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;
