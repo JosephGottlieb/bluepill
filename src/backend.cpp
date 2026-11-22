@@ -9809,6 +9809,21 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         }
         emit toastMessage(QStringLiteral("⚠ Message failed to send"));
     };
+    auto extractSendError = [](const QByteArray &raw) -> QString {
+        const QJsonDocument doc = QJsonDocument::fromJson(raw);
+        if (doc.isObject()) {
+            const QJsonObject obj = doc.object();
+            const QString msg = obj.value(QStringLiteral("message")).toString().trimmed();
+            const QString err = obj.value(QStringLiteral("error")).toString().trimmed();
+            if (msg.contains(QStringLiteral("Automation"), Qt::CaseInsensitive) || msg.length() > 24) {
+                return msg;
+            }
+            if (!err.isEmpty() && err != QStringLiteral("Internal Server Error")) {
+                return err;
+            }
+        }
+        return QString();
+    };
 
     auto sendViaNewChat = [this, canonicalGuid, sendChatGuid, trimmed, finalizeSentMessage, markOptimisticFailed, finishSendTrack]() {
         const QString addr = sendChatGuid.section(QStringLiteral(";-;"), 1);
@@ -9844,7 +9859,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     sendReq.setPriority(QNetworkRequest::HighPriority);
     sendReq.setTransferTimeout(45000);
     QNetworkReply *reply = m_sendNam.post(sendReq, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, sendViaNewChat, finishSendTrack]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, canonicalGuid, sendChatGuid, trimmed, tempGuid, payload, finalizeSentMessage, markOptimisticFailed, extractSendError, sendViaNewChat, finishSendTrack]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
             const QByteArray errBytes = reply->isOpen() ? reply->readAll() : QByteArray();
@@ -9855,7 +9870,11 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
                 return;
             }
             if (errBytes.contains("Message send failed") || reply->error() == QNetworkReply::TimeoutError) {
+                const QString detail = extractSendError(errBytes);
                 markOptimisticFailed();
+                if (!detail.isEmpty()) {
+                    emit toastMessage(QStringLiteral("⚠ ") + detail);
+                }
                 loadChatMessages(canonicalGuid);
                 finishSendTrack();
                 return;

@@ -34,6 +34,11 @@ class Bluepill < Formula
         1. bluepill-server login
            (Opens https://bluepill.nertwork.com/portal to link your Mac to BluePill Cloud)
         2. brew services start bluepill
+        3. Grant macOS Permissions (System Settings -> Privacy & Security):
+           - Full Disk Access: allow Terminal / Homebrew Python (reads chat.db, Notes, Calendar, Photos)
+           - Automation -> Messages: allow Python / bluepill-server to control Messages.app (required for sending)
+        4. Verify everything is green:
+           bluepill-server doctor
 
       Cloud Managed Updates (BluePill Cloud Perk):
         When linked to BluePill Cloud, background stable update checks run

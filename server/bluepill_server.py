@@ -1300,11 +1300,50 @@ class BluePillEngine:
             except OSError as exc:
                 warnings.append(f"BlueBubblesHelper.dylib missing at {helper_dylib_path}: {exc}")
 
+        messages_automation_ok = True
+        messages_automation_detail = "ok"
+        if sys.platform == "darwin" and not self.private_api_connected():
+            try:
+                auto_res = subprocess.run(
+                    ["/usr/bin/osascript", "-e", 'tell application "Messages" to count of chats'],
+                    capture_output=True,
+                    text=True,
+                    timeout=3.0,
+                    check=False,
+                )
+                if auto_res.returncode != 0:
+                    err_s = (auto_res.stderr or "").strip()
+                    messages_automation_ok = False
+                    if "-1743" in err_s or "not authorized" in err_s.lower():
+                        messages_automation_detail = (
+                            "Denied (-1743): open System Settings -> Privacy & Security -> Automation, "
+                            "enable Messages for Python / bluepill-server, then run: brew services restart bluepill"
+                        )
+                    else:
+                        messages_automation_detail = err_s or f"osascript exited {auto_res.returncode}"
+                    warnings.append(f"Messages.app Automation check failed: {messages_automation_detail}")
+            except subprocess.TimeoutExpired:
+                messages_automation_ok = False
+                messages_automation_detail = (
+                    "Timed out (3s) — likely waiting for macOS Automation approval popup. "
+                    "Open System Settings -> Privacy & Security -> Automation, enable Messages for Python / bluepill-server, "
+                    "ensure Messages.app is open, then run: brew services restart bluepill"
+                )
+                warnings.append(f"Messages.app Automation check failed: {messages_automation_detail}")
+            except OSError as exc:
+                messages_automation_ok = False
+                messages_automation_detail = str(exc)
+                warnings.append(f"Messages.app Automation check error: {exc}")
+
         status_str = "ok" if not warnings else "warn"
         return {
             "status": status_str,
             "platform": sys.platform,
             "privateApiHelperDylib": helper_dylib_installed,
+            "messagesAutomation": {
+                "ok": messages_automation_ok,
+                "detail": messages_automation_detail,
+            },
             "modules": {
                 "notes": {
                     "enabled": self.enable_notes,
@@ -3540,17 +3579,20 @@ class BluePillEngine:
                 timeout=8.0,
                 check=False,
             )
+            err_txt = ""
             if res.returncode != 0:
                 err_txt = (res.stderr or b"").decode("utf-8", errors="replace").strip()
                 self.logger.warning("[applescript] failed rc=%d err=%s", res.returncode, err_txt)
             try:
                 self._tx_local.last_applescript_state = "confirmed" if res.returncode == 0 else "failed"
+                self._tx_local.last_applescript_error = err_txt
             except Exception:
                 pass
             return res.returncode == 0
         except subprocess.TimeoutExpired as exc:
             try:
                 self._tx_local.last_applescript_state = "timeout"
+                self._tx_local.last_applescript_error = "timeout"
             except Exception:
                 pass
             self.logger.warning("[applescript] timeout (ambiguous delivery): %s", exc)
@@ -3558,6 +3600,7 @@ class BluePillEngine:
         except Exception as exc:
             try:
                 self._tx_local.last_applescript_state = "exception"
+                self._tx_local.last_applescript_error = str(exc)
             except Exception:
                 pass
             self.logger.warning("[applescript] exception: %s", exc)
@@ -4219,13 +4262,22 @@ class BluePillEngine:
             return db_msg
 
         if not sent and sys.platform == "darwin" and os.path.exists(self.db_path):
+            as_state = str(getattr(self._tx_local, "last_applescript_state", "") or "")
+            as_err = str(getattr(self._tx_local, "last_applescript_error", "") or "")
             self.logger.warning(
-                "[send_text] FAILED chat=%s tempGuid=%s method=%s elapsed_ms=%d",
+                "[send_text] FAILED chat=%s tempGuid=%s method=%s as_state=%s elapsed_ms=%d",
                 chat_guid,
                 temp_guid,
                 used_method,
+                as_state or "-",
                 elapsed_ms,
             )
+            if as_state == "timeout" or "-1743" in as_err or "not authorized" in as_err.lower():
+                raise RuntimeError(
+                    "Message send failed: macOS Automation permission for Messages.app is blocked or pending approval. "
+                    "On your Mac, open System Settings -> Privacy & Security -> Automation, enable Messages for Python / bluepill-server, "
+                    "and run: brew services restart bluepill"
+                )
             raise RuntimeError(f"Message send failed for {chat_guid}")
 
         now_ms = int(time.time() * 1000)
@@ -15319,15 +15371,21 @@ def run_status_or_doctor(engine: BluePillEngine, mode: str, as_json: bool) -> in
         print(json.dumps(report))
     else:
         mods = preflight.get("modules") or {}
+        mauto = preflight.get("messagesAutomation") or {}
+        mauto_ok = bool(mauto.get("ok", True))
+        mauto_mark = "✓" if mauto_ok else "!"
         print(f"BluePill Server Doctor (v{VERSION} on {info['os_version']})")
         print(f"  [✓] chat.db readable:      {db_readable} ({engine.db_path}, {chat_count} sampled chats)")
         print(f"  [✓] Contacts resolved:     {len(contacts)}")
         print(f"  [✓] Pinned chats resolved: {len(pins)}")
         print(f"  [✓] Private API helper:    {info['private_api']}")
+        print(f"  [{mauto_mark}] Messages Automation:   {mauto.get('detail', 'ok')}")
         print(f"  [✓] iCloud Notes module:   enabled={mods.get('notes', {}).get('enabled')} (synced={mods.get('notes', {}).get('syncedCount')})")
         print(f"  [✓] iCloud Calendar mod:   enabled={mods.get('calendar', {}).get('enabled')} (events={mods.get('calendar', {}).get('syncedEventsCount')})")
         print(f"  [✓] iCloud Photos module:  enabled={mods.get('photos', {}).get('enabled')} (assets={mods.get('photos', {}).get('assetCount')}, derivatives={mods.get('photos', {}).get('localDerivativesCount')})")
         print(f"  [✓] Server log file:       {engine.log_file_path}")
+        for w in preflight.get("warnings") or []:
+            print(f"  [!] Warning: {w}")
     return 0
 
 
