@@ -3048,6 +3048,30 @@ ApplicationWindow {
                                     }
                                 }
                             }
+                            Rectangle {
+                                objectName: "welcomeTailscaleSetupBtn"
+                                Layout.fillWidth: true
+                                height: 34
+                                radius: 8
+                                color: "transparent"
+                                border.width: 1
+                                border.color: theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "🔗 " + i18n.tr("Or connect to a Mac on Tailscale / Local Network")
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.foreground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.settingsActiveTab = "server"
+                                        root.showServerConfigModal = true
+                                        backend.discoverTailscaleRelays()
+                                    }
+                                }
+                            }
                         }
                         Rectangle {
                             id: welcomeCloudPendingBox

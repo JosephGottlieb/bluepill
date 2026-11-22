@@ -53,3 +53,16 @@ Name: "{autodesktop}\BluePill"; Filename: "{app}\bluepill.exe"; Tasks: desktopic
 
 [Run]
 Filename: "{app}\bluepill.exe"; Description: "{cm:LaunchProgram,BluePill}"; Flags: nowait postinstall skipifsilent
+
+[Code]
+procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
+begin
+  if (CurUninstallStep = usPostUninstall) and (not UninstallSilent) then
+  begin
+    if MsgBox('Remove BluePill saved settings, sign-in credentials, and local message cache?', mbConfirmation, MB_YESNO or MB_DEFBUTTON2) = IDYES then
+    begin
+      DelTree(ExpandConstant('{userappdata}\bluepill'), True, True, True);
+      DelTree(ExpandConstant('{localappdata}\bluepill'), True, True, True);
+    end;
+  end;
+end;
