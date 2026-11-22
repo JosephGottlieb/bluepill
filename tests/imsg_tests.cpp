@@ -4629,7 +4629,10 @@ private slots:
         QCoreApplication::processEvents();
         QCOMPARE(urlIn->property("text").toString(), QString());
 
-        // Cleartext warning: shown for a public http:// host, hidden for LAN/Tailscale
+        // Cleartext warning: expand Advanced Settings, shown for a public http:// host, hidden for LAN/Tailscale
+        if (QObject *srvSec = root->findChild<QObject *>(QStringLiteral("serverSyncSection"))) {
+            srvSec->setProperty("advancedServerExpanded", true);
+        }
         QObject *warn = root->findChild<QObject *>(QStringLiteral("serverUrlCleartextWarning"));
         QVERIFY(warn);
         urlIn->setProperty("text", QStringLiteral("http://relay.example.com"));
