@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
 #ifdef Q_OS_WIN
         attachParentConsoleForCli();
 #endif
-        std::cout << "bluepill 1.2.8 (imsg compatible)\n"
+        std::cout << "bluepill 1.2.9 (imsg compatible)\n"
                   << "Usage: bluepill [options|command]\n\n"
                   << "Options:\n"
                   << "  -h, --help                         Show this help message and exit\n"
@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
 #ifdef Q_OS_WIN
         attachParentConsoleForCli();
 #endif
-        std::cout << "bluepill 1.2.8 (imsg compatible)" << std::endl;
+        std::cout << "bluepill 1.2.9 (imsg compatible)" << std::endl;
         return 0;
     }
     if (rawArgs.contains(QStringLiteral("--webui")) || (!rawArgs.isEmpty() && rawArgs.first() == QStringLiteral("webui"))) {
