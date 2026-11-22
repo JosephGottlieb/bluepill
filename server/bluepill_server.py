@@ -15422,18 +15422,82 @@ def run_relay_setup_cli(args: argparse.Namespace, engine: BluePillEngine) -> int
     relay_pw = str(getattr(args, "relay_password", "") or "").strip()
 
     interactive = sys.stdin.isatty() and not getattr(args, "json", False)
-    if is_login_cmd and not getattr(args, "json", False):
-        print("BluePill Cloud Login — https://bluepill.nertwork.com/portal")
-        if interactive and sys.platform == "darwin":
-            try:
-                ans = input("Open https://bluepill.nertwork.com/portal in your browser? [Y/n]: ").strip().lower()
-                if ans in ("", "y", "yes"):
-                    subprocess.run(["open", "https://bluepill.nertwork.com/portal"], check=False)
-            except (EOFError, KeyboardInterrupt):
-                print()
-                return 1
+    if is_login_cmd and not explicit_token and not getattr(args, "json", False):
+        # Zero-copy-paste RFC 8252 browser loopback SSO (just like `gh auth login` & BluePill Desktop)
+        state = secrets.token_hex(16)
+        auth_result: Dict[str, str] = {}
+        auth_done = threading.Event()
 
-    if interactive and (not token or (is_login_cmd and not explicit_token)):
+        class _LoginCallbackHandler(BaseHTTPRequestHandler):
+            def log_message(self, format: str, *log_args: Any) -> None:  # noqa: A002
+                return
+
+            def do_GET(self) -> None:
+                p = urllib.parse.urlparse(self.path)
+                if p.path != "/callback":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                qs = urllib.parse.parse_qs(p.query)
+                got_code = (qs.get("code") or [""])[0].strip()
+                got_state = (qs.get("state") or [""])[0].strip()
+                if not got_code or got_state != state:
+                    self.send_response(400)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.end_headers()
+                    self.wfile.write(b"<h2>BluePill Login Failed</h2><p>Invalid or mismatched state. Please retry <code>bluepill-server login</code>.</p>")
+                    return
+                auth_result["code"] = got_code
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.end_headers()
+                self.wfile.write(
+                    b"<!doctype html><html><body style='font-family:-apple-system,sans-serif;text-align:center;padding:48px;background:#0b1220;color:#f8fafc;'>"
+                    b"<h1>&#10003; Mac Linked to BluePill Cloud</h1>"
+                    b"<p>You can close this tab and return to Terminal.</p></body></html>"
+                )
+                auth_done.set()
+
+        cb_server = HTTPServer(("127.0.0.1", 0), _LoginCallbackHandler)
+        cb_port = cb_server.server_address[1]
+        cb_thread = threading.Thread(target=lambda: cb_server.handle_request(), daemon=True)
+        cb_thread.start()
+
+        cloud_web_base = os.environ.get("BLUEPILL_CLOUD_WEB_URL", "https://bluepill.nertwork.com").rstrip("/")
+        cloud_api_base = os.environ.get("BLUEPILL_CLOUD_API_URL", "https://api.bluepill.nertwork.com").rstrip("/")
+        auth_url = f"{cloud_web_base}/portal/desktop-auth?port={cb_port}&state={state}"
+        print("BluePill Cloud Login — opening browser for 1-click Google / GitHub / Email sign-in...")
+        print(f"  If your browser didn't open, visit:\n  {auth_url}")
+        if sys.platform == "darwin":
+            subprocess.run(["open", auth_url], check=False)
+        elif sys.platform.startswith("linux"):
+            subprocess.run(["xdg-open", auth_url], check=False)
+
+        if auth_done.wait(timeout=180.0) and auth_result.get("code"):
+            cb_server.server_close()
+            try:
+                ex_req = urllib.request.Request(
+                    f"{cloud_api_base}/api/v1/auth/desktop/exchange",
+                    data=json.dumps({"code": auth_result["code"], "state": state, "provision_tunnel": True}).encode("utf-8"),
+                    headers={"Content-Type": "application/json", "User-Agent": f"bluepill-server/{VERSION}"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(ex_req, timeout=20.0) as ex_resp:
+                    ex_data = json.loads(ex_resp.read().decode("utf-8"))
+                if ex_data.get("ok") and ex_data.get("tunnel_token"):
+                    token = str(ex_data["tunnel_token"]).strip()
+                    url = str(ex_data.get("tunnel_url") or url or DEFAULT_CLOUD_RELAY_URL).strip()
+                    relay_pw = str(ex_data.get("relay_password") or "").strip()
+                    print(f"✓ Authenticated as {ex_data.get('email')} ({ex_data.get('server_url')})")
+                else:
+                    print(f"Cloud login exchange failed: {ex_data.get('error') or 'no tunnel_token returned'}", file=sys.stderr)
+            except Exception as exc:
+                print(f"Cloud login exchange failed: {exc}", file=sys.stderr)
+        else:
+            cb_server.server_close()
+            print("Timed out waiting for browser login — falling back to manual token prompt.")
+
+    if interactive and (not token or (is_login_cmd and not explicit_token and not token)):
         hint = " (leave blank to keep existing)" if token else ""
         try:
             entered_tok = input(f"Cloud Relay Token{hint}: ").strip()
