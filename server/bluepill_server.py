@@ -1302,7 +1302,7 @@ class BluePillEngine:
 
         messages_automation_ok = True
         messages_automation_detail = "ok"
-        if sys.platform == "darwin" and not self.private_api_connected():
+        if sys.platform == "darwin" and not bool(getattr(self, "_helper_clients", None)):
             try:
                 auto_res = subprocess.run(
                     ["/usr/bin/osascript", "-e", 'tell application "Messages" to count of chats'],
