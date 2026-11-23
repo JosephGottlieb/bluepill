@@ -25,7 +25,7 @@
   <a href="https://github.com/sponsors/nertwork"><img src="https://img.shields.io/badge/Sponsor_on_GitHub-%E2%9D%A4%EF%B8%8F_nertwork-ea4aaa?logo=githubsponsors&logoColor=white" alt="Sponsor on GitHub" /></a>
   <a href="https://github.com/nertwork/bluepill/actions/workflows/ci.yml"><img src="https://github.com/nertwork/bluepill/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/nertwork/bluepill/releases/latest"><img src="https://img.shields.io/github/v/release/nertwork/bluepill?color=0a84ff&label=Release" alt="Release" /></a>
-  <a href="https://aur.archlinux.org/packages/bluepill"><img src="https://img.shields.io/badge/Arch_Linux-AUR_bluepill-1793d1?logo=arch-linux&logoColor=white" alt="AUR Package" /></a>
+  <a href="https://aur.archlinux.org/packages/bluepill-bin"><img src="https://img.shields.io/badge/Arch_Linux-AUR_bluepill--bin-1793d1?logo=arch-linux&logoColor=white" alt="AUR Binary Package" /></a>
   <a href="https://github.com/nertwork/homebrew-tap"><img src="https://img.shields.io/badge/Homebrew-nertwork%2Ftap%2Fbluepill-FBB040?logo=homebrew&logoColor=white" alt="Homebrew Tap" /></a>
   <a href="https://coderabbit.ai"><img src="https://img.shields.io/coderabbit/prs/github/nertwork/bluepill?utm_source=oss&utm_medium=github&utm_campaign=nertwork%2Fbluepill&labelColor=171717&color=FF570A&label=CodeRabbit+Reviews" alt="CodeRabbit Pull Request Reviews" /></a>
   <a href="https://github.com/nertwork/bluepill/graphs/contributors"><img src="https://img.shields.io/github/contributors/nertwork/bluepill?color=0a84ff&label=Contributors" alt="Contributors" /></a>
@@ -36,7 +36,7 @@
 
 1. **Native Linux & Windows Desktop Client (`bluepill`):** A fast (~48 MB RSS), zero-Electron, zero-Flutter **C++20 and Qt6/QML** desktop application for **Linux** (Arch/Omarchy AUR, Debian/Ubuntu `.deb`, Fedora/RHEL `.rpm`) and **Windows** (`BluePill-Setup-*.exe`) with **0ms local cache startup**, real-time **Socket.IO v4 push**, **Pinned Conversations**, **1-click 2FA OTP copy pills**, **built-in Photo Lightbox**, and live Omarchy theme hot-reloading.
 2. **Headless macOS Relay Daemon (`bluepill-server` / `brew install nertwork/tap/bluepill`):** A lightweight (~18 MB RSS), zero-Electron macOS daemon that reads `~/Library/Messages/chat.db` directly in SQLite WAL mode (`<2ms` queries), decodes `attributedBody` typedstreams natively, resolves `AddressBook` contacts in `<5ms`, includes **built-in BluePill Cloud Relay** (`wss://api.bluepill.nertwork.com/tunnel/connect`, zero port-forwarding), and supports both **Full `IMCore` Private API mode** and **Zero-SIP `osascript` Gateway mode** — while remaining **100% API-compatible with legacy BlueBubbles Server (`1.9.x`)**.
-3. **Unified BluePill Web Client (`http://<mac-relay>:1235/web` or `https://bluepill.nertwork.com/demo`):** A zero-install, single-file browser client with **Liquid Glass / Matrix / Light** theme switching, unified **Messages, Notes, Calendar, Photos, and Contacts** tabs, inline tapbacks, 1-click 2FA OTP copy pills, and real-time Socket.IO updates.
+3. **Unified BluePill Web Client (`http://<mac-relay>:1235/web`, `https://bluepill.nertwork.com/t/<slug>/web`, or `https://bluepill.nertwork.com/demo`):** A zero-install, single-file browser client with **Liquid Glass / Matrix / Light** theme switching, **auto-populated relay credentials when signed in**, **3-column pinned chats grid**, **inline `<audio>` / `<video>` playback**, **auto-retry + `↻ Resend`**, unified **Messages, Notes, Calendar, Photos, and Contacts** tabs, inline tapbacks, 1-click 2FA OTP copy pills, and real-time Socket.IO updates.
 
 ---
 
@@ -78,10 +78,10 @@ brew services start bluepill
 
 ### 2. Desktop Client & CLI Setup (Linux & Windows)
 
-- **Arch Linux / Omarchy (`x86_64` & `aarch64`):** `yay -S bluepill`
+- **Arch Linux / Omarchy (`x86_64`):** `yay -S bluepill-bin` *(fast prebuilt binary, ~4s install; or `yay -S bluepill` to compile from source on `x86_64`/`aarch64`)*
 - **Debian / Ubuntu (`.deb`):** Download `bluepill_<version>_amd64.deb` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (`sudo apt install ./bluepill_*.deb`)
 - **Fedora / RHEL (`.rpm`):** Download `bluepill-<version>-1.fc41.x86_64.rpm` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (`sudo dnf install ./bluepill-*.rpm`)
-- **Windows (`x86_64` `.exe` — Per-User Standalone, No Admin Required):** Download `BluePill-Setup-<version>-win64.exe` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (installs to `%LOCALAPPDATA%\Programs\BluePill` like VS Code User Setup with silent zero-UAC auto-updates and bundled `ffmpeg`/`ffplay` for inline audio message playback)
+- **Windows (`x86_64` `.exe` — Per-User Standalone, No Admin Required):** Download `BluePill-Setup-<version>-win64.exe` from **[GitHub Releases](https://github.com/nertwork/bluepill/releases/latest)** (~53 MB; installs to `%LOCALAPPDATA%\Programs\BluePill` like VS Code User Setup with silent zero-UAC auto-updates, native in-process `Qt6::Multimedia` audio playback, and optional settings cleanup on uninstall)
 
 ```bash
 # Launch the GUI — click "Sign in at bluepill.nertwork.com →" (default) or "Try Live Demo"
@@ -119,7 +119,7 @@ bluepill --webui
 - **Customizable Notifications, 6 Audio Ding Presets & Top-Left Red/Green Connection Indicator:**
   - Eliminates spurious startup/historical/self-echo audio alerts via startup baseline (`m_initialSyncComplete`, `m_startupTimestamp`, `m_startupHighestRowId`), persistent `notifiedMessageGuids` in `state.json`, and active-chat focus mute (`notificationMuteWhenActive`).
   - Configurable in **`⚙ Settings` (`Ctrl+,`) -> Notifications & Audio Ding** with toggles for **Desktop Banner**, **Audio Ding**, and **Mute Focused Chat**, **6 built-in synthesized `.wav` presets** (`Classic Chime`, `Crystal Ding`, `Tri-Tone Marimba`, `Soft Pop`, `Glass Ping`, `System Tone`), **`🔊 Preview Ding`**, and **`🔔 Test Alert`**.
-  - Top-left connection dot (and optional `showTopBarStatusPill` status pill) turn **Red (`Disconnected`)** immediately when offline and **Green (`Connected`)** when online, while **`⚙ Settings` (`Ctrl+,`)** includes a live **Client/Relay Version Banner**, **Server & Sync / UI & Appearance / Notifications & Audio** section tabs, configurable **4-slot Pinned Row Recent Backfill** (`pinnedRowFillRecent`), sidebar **`📌` Pin/Unpin** hover action with tooltips on all 4 hover actions, **Hover Tapback Action Bar** (`hoverMessageActions`), and **`➕` Custom Emoji Tapbacks**.
+  - Top-left connection dot (and optional `showTopBarStatusPill` status pill) turn **Red (`Disconnected`)** immediately when offline and **Green (`Connected`)** when online, while the macOS Messages-inspired UI keeps the top bar minimal (compact **`≡` Filter menu**, borderless icon actions, and pill composer with unified **`+`** popover menu + automatic 3-attempt retry & `↻ Resend`). **`⚙ Settings` (`Ctrl+,`)** keeps basic cloud/appearance controls up front and tucks version details, history retention days, and manual URL/port/failover into collapsible **Advanced Options**, alongside a Mac-like **3-column circular Pinned Grid** (strictly explicit pins), sidebar **`📌` Pin/Unpin** hover actions, **Hover Tapback Action Bar** (`hoverMessageActions`), and **`➕` Custom Emoji Tapbacks**.
 - **High-Contrast Darker Emerald RCS Sent Bubbles (`#1B5E3A`):** Vivid contrast and WCAG AA legibility for sent RCS messages against dark backgrounds, paired with `<0.5ms` non-blocking async clipboard image copy/paste.
 - **Full Headless JSON CLI (`bluepill`, `imsg` & `bluepill-server`):**
   ```bash
@@ -156,7 +156,7 @@ bluepill --webui
 
 | Component | Operating System | CPU Architectures | Display / Runtime Stack | Package / Distribution |
 | :--- | :--- | :--- | :--- | :--- |
-| **BluePill Desktop & CLI (`bluepill`)** | Arch/Omarchy, Debian/Ubuntu, Fedora/RHEL | `x86_64`, `aarch64` (ARM64) | Wayland (Hyprland, Sway, KDE, GNOME) & X11 · Qt 6.8+ / C++20 · PipeWire | **AUR:** `yay -S bluepill`<br>**Packages:** `.deb` & `.rpm` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
+| **BluePill Desktop & CLI (`bluepill`)** | Arch/Omarchy, Debian/Ubuntu, Fedora/RHEL | `x86_64`, `aarch64` (ARM64) | Wayland (Hyprland, Sway, KDE, GNOME) & X11 · Qt 6.8+ (`Qt6::Multimedia`) / C++20 · PipeWire | **AUR:** `yay -S bluepill-bin` (prebuilt) / `yay -S bluepill` (source)<br>**Packages:** `.deb` & `.rpm` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
 | **BluePill Windows Client (`bluepill.exe`)** | Windows 10 / 11 | `x86_64` | Native Qt 6.8 MSVC + Inno Setup Installer | **Installer:** `BluePill-Setup-*.exe` in [Releases](https://github.com/nertwork/bluepill/releases/latest) |
 | **BluePill macOS Relay Daemon (`bluepill-server`)** | macOS Sequoia (`15.x`), Sonoma (`14.x`), Ventura (`13.x`), Tahoe (`26.x`) | `arm64` (Apple Silicon) & `x86_64` (Intel / KVM Virtual Machines) | Python 3.11+ · SQLite 3 WAL · Built-in Cloud Relay (`wss://`) · `IMCore` or `osascript` | **Homebrew:** `brew install nertwork/tap/bluepill`<br>**Cloud Login:** `bluepill-server login` |
 | **BluePill Web Client (`/web` & Cloud Portal)** | Cross-Platform (Linux, macOS, Windows, iOS, Android) | Any | Liquid Glass / Matrix / Light UI · Zero External CDN · Socket.IO | Built into `bluepill-server` (`/web`) & **[bluepill.nertwork.com](https://bluepill.nertwork.com/demo)** |
