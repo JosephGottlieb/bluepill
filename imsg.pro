@@ -1,4 +1,8 @@
 QT += core gui widgets qml quick quickcontrols2 network svg concurrent
+qtHaveModule(multimedia) {
+    QT += multimedia
+    DEFINES += BLUEPILL_HAS_MULTIMEDIA=1
+}
 CONFIG += c++20
 
 TARGET = bluepill

@@ -2,6 +2,13 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.10] - 2026-11-22
+
+### Added
+- **100% Native In-Process Audio Playback (`Qt6::Multimedia`):** Replaced external `ffplay.exe` subprocesses with native `QMediaPlayer` + `QAudioOutput` (using Qt 6.8's built-in FFmpeg/WMF backend), enabling instant in-app playback, real-time duration/progress, hardware seeking, output device selection, and a ~50 MB smaller Windows installer.
+- **Zero-Copy-Paste Mac Cloud Login (`bluepill-server login`):** Opens your browser for 1-click Google/GitHub/Email sign-in via RFC 8252 localhost callback and automatically provisions & verifies the Mac tunnel token and relay password.
+- **Clean-Slate Uninstall Option & Welcome Tailscale Shortcut:** Windows uninstaller now prompts whether to remove saved settings and local cache (while preserving settings during silent updates), and the first-run welcome screen includes a direct Tailscale / Local Mac setup shortcut.
+
 ## [1.2.9] - 2026-11-22
 
 ### Added

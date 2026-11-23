@@ -24,6 +24,10 @@
 #include <QVariantMap>
 
 class Theme;
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+class QMediaPlayer;
+class QAudioOutput;
+#endif
 
 struct ChatEntry {
     QString guid;
@@ -1040,6 +1044,10 @@ private:
     QString m_currentAudioSourceUrl;
     QPointer<QNetworkReply> m_audioDownloadReply;
     QPointer<QProcess> m_audioProcess;
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    QPointer<QMediaPlayer> m_mediaPlayer;
+    QPointer<QAudioOutput> m_mediaAudioOutput;
+#endif
 
     bool m_recordingVoice = false;
     int m_voiceRecordingSeconds = 0;

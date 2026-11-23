@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(bluepill VERSION 1.2.9 LANGUAGES CXX)
+project(bluepill VERSION 1.2.10 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -8,7 +8,7 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_AUTOUIC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Core Gui Widgets Qml Quick QuickControls2 Network Svg Concurrent)
-find_package(Qt6 OPTIONAL_COMPONENTS Test)
+find_package(Qt6 OPTIONAL_COMPONENTS Test Multimedia)
 
 set(BLUEPILL_COMMON_SOURCES
     src/theme.h
@@ -45,6 +45,11 @@ target_link_libraries(bluepill PRIVATE
     Qt6::Concurrent
 )
 
+if (TARGET Qt6::Multimedia)
+    target_link_libraries(bluepill PRIVATE Qt6::Multimedia)
+    target_compile_definitions(bluepill PRIVATE BLUEPILL_HAS_MULTIMEDIA=1)
+endif()
+
 if (WIN32)
     target_link_libraries(bluepill PRIVATE Advapi32 Crypt32 Winmm)
 endif()
@@ -69,6 +74,10 @@ if (TARGET Qt6::Test)
         Qt6::Concurrent
         Qt6::Test
     )
+    if (TARGET Qt6::Multimedia)
+        target_link_libraries(imsg_tests PRIVATE Qt6::Multimedia)
+        target_compile_definitions(imsg_tests PRIVATE BLUEPILL_HAS_MULTIMEDIA=1)
+    endif()
     if (WIN32)
         target_link_libraries(imsg_tests PRIVATE Advapi32 Crypt32 Winmm)
     endif()

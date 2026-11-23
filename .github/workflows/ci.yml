@@ -124,7 +124,7 @@ jobs:
     steps:
       - name: Install Arch Linux Dependencies
         run: |
-          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-wayland libnotify libheif imagemagick ttf-dejavu python
+          pacman -Syu --noconfirm base-devel git qt6-base qt6-declarative qt6-svg qt6-multimedia qt6-multimedia-ffmpeg qt6-wayland libnotify libheif imagemagick ttf-dejavu python
 
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -186,7 +186,7 @@ jobs:
       - name: Install Ubuntu 24.04 Build & Qt6 Dependencies
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq build-essential cmake ninja-build dpkg-dev qt6-base-dev qt6-declarative-dev qt6-svg-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-window qt6-image-formats-plugins libqt6svg6 libnotify-bin imagemagick libheif-examples libheif-plugin-libde265 libheif-plugin-x265
+          sudo apt-get install -y -qq build-essential cmake ninja-build dpkg-dev qt6-base-dev qt6-declarative-dev qt6-svg-dev qt6-multimedia-dev qml6-module-qtqml qml6-module-qtqml-models qml6-module-qtqml-workerscript qml6-module-qtquick qml6-module-qtquick-controls qml6-module-qtquick-layouts qml6-module-qtquick-shapes qml6-module-qtquick-templates qml6-module-qtquick-window qt6-image-formats-plugins libqt6svg6 libnotify-bin imagemagick libheif-examples libheif-plugin-libde265 libheif-plugin-x265
 
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -218,7 +218,7 @@ jobs:
     steps:
       - name: Install Fedora 41 Build & Qt6 Dependencies
         run: |
-          dnf install -y -q rpm-build cmake gcc-c++ ninja-build qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel libnotify ImageMagick ImageMagick-heic libheif-tools
+          dnf install -y -q rpm-build cmake gcc-c++ ninja-build qt6-qtbase-devel qt6-qtdeclarative-devel qt6-qtsvg-devel qt6-qtmultimedia-devel libnotify ImageMagick ImageMagick-heic libheif-tools
 
       - name: Checkout Repository
         uses: actions/checkout@v7
@@ -263,7 +263,7 @@ jobs:
           host: 'windows'
           target: 'desktop'
           arch: 'win64_msvc2022_64'
-          modules: 'qtimageformats'
+          modules: 'qtimageformats qtmultimedia'
 
       - name: Configure & Build (CMake + MSVC + Ninja)
         shell: pwsh
@@ -310,21 +310,6 @@ jobs:
           if ($env:VCToolsRedistDir -and (Test-Path $env:VCToolsRedistDir)) {
               Get-ChildItem -Path $env:VCToolsRedistDir -Filter "*.dll" -Recurse | Where-Object { $_.DirectoryName -match "\\x64\\Microsoft\.VC.*CRT$" } | ForEach-Object {
                   Copy-Item $_.FullName build-win-dist\ -Force
-              }
-          }
-          # Bundle ffmpeg.exe + ffplay.exe (and any sibling DLLs) so Windows plays iMessage .caf/.m4a/.wav audio messages inline
-          foreach ($tool in @("ffmpeg", "ffplay")) {
-              $cmd = Get-Command $tool -ErrorAction SilentlyContinue
-              if ($cmd -and (Test-Path $cmd.Source)) {
-                  $realPath = (Get-Item $cmd.Source).Target
-                  if (-not $realPath -or -not (Test-Path $realPath)) { $realPath = $cmd.Source }
-                  $chocoFfmpegBin = "C:\ProgramData\chocolatey\lib\ffmpeg\tools\ffmpeg\bin\$tool.exe"
-                  if (Test-Path $chocoFfmpegBin) { $realPath = $chocoFfmpegBin }
-                  Copy-Item $realPath "build-win-dist\$tool.exe" -Force
-                  $toolDir = Split-Path $realPath -Parent
-                  Get-ChildItem -Path $toolDir -Filter "*.dll" -ErrorAction SilentlyContinue | ForEach-Object {
-                      Copy-Item $_.FullName build-win-dist\ -Force
-                  }
               }
           }
 

@@ -18,6 +18,12 @@
 #include <QBuffer>
 #include <QImageReader>
 #include <QImageWriter>
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+#include <QAudioDevice>
+#include <QAudioOutput>
+#include <QMediaDevices>
+#include <QMediaPlayer>
+#endif
 #include <cmath>
 #include <cstdint>
 #include <numeric>
@@ -433,8 +439,12 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         if (currentPosMs >= m_audioPlaybackDurationMs) {
             m_audioProgress = 1.0;
             // Do NOT call stopAudioPlaybackProcess() on estimated duration fallback;
-            // let m_audioProcess finished stop real playback, or stop timer when no external process is active.
-            if (!m_audioProcess || m_audioProcess->state() == QProcess::NotRunning) {
+            // let m_mediaPlayer / m_audioProcess finished stop real playback, or stop timer when inactive.
+            bool nativePlaying = false;
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+            nativePlaying = (m_mediaPlayer && m_mediaPlayer->playbackState() == QMediaPlayer::PlayingState);
+#endif
+            if (!nativePlaying && (!m_audioProcess || m_audioProcess->state() == QProcess::NotRunning)) {
                 m_audioPlaying = false;
                 m_audioPlaybackTimer.stop();
             }
@@ -13529,6 +13539,20 @@ QVariantList Backend::computeAudioFileWaveformBars(const QString &filePath, cons
 }
 
 void Backend::stopAudioPlaybackProcess() {
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    if (m_mediaPlayer) {
+        QMediaPlayer *mp = m_mediaPlayer;
+        m_mediaPlayer = nullptr;
+        mp->disconnect(this);
+        mp->stop();
+        mp->deleteLater();
+    }
+    if (m_mediaAudioOutput) {
+        QAudioOutput *ao = m_mediaAudioOutput;
+        m_mediaAudioOutput = nullptr;
+        ao->deleteLater();
+    }
+#endif
     if (!m_audioProcess) return;
     QProcess *proc = m_audioProcess;
     m_audioProcess = nullptr;
@@ -13565,7 +13589,11 @@ bool Backend::canSeekLocalAudioPlayback() const {
     if (QGuiApplication::platformName() == QStringLiteral("offscreen")) {
         return true;
     }
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    return true;
+#else
     return !findBundledOrSystemExecutable(QStringLiteral("ffplay")).isEmpty();
+#endif
 #endif
 }
 
@@ -13591,6 +13619,77 @@ bool Backend::startLocalAudioProcess(const QString &localFile, quint64 playbackG
         return true;
     }
     stopAudioPlaybackProcess();
+
+#ifdef BLUEPILL_HAS_MULTIMEDIA
+    {
+        auto *audioOut = new QAudioOutput(this);
+        const QString desiredOut = effectiveAudioOutputDevice();
+        if (!desiredOut.isEmpty()) {
+            const auto outs = QMediaDevices::audioOutputs();
+            for (const QAudioDevice &dev : outs) {
+                if (QString::fromUtf8(dev.id()) == desiredOut || dev.description().compare(desiredOut, Qt::CaseInsensitive) == 0) {
+                    audioOut->setDevice(dev);
+                    break;
+                }
+            }
+        }
+        audioOut->setVolume(1.0f);
+        auto *player = new QMediaPlayer(this);
+        player->setAudioOutput(audioOut);
+        m_mediaAudioOutput = audioOut;
+        m_mediaPlayer = player;
+
+        connect(player, &QMediaPlayer::durationChanged, this, [this, playbackGen](qint64 durMs) {
+            if (m_audioPlaybackGen != playbackGen || durMs <= 0) return;
+            m_audioPlaybackDurationMs = durMs;
+            m_audioDurationText = formatAudioDuration(qMax<qint64>(1, durMs / 1000));
+            emit audioPlaybackChanged();
+        });
+        connect(player, &QMediaPlayer::positionChanged, this, [this, playbackGen](qint64 posMs) {
+            if (m_audioPlaybackGen != playbackGen || !m_audioPlaying) return;
+            m_audioPlaybackElapsedMs = posMs;
+            const qint64 dur = qMax<qint64>(1, m_audioPlaybackDurationMs);
+            m_audioProgress = qBound(0.0, double(posMs) / double(dur), 1.0);
+            const qint64 remSec = qMax<qint64>(0, (dur - posMs + 500) / 1000);
+            m_audioDurationText = formatAudioDuration(remSec);
+            emit audioPlaybackChanged();
+        });
+        connect(player, &QMediaPlayer::mediaStatusChanged, this, [this, player, playbackGen](QMediaPlayer::MediaStatus st) {
+            if (m_audioPlaybackGen != playbackGen) return;
+            if (st == QMediaPlayer::EndOfMedia) {
+                if (m_mediaPlayer == player) stopAudioPlaybackProcess();
+                m_audioPlaying = false;
+                m_audioPlaybackTimer.stop();
+                m_audioProgress = 0.0;
+                m_audioPlaybackElapsedMs = 0;
+                m_audioSeekOffsetMs = 0;
+                m_audioDurationText = formatAudioDuration(m_audioPlaybackDurationMs / 1000);
+                emit audioPlaybackChanged();
+            }
+        });
+        connect(player, &QMediaPlayer::errorOccurred, this, [this, player, playbackGen](QMediaPlayer::Error, const QString &errStr) {
+            if (m_audioPlaybackGen != playbackGen) return;
+            if (m_mediaPlayer == player) stopAudioPlaybackProcess();
+            m_audioPlaying = false;
+            m_audioPlaybackTimer.stop();
+            m_audioProgress = 0.0;
+            m_audioPlaybackElapsedMs = 0;
+            m_audioSeekOffsetMs = 0;
+            emit audioPlaybackChanged();
+            emit toastMessage(errStr.isEmpty() ? QStringLiteral("⚠ Audio playback failed") : (QStringLiteral("⚠ Audio playback: ") + errStr));
+        });
+
+        m_audioPlaybackElapsedMs = m_audioSeekOffsetMs;
+        m_audioPlaying = true;
+        player->setSource(QUrl::fromLocalFile(localFile));
+        if (m_audioSeekOffsetMs > 250) {
+            player->setPosition(m_audioSeekOffsetMs);
+        }
+        player->play();
+        emit audioPlaybackChanged();
+        return true;
+    }
+#endif
 
     QString bin;
     QStringList args;
