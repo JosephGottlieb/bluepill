@@ -365,3 +365,35 @@ jobs:
             git commit -m "chore(release): bump to v${VER}"
             GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
           fi
+
+          # Also publish prebuilt binary AUR package (bluepill-bin) for instant ~2s installs on x86_64 Arch
+          BIN_URL="https://github.com/nertwork/bluepill/releases/download/v${VER}/bluepill-${VER}-1-x86_64.pkg.tar.zst"
+          BIN_TMP="/tmp/bluepill-${VER}-1-x86_64.pkg.tar.zst"
+          if curl -fsSL "${BIN_URL}" -o "${BIN_TMP}"; then
+            BIN_SHA=$(sha256sum "${BIN_TMP}" | awk '{print $1}')
+            rm -f "${BIN_TMP}"
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill-bin.git /tmp/aur-bluepill-bin
+            cp "$GITHUB_WORKSPACE/pkgbuild/PKGBUILD.bin" /tmp/aur-bluepill-bin/PKGBUILD
+            VER="${VER}" BIN_SHA="${BIN_SHA}" python3 - <<'PY'
+          import os, pathlib, re
+          ver = os.environ["VER"]
+          sha = os.environ["BIN_SHA"]
+          p = pathlib.Path("/tmp/aur-bluepill-bin/PKGBUILD")
+          txt = p.read_text(encoding="utf-8")
+          txt = re.sub(r'^pkgver=.*$', f'pkgver={ver}', txt, count=1, flags=re.M)
+          txt = re.sub(r'^pkgrel=.*$', 'pkgrel=1', txt, count=1, flags=re.M)
+          txt = re.sub(r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')", txt, count=1, flags=re.M)
+          p.write_text(txt, encoding="utf-8")
+          PY
+            chown -R builder:builder /tmp/aur-bluepill-bin
+            su builder -c "cd /tmp/aur-bluepill-bin && makepkg --printsrcinfo > .SRCINFO"
+            chown -R root:root /tmp/aur-bluepill-bin
+            cd /tmp/aur-bluepill-bin
+            git config user.name "github-actions[bot]"
+            git config user.email "github-actions[bot]@users.noreply.github.com"
+            git add PKGBUILD .SRCINFO
+            if ! git diff-index --quiet HEAD; then
+              git commit -m "chore(release): bump bluepill-bin to v${VER}"
+              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
+            fi
+          fi

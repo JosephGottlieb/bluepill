@@ -2492,7 +2492,7 @@ void Backend::confirmClientUpdate() {
     const QString targetUrl = m_clientUpdateUrl.isEmpty()
                                   ? QStringLiteral("https://github.com/nertwork/bluepill/releases/tag/v%1").arg(m_clientLatestVersion)
                                   : m_clientUpdateUrl;
-    QString cmd = QStringLiteral("yay -S bluepill");
+    QString cmd = QStringLiteral("yay -S bluepill-bin");
     if (QFileInfo::exists(QStringLiteral("/etc/debian_version")) && !m_clientDebUrl.isEmpty()) {
         cmd = QStringLiteral("curl -fsSL %1 -o /tmp/bluepill.deb && sudo apt install -y /tmp/bluepill.deb").arg(m_clientDebUrl);
     } else if (QFileInfo::exists(QStringLiteral("/etc/fedora-release")) && !m_clientRpmUrl.isEmpty()) {
