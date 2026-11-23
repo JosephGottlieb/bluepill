@@ -10031,10 +10031,11 @@ ApplicationWindow {
                         }
                     }
 
-                    // Always-Visible Client & Relay Version / Connection Status Banner
+                    // Client & Relay Version / Connection Status Banner (shown under Advanced Options to keep top minimal)
                     Rectangle {
                         id: settingsVersionBanner
                         objectName: "settingsVersionBanner"
+                        visible: serverSyncSection.advancedServerExpanded
                         Layout.fillWidth: true
                         implicitHeight: settingsVersionCol.implicitHeight + 18
                         radius: 8
@@ -10609,7 +10610,7 @@ ApplicationWindow {
                         anchors.rightMargin: 12
                         spacing: 8
                         Text {
-                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Advanced Settings (Manual Server URL, Port & Failover)")
+                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Advanced Options (Server URL, History Retention & Version Info)")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
                             color: theme.brightForeground
@@ -10986,11 +10987,11 @@ ApplicationWindow {
                     }
                 }
 
-                // Message history and relay tools (moved here from the old Home page
-                // and the top bar's "60d" pill)
+                // Message history retention and relay tools (under Advanced Options)
                 ColumnLayout {
                     id: historySettingsCol
                     objectName: "historySettingsCol"
+                    visible: serverSyncSection.advancedServerExpanded
                     Layout.fillWidth: true
                     spacing: 6
 
