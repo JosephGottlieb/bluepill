@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Agent Operating Instructions & Mandates — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Agent Operating Instructions & Mandates. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/AGENTS.html">
     <meta property="og:title" content="Agent Operating Instructions & Mandates — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Agent Operating Instructions & Mandates. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -447,17 +447,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <h1 id="bluepill-autonomous-agent-operations-installation-guide">🤖 BluePill Autonomous Agent Operations &amp; Installation Guide</h1>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <h1 id="bluepill-autonomous-agent-operations-installation-guide">🤖 BluePill Autonomous Agent Operations &amp; Installation Guide</h1>
 <p>This file provides direct operational instructions for autonomous AI coding agents (<strong>Claude Code</strong>, <strong>OpenCode</strong>, <strong>Gemini CLI</strong>, <strong>Codex</strong>, <strong>Cursor</strong>, <strong>Antigravity</strong>) interacting with the <code>bluepill</code> repository.</p>
 <p>When an end-user prompts an agent with:</p>
 <blockquote>
@@ -540,7 +545,7 @@ if [[ ! -f &quot;$CONFIG_FILE&quot; ]]; then
     cat &lt;&lt; EOF_CFG &gt; &quot;${CONFIG_FILE}&quot;
 {
   &quot;host&quot;: &quot;0.0.0.0&quot;,
-  &quot;port&quot;: 1234,
+  &quot;port&quot;: 1235,
   &quot;password&quot;: &quot;${GEN_PWD}&quot;,
   &quot;helperPort&quot;: 45670,
   &quot;enableBackgroundDaemons&quot;: true
@@ -549,13 +554,22 @@ EOF_CFG
     chmod 600 &quot;${CONFIG_FILE}&quot;
 fi
 
+# NOTE: bluepill-server reads &quot;password&quot; and the iCloud module toggles (enableNotes,
+# enableCalendar, enablePhotos) from server.json, but NOT &quot;host&quot;/&quot;port&quot;: those come from
+# --host/--port (or BLUEPILL_HOST/BLUEPILL_PORT). Without --host it binds 127.0.0.1.
+# For remote Linux clients, set BLUEPILL_BIND_HOST to the Mac's Tailscale IP
+# (`tailscale ip -4`; traffic is WireGuard-encrypted). Avoid 0.0.0.0 on untrusted LANs:
+# the relay speaks plain HTTP, so the password would cross the LAN in cleartext.
+# Use a TLS reverse proxy instead (docs/INSTALLATION_AND_OPERATIONS_GUIDE.md).
+BIND_HOST=&quot;${BLUEPILL_BIND_HOST:-127.0.0.1}&quot;
+
 # 2.4 Run Server Self-Test
 timeout 15s bluepill-server --selftest &lt;/dev/null
 
 # 2.5 Deploy LaunchAgent
 PLIST=&quot;${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist&quot;
 BIN_PATH=&quot;$(which bluepill-server)&quot;
-PORT=$(jq -r '.port // 1234' &quot;${CONFIG_FILE}&quot;)
+PORT=$(jq -r '.port // 1235' &quot;${CONFIG_FILE}&quot;)
 PWD=$(jq -r '.password // &quot;&quot;' &quot;${CONFIG_FILE}&quot;)
 
 mkdir -p &quot;${HOME}/Library/LaunchAgents&quot;
@@ -570,6 +584,8 @@ cat &lt;&lt; EOF_PL &gt; &quot;${PLIST}&quot;
     &lt;array&gt;
         &lt;string&gt;${BIN_PATH}&lt;/string&gt;
         &lt;string&gt;serve&lt;/string&gt;
+        &lt;string&gt;--host&lt;/string&gt;
+        &lt;string&gt;${BIND_HOST}&lt;/string&gt;
         &lt;string&gt;--port&lt;/string&gt;
         &lt;string&gt;${PORT}&lt;/string&gt;
         &lt;string&gt;--password&lt;/string&gt;
@@ -594,7 +610,9 @@ timeout 10s launchctl bootstrap &quot;gui/$(id -u)&quot; &quot;${PLIST}&quot; &l
 sleep 2
 
 # 2.6 Verify Relay Health
-timeout 5s curl -s -f &quot;http://127.0.0.1:${PORT}/api/v1/ping?password=${PWD}&quot; &lt;/dev/null
+# Health check against the bound address (0.0.0.0 is checked via loopback)
+CHECK_HOST=&quot;${BIND_HOST/#0.0.0.0/127.0.0.1}&quot;
+timeout 5s curl -s -f &quot;http://${CHECK_HOST}:${PORT}/api/v1/ping?password=${PWD}&quot; &lt;/dev/null
 echo &quot;[✓] macOS Relay Server successfully deployed and running.&quot;
 </code></pre>
 <hr />
@@ -623,7 +641,13 @@ mkdir -p &quot;${CLIENT_DIR}&quot;
 chmod 700 &quot;${CLIENT_DIR}&quot;
 
 CLIENT_CFG=&quot;${CLIENT_DIR}/config.json&quot;
-RELAY_URL=&quot;${BLUEPILL_RELAY_URL:-http://127.0.0.1:1234}&quot;
+# Point at the port the relay actually listens on, i.e. the --port its service passes
+# (the LaunchAgent above uses server.json's &quot;port&quot;; the Homebrew service uses 1235;
+# bluepill-server itself never reads &quot;port&quot; from server.json; check with
+# `lsof -iTCP -sTCP:LISTEN -P | grep -i python` on the Mac),
+# on an address this machine can reach: the Mac's BIND_HOST,
+# or, if BIND_HOST is 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
+RELAY_URL=&quot;${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}&quot;
 RELAY_TOKEN=&quot;${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}&quot;
 
 cat &lt;&lt; EOF_CC &gt; &quot;${CLIENT_CFG}&quot;
@@ -670,7 +694,7 @@ echo &quot;[✓] Linux Desktop Client configured.&quot;
 <hr />
 <h3 id="phase-4-autonomous-diagnostic-verification-loop">Phase 4: Autonomous Diagnostic &amp; Verification Loop</h3>
 <p>Run this verification block to report final status:</p>
-<pre><code class="language-bash">RELAY_ADDR=&quot;${BLUEPILL_RELAY_URL:-http://127.0.0.1:1234}&quot;
+<pre><code class="language-bash">RELAY_ADDR=&quot;${BLUEPILL_RELAY_URL:-http://127.0.0.1:1235}&quot;  # same address/port as RELAY_URL above
 RELAY_PWD=&quot;${BLUEPILL_RELAY_TOKEN:-CHANGE_ME_TO_A_SECURE_TOKEN}&quot;
 
 # 1. Ping
@@ -690,10 +714,10 @@ echo &quot;VERIFICATION_SUMMARY: PING=${PING_OK} WEB_UI=${WEB_OK} CHAT_QUERY=${C
 <hr />
 <h2 id="3-related-documentation">3. Related Documentation</h2>
 <ul>
-<li>Complete Reference: <a href="docs/INSTALLATION_AND_OPERATIONS_GUIDE.md">INSTALLATION_AND_OPERATIONS_GUIDE.md</a></li>
-<li>Playbook Checklist: <a href="docs/AGENT_INSTALL_PLAYBOOK.md">AGENT_INSTALL_PLAYBOOK.md</a></li>
-<li>Configuration &amp; CLI: <a href="docs/CONFIGURATION_AND_CLI.md">CONFIGURATION_AND_CLI.md</a></li>
-<li>Architecture: <a href="docs/ARCHITECTURE.md">ARCHITECTURE.md</a></li>
+<li>Complete Reference: <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html">INSTALLATION_AND_OPERATIONS_GUIDE.md</a></li>
+<li>Playbook Checklist: <a href="AGENT_INSTALL_PLAYBOOK.html">AGENT_INSTALL_PLAYBOOK.md</a></li>
+<li>Configuration &amp; CLI: <a href="CONFIGURATION_AND_CLI.html">CONFIGURATION_AND_CLI.md</a></li>
+<li>Architecture: <a href="ARCHITECTURE.html">ARCHITECTURE.md</a></li>
 </ul>
         </main>
     </div>

@@ -9,8 +9,12 @@ on:
       - "README.md"
       - "AGENTS.md"
       - "CHANGELOG.md"
+      - "CMakeLists.txt"
       - ".github/workflows/docs-pages.yml"
       - ".github/scripts/sync_gh_pages.py"
+  release:
+    types:
+      - published
   workflow_dispatch:
 
 permissions:

@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Architecture & Direct SQLite WAL Engine — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Architecture & Direct SQLite WAL Engine. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/ARCHITECTURE.html">
     <meta property="og:title" content="Architecture & Direct SQLite WAL Engine — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Architecture & Direct SQLite WAL Engine. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -438,13 +438,14 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </div>
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
@@ -453,53 +454,53 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
             </div>
 
             <h1 id="bluepill-architecture-internals">BluePill Architecture &amp; Internals</h1>
-<div class="codehilite"><pre><span></span><code><span class="n">flowchart</span><span class="w"> </span><span class="n">LR</span>
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Linux</span><span class="p">[</span><span class="s">"Linux Workstation (x86_64 / aarch64)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">GUI</span><span class="p">[</span><span class="s">"BluePill Qt6/QML Desktop Client</span>
-<span class="s">(/usr/bin/bluepill)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CLI</span><span class="p">[</span><span class="s">"BluePill JSON CLI</span>
-<span class="s">(bluepill status/recent/send)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CACHE</span><span class="p">[</span><span class="s">"Local State &amp; Media Cache</span>
-<span class="s">~/.config/bluepill/ + ~/.cache/imsg/"</span><span class="p">]</span>
-<span class="w">    </span><span class="kd">end</span>
+<pre><code class="language-mermaid">flowchart LR
+    subgraph Linux[&quot;Linux Workstation (x86_64 / aarch64)&quot;]
+        GUI[&quot;BluePill Qt6/QML Desktop Client
+(/usr/bin/bluepill)&quot;]
+        CLI[&quot;BluePill JSON CLI
+(bluepill status/recent/send)&quot;]
+        CACHE[&quot;Local State &amp; Media Cache
+~/.config/bluepill/ + ~/.cache/imsg/&quot;]
+    end
 
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Browser</span><span class="p">[</span><span class="s">"Any Device Browser"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">WEB</span><span class="p">[</span><span class="s">"BluePill Built-In Web UI</span>
-<span class="s">(GET /web)"</span><span class="p">]</span>
-<span class="w">    </span><span class="kd">end</span>
+    subgraph Browser[&quot;Any Device Browser&quot;]
+        WEB[&quot;BluePill Built-In Web UI
+(GET /web)&quot;]
+    end
 
-<span class="w">    </span><span class="n">subgraph</span><span class="w"> </span><span class="n">Mac</span><span class="p">[</span><span class="s">"macOS Relay Host (Apple Silicon / Intel / KVM VM)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">RELAY</span><span class="p">[</span><span class="s">"bluepill-server Daemon</span>
-<span class="s">(or Legacy BlueBubbles.app)"</span><span class="p">]</span>
-<span class="w">        </span><span class="n">CHATDB</span><span class="p">[(</span><span class="s">"~/Library/Messages/chat.db</span>
-<span class="s">(SQLite WAL)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">ADDRDB</span><span class="p">[(</span><span class="s">"AddressBook-v22.abcddb</span>
-<span class="s">(macOS Contacts)"</span><span class="p">)]</span>
-<span class="w">        </span><span class="n">IMCORE</span><span class="p">[</span><span class="s">"Messages.app + IMCore Helper</span>
-<span class="s">(or Zero-SIP osascript)"</span><span class="p">]</span>
-<span class="w">    </span><span class="kd">end</span>
+    subgraph Mac[&quot;macOS Relay Host (Apple Silicon / Intel / KVM VM)&quot;]
+        RELAY[&quot;bluepill-server Daemon
+(or Legacy BlueBubbles.app)&quot;]
+        CHATDB[(&quot;~/Library/Messages/chat.db
+(SQLite WAL)&quot;)]
+        ADDRDB[(&quot;AddressBook-v22.abcddb
+(macOS Contacts)&quot;)]
+        IMCORE[&quot;Messages.app + IMCore Helper
+(or Zero-SIP osascript)&quot;]
+    end
 
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"HTTPS REST + Socket.IO v4 Push</span>
-<span class="s">or Direct SSH"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">CLI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"HTTPS REST"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">WEB</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"HTTPS / EventSource / REST"</span><span class="o">|</span><span class="w"> </span><span class="n">RELAY</span>
-<span class="w">    </span><span class="n">GUI</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"0ms Startup"</span><span class="o">|</span><span class="w"> </span><span class="n">CACHE</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s">"Read-Only WAL (&lt;2ms)"</span><span class="o">|</span><span class="w"> </span><span class="n">CHATDB</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">--&gt;|</span><span class="s">"Contact Resolution (&lt;5ms)"</span><span class="o">|</span><span class="w"> </span><span class="n">ADDRDB</span>
-<span class="w">    </span><span class="n">RELAY</span><span class="w"> </span><span class="o">&lt;--&gt;|</span><span class="s">"TCP :45670 JSON / osascript"</span><span class="o">|</span><span class="w"> </span><span class="n">IMCORE</span>
-</code></pre></div>
-
+    GUI &lt;--&gt;|&quot;HTTPS REST + Socket.IO v4 Push
+or Direct SSH&quot;| RELAY
+    CLI &lt;--&gt;|&quot;HTTPS REST&quot;| RELAY
+    WEB &lt;--&gt;|&quot;HTTPS / EventSource / REST&quot;| RELAY
+    GUI &lt;--&gt;|&quot;0ms Startup&quot;| CACHE
+    RELAY --&gt;|&quot;Read-Only WAL (&lt;2ms)&quot;| CHATDB
+    RELAY --&gt;|&quot;Contact Resolution (&lt;5ms)&quot;| ADDRDB
+    RELAY &lt;--&gt;|&quot;TCP :45670 JSON / osascript&quot;| IMCORE
+</code></pre>
 <h2 id="1-linux-desktop-client-srcbackendhcpp-srcmainqml">1. Linux Desktop Client (<code>src/backend.{h,cpp}</code>, <code>src/Main.qml</code>)</h2>
 <ul>
 <li><strong>Zero-Latency Startup (<code>messages_cache.json</code>):</strong> Loads up to 500 cached messages per conversation from disk before the first network packet is sent.</li>
 <li><strong>Isolated Network Pools (<code>m_nam</code>, <code>m_sendNam</code>, <code>m_mediaNam</code>, <code>m_socketNam</code>):</strong> User mutations (<code>sendMessage</code>, <code>sendReaction</code>, <code>markChatRead</code>) execute on a dedicated high-priority <code>QNetworkAccessManager</code> (<code>m_sendNam</code>) so background image downloads on <code>m_mediaNam</code> (<code>?force=false</code>, max 2 concurrent) can never stall outbound messages.</li>
+<li><strong>Service Resolution (iMessage / RCS / SMS):</strong> macOS 26 stores every chat GUID as <code>any;-;&lt;handle&gt;</code>, so the GUID prefix can't be trusted. <code>Backend::resolveChatService()</code> checks, in order: a legacy <code>iMessage;</code>/<code>RCS;</code>/<code>SMS;</code> prefix, a chat-level <code>serviceName</code>, the newest message's <code>service</code> (or <code>handle.service</code>), and finally participant handle services. It returns an empty string when the service is still unknown. As messages are cached, the newest one updates the chat's service. The UI draws green bubbles and pills only for a known <code>SMS</code>/<code>RCS</code> service, so iMessage threads never flash green while loading.</li>
 <li><strong>Magic-Byte (<code>ftyp</code>) HEIC/AVIF Transcoding:</strong> Inspects the first 16 bytes of every downloaded attachment for ISO BMFF <code>ftyp</code> headers and converts disguised <code>.heic.jpeg</code> / <code>.avif</code> files to standard JPEG (<code>\xFF\xD8\xFF</code>) asynchronously.</li>
 </ul>
 <h2 id="2-headless-macos-relay-serverbluepill_serverpy-built-in-web-ui">2. Headless macOS Relay (<code>server/bluepill_server.py</code>) &amp; Built-In Web UI</h2>
 <ul>
 <li><strong>Direct SQLite WAL Reader:</strong> Queries <code>~/Library/Messages/chat.db</code> in read-only WAL mode (<code>?mode=ro</code>), decoding <code>attributedBody</code> typedstreams and exposing <code>is_read</code>, <code>date_read</code>, <code>date_edited</code>, <code>date_retracted</code>, <code>error</code>, and <code>expressive_send_style_id</code> directly in JSON responses.</li>
 <li><strong>Dual-Mode Action Dispatcher:</strong> Connects to <code>IMCore</code> (<code>localhost:45670</code>) when the Private API helper is loaded inside <code>Messages.app</code>, and falls back automatically to <code>osascript</code> on SIP-enabled Macs.</li>
-<li><strong>Built-In Web UI (<code>/web</code>):</strong> Self-contained dark-mode web application served directly by <code>bluepill-server</code> with conversation search, pinned chats, tapbacks, 1-click OTP copy, and real-time message streaming.</li>
+<li><strong>Built-In Web UI (<code>/web</code>, <code>/t/&lt;slug&gt;/web</code>) &amp; Cloud Relay:</strong> Self-contained <strong>Liquid Glass / Matrix / Light</strong> browser client served directly by <code>bluepill-server</code> (and proxied over <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code>) with tabbed <strong>Messages, Notes, Calendar, Photos, and Contacts</strong> views, contact resolution &amp; <code>lastMessage</code> previews, lazy-loaded Photos, <code>.caf</code> (<code>audio/x-caf</code>) server-side audio transcoding (<code>?transcode=1</code>), inline tapbacks, 1-click OTP copy, XSS/CSP/cookie/<code>no-store</code> hardening, and real-time Socket.IO streaming. <code>bluepill-server</code> also includes a built-in pure-stdlib RFC 6455 TLS WebSocket tunnel client (<code>bluepill-server login</code> / <code>relay-setup</code>) and hardened Cloud Managed Updates (LaunchAgent-aware restart + SHA256-verified release bottle fallback). Demo: <code>https://bluepill.nertwork.com/demo</code>, Support: <code>support@nertwork.com</code>.</li>
 </ul>
         </main>
     </div>

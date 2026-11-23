@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Autonomous AI Agent Install Playbook — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Autonomous AI Agent Install Playbook. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html">
     <meta property="og:title" content="Autonomous AI Agent Install Playbook — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Autonomous AI Agent Install Playbook. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -438,7 +438,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </li>
 <li><a href="#phase-2-macos-relay-installation-service-deployment">Phase 2: macOS Relay Installation &amp; Service Deployment</a><ul>
 <li><a href="#step-21-verify-macos-permissions-full-disk-access">Step 2.1: Verify macOS Permissions (Full Disk Access)</a></li>
-<li><a href="#step-22-install-bluepill-server-via-homebrew">Step 2.2: Install bluepill-server via Homebrew</a></li>
+<li><a href="#step-22-install-bluepill-server-via-homebrew-and-optional-cloud-relay">Step 2.2: Install bluepill-server via Homebrew (and Optional Cloud Relay)</a></li>
 <li><a href="#step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</a></li>
 <li><a href="#step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</a></li>
 <li><a href="#step-25-deploy-and-start-launchagent">Step 2.5: Deploy and Start LaunchAgent</a></li>
@@ -447,7 +447,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#phase-3-linux-desktop-client-installation-configuration">Phase 3: Linux Desktop Client Installation &amp; Configuration</a><ul>
 <li><a href="#step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</a><ul>
 <li><a href="#option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</a></li>
-<li><a href="#option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</a></li>
+<li><a href="#option-b-debian-ubuntu-deb-release-or-source-build">Option B: Debian / Ubuntu (.deb Release or Source Build)</a></li>
 </ul>
 </li>
 <li><a href="#step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</a></li>
@@ -466,17 +466,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <blockquote>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <blockquote>
 <p>[!TIP]
 <strong>Interactive Documentation Portal:</strong> View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:<br />
 <a href="https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html"><strong>https://nertwork.github.io/bluepill/AGENT_INSTALL_PLAYBOOK.html</strong></a></p>
@@ -531,13 +536,16 @@ echo &quot;Package managers: brew=${HAS_BREW}, yay=${HAS_YAY}, apt=${HAS_APT}, d
 </blockquote>
 </li>
 </ul>
-<h3 id="step-22-install-bluepill-server-via-homebrew">Step 2.2: Install <code>bluepill-server</code> via Homebrew</h3>
+<h3 id="step-22-install-bluepill-server-via-homebrew-and-optional-cloud-relay">Step 2.2: Install <code>bluepill-server</code> via Homebrew (and Optional Cloud Relay)</h3>
 <pre><code class="language-bash"># Add tap and install formula
 timeout 120s brew tap nertwork/tap &lt;/dev/null
 timeout 120s brew install nertwork/tap/bluepill &lt;/dev/null
 
 # Verify installed binary
 timeout 5s bluepill-server --version &lt;/dev/null
+
+# Optional: pair with BluePill Cloud Relay (token from https://bluepill.nertwork.com/signup)
+# timeout 30s bluepill-server relay-setup --token &quot;${BLUEPILL_RELAY_TOKEN}&quot; &lt;/dev/null
 </code></pre>
 <h3 id="step-23-generate-secure-server-configuration">Step 2.3: Generate Secure Server Configuration</h3>
 <p>Generate a strong random password if none is provided:</p>
@@ -551,7 +559,7 @@ if [[ ! -f &quot;$CONFIG_FILE&quot; ]]; then
     cat &lt;&lt; EOF_CFG &gt; &quot;${CONFIG_FILE}&quot;
 {
   &quot;host&quot;: &quot;0.0.0.0&quot;,
-  &quot;port&quot;: 1234,
+  &quot;port&quot;: 1235,
   &quot;password&quot;: &quot;${GENERATED_KEY}&quot;,
   &quot;helperPort&quot;: 45670,
   &quot;enableBackgroundDaemons&quot;: true
@@ -563,6 +571,10 @@ else
     echo &quot;Configuration already exists at ${CONFIG_FILE}&quot;
 fi
 </code></pre>
+<blockquote>
+<p><strong>Note:</strong> <code>bluepill-server</code> reads <code>password</code> and the iCloud module toggles (<code>enableNotes</code>, <code>enableCalendar</code>, <code>enablePhotos</code>) from <code>server.json</code>, but <strong>not</strong> <code>host</code>/<code>port</code>. Those come from <code>--host</code> / <code>--port</code> (or <code>BLUEPILL_HOST</code> / <code>BLUEPILL_PORT</code>), and without <code>--host</code> the relay listens on <code>127.0.0.1</code> only. For remote Linux clients, set <code>BLUEPILL_BIND_HOST</code> to the Mac's Tailscale IP (<code>tailscale ip -4</code>), which keeps traffic WireGuard-encrypted.</p>
+<p><strong>Security:</strong> the relay speaks plain HTTP. Binding to <code>0.0.0.0</code> sends the relay password across your LAN in cleartext. On networks you don't fully trust, bind to the Tailscale IP or put a TLS reverse proxy in front (see <a href="INSTALLATION_AND_OPERATIONS_GUIDE.html#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a>).</p>
+</blockquote>
 <h3 id="step-24-execute-built-in-self-test">Step 2.4: Execute Built-In Self-Test</h3>
 <p>Verify that typedstream serialization and database engines pass all assertions:</p>
 <pre><code class="language-bash">timeout 15s bluepill-server --selftest &lt;/dev/null
@@ -570,8 +582,9 @@ fi
 <h3 id="step-25-deploy-and-start-launchagent">Step 2.5: Deploy and Start LaunchAgent</h3>
 <p>Configure automatic startup on user login:</p>
 <pre><code class="language-bash">PLIST_PATH=&quot;${HOME}/Library/LaunchAgents/com.nertwork.bluepill-server.plist&quot;
+BIND_HOST=&quot;${BLUEPILL_BIND_HOST:-127.0.0.1}&quot;   # see the note above
 BINARY_PATH=&quot;$(which bluepill-server)&quot;
-SERVER_PORT=$(jq -r '.port // 1234' &quot;${CONFIG_FILE}&quot;)
+SERVER_PORT=$(jq -r '.port // 1235' &quot;${CONFIG_FILE}&quot;)
 SERVER_PWD=$(jq -r '.password // &quot;&quot;' &quot;${CONFIG_FILE}&quot;)
 
 mkdir -p &quot;${HOME}/Library/LaunchAgents&quot;
@@ -586,6 +599,8 @@ cat &lt;&lt; EOF_PL &gt; &quot;${PLIST_PATH}&quot;
     &lt;array&gt;
         &lt;string&gt;${BINARY_PATH}&lt;/string&gt;
         &lt;string&gt;serve&lt;/string&gt;
+        &lt;string&gt;--host&lt;/string&gt;
+        &lt;string&gt;${BIND_HOST}&lt;/string&gt;
         &lt;string&gt;--port&lt;/string&gt;
         &lt;string&gt;${SERVER_PORT}&lt;/string&gt;
         &lt;string&gt;--password&lt;/string&gt;
@@ -613,7 +628,9 @@ timeout 10s launchctl bootstrap &quot;gui/$(id -u)&quot; &quot;${PLIST_PATH}&quo
 sleep 2
 
 # Verify local REST heartbeat
-timeout 5s curl -s -f &quot;http://127.0.0.1:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}&quot; &lt;/dev/null
+# Verify against the bound address (0.0.0.0 is checked via loopback)
+CHECK_HOST=&quot;${BIND_HOST/#0.0.0.0/127.0.0.1}&quot;
+timeout 5s curl -s -f &quot;http://${CHECK_HOST}:${SERVER_PORT}/api/v1/ping?password=${SERVER_PWD}&quot; &lt;/dev/null
 </code></pre>
 <hr />
 <h2 id="phase-3-linux-desktop-client-installation-configuration">Phase 3: Linux Desktop Client Installation &amp; Configuration</h2>
@@ -621,9 +638,13 @@ timeout 5s curl -s -f &quot;http://127.0.0.1:${SERVER_PORT}/api/v1/ping?password
 <h3 id="step-31-install-desktop-client-package">Step 3.1: Install Desktop Client Package</h3>
 <h4 id="option-a-arch-linux-omarchy-via-aur">Option A: Arch Linux / Omarchy via AUR</h4>
 <pre><code class="language-bash">if command -v yay &gt;/dev/null 2&gt;&amp;1; then
-    timeout 300s yay -S --noconfirm bluepill &lt;/dev/null
+    PKG=&quot;bluepill&quot;
+    [[ &quot;$(uname -m)&quot; == &quot;x86_64&quot; ]] &amp;&amp; PKG=&quot;bluepill-bin&quot;
+    timeout 300s yay -S --noconfirm &quot;${PKG}&quot; &lt;/dev/null
 elif command -v paru &gt;/dev/null 2&gt;&amp;1; then
-    timeout 300s paru -S --noconfirm bluepill &lt;/dev/null
+    PKG=&quot;bluepill&quot;
+    [[ &quot;$(uname -m)&quot; == &quot;x86_64&quot; ]] &amp;&amp; PKG=&quot;bluepill-bin&quot;
+    timeout 300s paru -S --noconfirm &quot;${PKG}&quot; &lt;/dev/null
 else
     # Fallback: clone and makepkg
     BUILD_TMP=$(mktemp -d /tmp/bluepill-build-XXXXXX)
@@ -633,8 +654,10 @@ else
     rm -rf &quot;${BUILD_TMP}&quot;
 fi
 </code></pre>
-<h4 id="option-b-debian-ubuntu-build-from-source">Option B: Debian / Ubuntu Build from Source</h4>
-<pre><code class="language-bash">if command -v apt-get &gt;/dev/null 2&gt;&amp;1; then
+<h4 id="option-b-debian-ubuntu-deb-release-or-source-build">Option B: Debian / Ubuntu (<code>.deb</code> Release or Source Build)</h4>
+<pre><code class="language-bash"># Pre-built .deb packages are published at https://github.com/nertwork/bluepill/releases/latest
+# Or build from source:
+if command -v apt-get &gt;/dev/null 2&gt;&amp;1; then
     sudo apt-get update
     sudo apt-get install -y build-essential cmake ninja-build qt6-base-dev qt6-declarative-dev qt6-quickcontrols2-5-dev qt6-svg-dev qt6-wayland-dev libsecret-1-dev libnotify-dev ffmpeg
     BUILD_TMP=$(mktemp -d /tmp/bluepill-src-XXXXXX)
@@ -647,13 +670,21 @@ fi
     rm -rf &quot;${BUILD_TMP}&quot;
 fi
 </code></pre>
+<p><em>(Fedora/RHEL <code>.rpm</code> and Windows <code>BluePill-Setup-*-win64.exe</code> installers are also published at <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a>. Support: <code>support@nertwork.com</code>.)</em></p>
 <h3 id="step-32-provision-client-state-and-keyring-credentials">Step 3.2: Provision Client State and Keyring Credentials</h3>
 <pre><code class="language-bash">CLIENT_CONFIG_DIR=&quot;${HOME}/.config/bluepill&quot;
 mkdir -p &quot;${CLIENT_CONFIG_DIR}&quot;
 chmod 700 &quot;${CLIENT_CONFIG_DIR}&quot;
 
 CLIENT_CONFIG=&quot;${CLIENT_CONFIG_DIR}/config.json&quot;
-RELAY_URL=&quot;http://127.0.0.1:1234&quot; # Or ssh://user@mac-host / https://relay.example.com
+# Point at the port the relay actually listens on, i.e. the --port its service passes
+# (the Phase 2 LaunchAgent uses server.json's &quot;port&quot;; the Homebrew service uses 1235;
+# bluepill-server itself never reads &quot;port&quot; from server.json; check with
+# `lsof -iTCP -sTCP:LISTEN -P | grep -i python` on the Mac),
+# on an address this machine can reach: the Mac's bind
+# address, or, if it binds 0.0.0.0, the Mac's Tailscale/LAN IP or hostname (never 0.0.0.0).
+# Or ssh://user@mac-host / https://relay.example.com:443
+RELAY_URL=&quot;http://127.0.0.1:1235&quot;
 RELAY_PWD=&quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;
 
 cat &lt;&lt; EOF_CLI &gt; &quot;${CLIENT_CONFIG}&quot;
@@ -706,13 +737,17 @@ fi
 <hr />
 <h2 id="phase-4-end-to-end-verification-checklist">Phase 4: End-to-End Verification Checklist</h2>
 <p>Run this non-interactive verification script to validate complete connectivity across all components:</p>
-<pre><code class="language-bash">RELAY_HOST=&quot;127.0.0.1:1234&quot; # Or your configured relay address
+<pre><code class="language-bash">RELAY_URL=&quot;http://127.0.0.1:1235&quot; # Same value as RELAY_URL in Step 3.2 (scheme included)
 RELAY_PWD=&quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;
+RELAY_ADDR=&quot;${RELAY_URL%/}&quot;
+# These HTTP checks can't test an ssh:// relay: for SSH mode, run them on the Mac
+# (e.g. via `ssh user@mac-host`) against the relay's bound address and port:
+# http://&lt;BIND_HOST&gt;:&lt;port&gt;, or http://127.0.0.1:&lt;port&gt; if it binds 127.0.0.1 or 0.0.0.0.
 
 echo &quot;=== BluePill End-to-End Validation ===&quot;
 
 # 1. Ping Check
-PING_RESP=$(timeout 5s curl -s -f &quot;http://${RELAY_HOST}/api/v1/ping?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;FAILED&quot;)
+PING_RESP=$(timeout 5s curl -s -f &quot;${RELAY_ADDR}/api/v1/ping?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;FAILED&quot;)
 if [[ &quot;$PING_RESP&quot; == *&quot;pong&quot;* ]]; then
     echo &quot;[✓] REST Ping: OK&quot;
 else
@@ -720,13 +755,13 @@ else
 fi
 
 # 2. Server Info &amp; Private API Check
-INFO_RESP=$(timeout 5s curl -s -f &quot;http://${RELAY_HOST}/api/v1/server/info?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;{}&quot;)
+INFO_RESP=$(timeout 5s curl -s -f &quot;${RELAY_ADDR}/api/v1/server/info?password=${RELAY_PWD}&quot; &lt;/dev/null || echo &quot;{}&quot;)
 OS_VER=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.os_version // &quot;Unknown&quot;')
 PRIV_API=$(echo &quot;$INFO_RESP&quot; | jq -r '.data.private_api // false')
 echo &quot;[✓] Server OS: ${OS_VER}, Private API Active: ${PRIV_API}&quot;
 
 # 3. Web UI Accessibility Check
-WEB_CODE=$(timeout 5s curl -s -o /dev/null -w &quot;%{http_code}&quot; &quot;http://${RELAY_HOST}/web&quot; &lt;/dev/null || echo &quot;000&quot;)
+WEB_CODE=$(timeout 5s curl -s -o /dev/null -w &quot;%{http_code}&quot; &quot;${RELAY_ADDR}/web&quot; &lt;/dev/null || echo &quot;000&quot;)
 if [[ &quot;$WEB_CODE&quot; == &quot;200&quot; ]]; then
     echo &quot;[✓] Embedded Web UI: OK (HTTP 200)&quot;
 else
@@ -734,7 +769,7 @@ else
 fi
 
 # 4. Chat Query Check
-CHAT_RESP=$(timeout 5s curl -s -f -X POST &quot;http://${RELAY_HOST}/api/v1/chat/query?password=${RELAY_PWD}&quot; \
+CHAT_RESP=$(timeout 5s curl -s -f -X POST &quot;${RELAY_ADDR}/api/v1/chat/query?password=${RELAY_PWD}&quot; \
     -H &quot;Content-Type: application/json&quot; -d '{&quot;limit&quot;: 5, &quot;offset&quot;: 0}' &lt;/dev/null || echo &quot;FAILED&quot;)
 if [[ &quot;$CHAT_RESP&quot; == *&quot;\&quot;status\&quot;:200&quot;* ]] || [[ &quot;$CHAT_RESP&quot; == *&quot;\&quot;data\&quot;:&quot;* ]]; then
     echo &quot;[✓] Chat Database Query: OK&quot;

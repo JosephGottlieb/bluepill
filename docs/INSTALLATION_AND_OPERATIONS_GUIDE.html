@@ -4,7 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Installation & Operations Guide — BluePill Documentation</title>
-    <meta name="description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta name="description" content="BluePill documentation: Installation & Operations Guide. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <link rel="canonical" href="https://bluepill.nertwork.com/docs">
     <link rel="icon" type="image/png" href="logo.png">
 
@@ -12,7 +12,7 @@
     <meta property="og:type" content="article">
     <meta property="og:url" content="https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html">
     <meta property="og:title" content="Installation & Operations Guide — BluePill Documentation">
-    <meta property="og:description" content="BluePill documentation: __TITLE__. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
+    <meta property="og:description" content="BluePill documentation: Installation & Operations Guide. High-performance native Qt6 iMessage client for Linux and zero-Electron macOS relay.">
     <meta property="og:image" content="https://nertwork.github.io/bluepill/screenshot.png">
     <meta name="twitter:card" content="summary_large_image">
     <meta name="twitter:creator" content="@jamesfarr">
@@ -462,21 +462,23 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 </ul>
 </li>
 <li><a href="#debian-ubuntu">Debian &amp; Ubuntu</a><ul>
-<li><a href="#1-install-build-dependencies">1. Install Build Dependencies</a></li>
-<li><a href="#2-build-and-install-via-cmake">2. Build and Install via CMake</a></li>
+<li><a href="#1-install-pre-built-deb-package-recommended">1. Install Pre-Built .deb Package (Recommended)</a></li>
+<li><a href="#2-build-from-source-alternative">2. Build from Source (Alternative)</a></li>
 </ul>
 </li>
 <li><a href="#fedora-rhel">Fedora &amp; RHEL</a><ul>
-<li><a href="#1-install-build-dependencies_1">1. Install Build Dependencies</a></li>
-<li><a href="#2-build-and-install">2. Build and Install</a></li>
+<li><a href="#1-install-pre-built-rpm-package-recommended">1. Install Pre-Built .rpm Package (Recommended)</a></li>
+<li><a href="#2-build-from-source-alternative_1">2. Build from Source (Alternative)</a></li>
 </ul>
 </li>
+<li><a href="#windows-10-11-x86_64">Windows (10 / 11 x86_64)</a></li>
+<li><a href="#smart-cross-platform-client-auto-updates-bluepill-cloud">Smart Cross-Platform Client Auto-Updates (BluePill Cloud)</a></li>
 <li><a href="#nixos-generic-linux">NixOS &amp; Generic Linux</a></li>
 </ul>
 </li>
 <li><a href="#3-macos-relay-server-bluepill-server-setup">3. macOS Relay Server (bluepill-server) Setup</a><ul>
 <li><a href="#prerequisites-supported-versions">Prerequisites &amp; Supported Versions</a></li>
-<li><a href="#homebrew-installation">Homebrew Installation</a></li>
+<li><a href="#homebrew-installation-bluepill-cloud-login-default">Homebrew Installation &amp; BluePill Cloud Login (Default)</a></li>
 <li><a href="#full-disk-access-permissions">Full Disk Access &amp; Permissions</a><ul>
 <li><a href="#granting-full-disk-access">Granting Full Disk Access:</a></li>
 <li><a href="#granting-automation-permissions">Granting Automation Permissions:</a></li>
@@ -505,12 +507,13 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <li><a href="#caddy-configuration-etccaddycaddyfile">Caddy Configuration (/etc/caddy/Caddyfile)</a></li>
 <li><a href="#nginx-configuration">Nginx Configuration</a></li>
 <li><a href="#tailscale-serve">Tailscale Serve</a></li>
+<li><a href="#client-port-for-reverse-proxies">Client Port for Reverse Proxies</a></li>
 </ul>
 </li>
 </ul>
 </li>
-<li><a href="#4-built-in-web-ui-operations-web">4. Built-In Web UI Operations (/web)</a><ul>
-<li><a href="#key-capabilities-in-the-web-ui">Key Capabilities in the Web UI:</a></li>
+<li><a href="#4-built-in-web-ui-operations-web-tslugweb">4. Built-In Web UI Operations (/web &amp; /t/&lt;slug&gt;/web)</a><ul>
+<li><a href="#key-capabilities-hardening-in-the-web-ui-v1212">Key Capabilities &amp; Hardening in the Web UI (v1.2.12+):</a></li>
 </ul>
 </li>
 <li><a href="#5-complete-rest-rpc-api-reference">5. Complete REST &amp; RPC API Reference</a><ul>
@@ -532,17 +535,22 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 
 
 
+
             </div>
         </aside>
 
         <main class="doc-content">
             <div class="doc-banner">
                 <div>
-                    <strong>💊 BluePill v1.1.0 Documentation Portal</strong>
+                    <strong>💊 BluePill v1.2.12 Documentation Portal</strong>
                     <div style="font-size: 0.85rem; color: var(--text-muted); margin-top: 2px;">
                         Interactive guide with verified copy-paste commands and architecture reference.
                     </div>
-                <blockquote>
+                </div>
+                <a href="index.html">← Home</a>
+            </div>
+
+            <blockquote>
 <p>[!TIP]
 <strong>Interactive Documentation Portal:</strong> View the formatted dark-mode documentation with one-click copy buttons and live sidebar navigation at:<br />
 <a href="https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html"><strong>https://nertwork.github.io/bluepill/INSTALLATION_AND_OPERATIONS_GUIDE.html</strong></a></p>
@@ -587,7 +595,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
     end
 
     subgraph Browser[&quot;Universal Web Access&quot;]
-        WEB[&quot;BluePill Embedded Web UI\n(http://&lt;relay&gt;:1234/web)&quot;]
+        WEB[&quot;BluePill Embedded Web UI\n(http://&lt;relay&gt;:1235/web)&quot;]
     end
 
     subgraph Mac[&quot;macOS Relay Host (Intel / Apple Silicon / KVM)&quot;]
@@ -652,7 +660,7 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <p><strong>Embedded Web UI (<code>/web</code>):</strong></p>
 </li>
 <li>Built directly into <code>bluepill-server</code> with zero external dependencies.</li>
-<li>Provides full browser access at <code>http://&lt;relay-host&gt;:1234/web</code> on any desktop, laptop, tablet, or phone.</li>
+<li>Provides full browser access at <code>http://&lt;relay-host&gt;:1235/web</code> on any desktop, laptop, tablet, or phone.</li>
 <li>
 <p>Features inline 28-bar voice memo waveform players, browser audio recording (<code>🎙</code>), Expressive Send pickers, Send Later scheduled messaging, attachment drag-and-drop, global search, Find My tracking, and live server logs.</p>
 </li>
@@ -667,11 +675,11 @@ span.linenos.special { color: #000000; background-color: #ffffc0; padding-left: 
 <h3 id="arch-linux-omarchy-x86_64-apple-silicon-arm64">Arch Linux &amp; Omarchy (x86_64 &amp; Apple Silicon ARM64)</h3>
 <p>The official package is distributed via the Arch User Repository (AUR) as <code>bluepill</code>.</p>
 <h4 id="1-installation-via-aur-helper">1. Installation via AUR Helper</h4>
-<pre><code class="language-bash"># Using yay
-yay -S bluepill
+<pre><code class="language-bash"># Prebuilt x86_64 binary (~4s install, recommended on x86_64 Arch/Omarchy)
+yay -S bluepill-bin   # or: paru -S bluepill-bin
 
-# Using paru
-paru -S bluepill
+# Compile from source (x86_64 &amp; aarch64)
+yay -S bluepill       # or: paru -S bluepill
 </code></pre>
 <h4 id="2-manual-pkgbuild-compilation">2. Manual PKGBUILD Compilation</h4>
 <pre><code class="language-bash">git clone https://aur.archlinux.org/bluepill.git /tmp/bluepill-aur
@@ -790,7 +798,13 @@ sudo apt-get install pipewire pipewire-pulse ffmpeg libnotify-bin
 </code></pre>
 <hr />
 <h3 id="debian-ubuntu">Debian &amp; Ubuntu</h3>
-<h4 id="1-install-build-dependencies">1. Install Build Dependencies</h4>
+<h4 id="1-install-pre-built-deb-package-recommended">1. Install Pre-Built <code>.deb</code> Package (Recommended)</h4>
+<p>Download the latest <code>.deb</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (<code>bluepill_&lt;version&gt;_amd64.deb</code>):</p>
+<pre><code class="language-bash">sudo apt-get update
+sudo apt-get install -y ./bluepill_*_amd64.deb
+</code></pre>
+<h4 id="2-build-from-source-alternative">2. Build from Source (Alternative)</h4>
+<p>Install Build Dependencies:</p>
 <pre><code class="language-bash">sudo apt-get update
 sudo apt-get install -y \
     build-essential \
@@ -806,7 +820,7 @@ sudo apt-get install -y \
     libheif-dev \
     ffmpeg
 </code></pre>
-<h4 id="2-build-and-install-via-cmake">2. Build and Install via CMake</h4>
+<p>Build and Install via CMake:</p>
 <pre><code class="language-bash">git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
 cd /tmp/bluepill
 cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
@@ -816,7 +830,12 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 </code></pre>
 <hr />
 <h3 id="fedora-rhel">Fedora &amp; RHEL</h3>
-<h4 id="1-install-build-dependencies_1">1. Install Build Dependencies</h4>
+<h4 id="1-install-pre-built-rpm-package-recommended">1. Install Pre-Built <code>.rpm</code> Package (Recommended)</h4>
+<p>Download the latest <code>.rpm</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (<code>bluepill-&lt;version&gt;-1.x86_64.rpm</code>):</p>
+<pre><code class="language-bash">sudo dnf install -y ./bluepill-*.rpm
+</code></pre>
+<h4 id="2-build-from-source-alternative_1">2. Build from Source (Alternative)</h4>
+<p>Install Build Dependencies:</p>
 <pre><code class="language-bash">sudo dnf install -y \
     gcc-c++ \
     cmake \
@@ -830,7 +849,7 @@ sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
     libheif-devel \
     ffmpeg
 </code></pre>
-<h4 id="2-build-and-install">2. Build and Install</h4>
+<p>Build and Install:</p>
 <pre><code class="language-bash">git clone https://github.com/nertwork/bluepill.git /tmp/bluepill
 cd /tmp/bluepill
 cmake -B build -DCMAKE_BUILD_TYPE=Release -GNinja
@@ -838,6 +857,17 @@ cmake --build build -j$(nproc)
 sudo cmake --install build
 sudo ln -sf /usr/local/bin/bluepill /usr/local/bin/imsg
 </code></pre>
+<hr />
+<h3 id="windows-10-11-x86_64">Windows (10 / 11 <code>x86_64</code>)</h3>
+<p>Download the per-user Inno Setup installer <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> from <a href="https://github.com/nertwork/bluepill/releases/latest">GitHub Releases</a> (~53 MB; installs to <code>%LOCALAPPDATA%\Programs\BluePill</code> with zero UAC prompt, native in-process <code>Qt6::Multimedia</code> audio playback, and <code>--demo</code> shortcut).</p>
+<h3 id="smart-cross-platform-client-auto-updates-bluepill-cloud">Smart Cross-Platform Client Auto-Updates (BluePill Cloud)</h3>
+<p>When signed in to BluePill Cloud (<code>bluepill.nertwork.com</code>), the desktop client checks <code>https://api.bluepill.nertwork.com/api/v1/updates/latest</code> and applies confirmed client updates directly over an HTTPS host allowlist (<code>github.com</code>, <code>objects.githubusercontent.com</code>, <code>release-assets.githubusercontent.com</code>, <code>bluepill.nertwork.com</code>, <code>*.bluepill.nertwork.com</code>) with redirect verification (<code>UserVerifiedRedirectPolicy</code>), version regex validation, per-update <code>QTemporaryDir</code> isolation (<code>O_CREAT|O_EXCL|O_NOFOLLOW</code>), and mandatory <code>SHA256SUMS.txt</code> verification (including on-disk SHA256 re-verification):</p>
+<ul>
+<li><strong>Windows (<code>x86_64</code>):</strong> Downloads <code>BluePill-Setup-&lt;version&gt;-win64.exe</code> + <code>SHA256SUMS.txt</code> and runs silent Inno Setup (<code>/VERYSILENT /SUPPRESSMSGBOXES /NORESTART /CLOSEAPPLICATIONS /NORESTARTAPPLICATIONS</code>) when installed in a user-writable directory, or interactive setup otherwise, followed by a guarded <code>QProcess::startDetached</code> relaunch.</li>
+<li><strong>Arch Linux / Omarchy (<code>x86_64</code>):</strong> Downloads <code>bluepill-&lt;version&gt;-1-x86_64.pkg.tar.zst</code> + <code>SHA256SUMS.txt</code> and installs via <code>pkexec pacman -U --noconfirm</code> (with interactive terminal <code>sudo pacman -U</code> fallback on <code>pkexec</code> exit <code>127</code>, or <code>yay</code>/<code>paru -S --noconfirm bluepill-bin</code> / <code>bluepill</code> when using AUR).</li>
+<li><strong>Debian / Ubuntu (<code>x86_64</code>):</strong> Downloads <code>bluepill_&lt;version&gt;_amd64.deb</code> + <code>SHA256SUMS.txt</code> and installs via <code>pkexec apt-get install -y</code> (with terminal <code>sudo apt-get install -y</code> fallback).</li>
+<li><strong>Fedora / RHEL (<code>x86_64</code>):</strong> Downloads <code>bluepill-&lt;version&gt;-1.x86_64.rpm</code> + <code>SHA256SUMS.txt</code> and installs via <code>pkexec dnf install -y</code> (with terminal <code>sudo dnf install -y</code> fallback).</li>
+</ul>
 <hr />
 <h3 id="nixos-generic-linux">NixOS &amp; Generic Linux</h3>
 <p>Create a <code>shell.nix</code> in the repository root:</p>
@@ -871,17 +901,29 @@ pkgs.mkShell {
 <li><strong>SMS / RCS Forwarding:</strong> On your iPhone, enable forwarding under <strong>Settings -&gt; Apps -&gt; Messages -&gt; Text Message Forwarding -&gt; [Your Mac Name]</strong>.</li>
 </ul>
 <hr />
-<h3 id="homebrew-installation">Homebrew Installation</h3>
-<pre><code class="language-bash"># Add the official tap
-brew tap nertwork/tap
-
-# Install bluepill-server
+<h3 id="homebrew-installation-bluepill-cloud-login-default">Homebrew Installation &amp; BluePill Cloud Login (Default)</h3>
+<pre><code class="language-bash"># Install bluepill-server from Homebrew Tap
 brew install nertwork/tap/bluepill
 
 # Verify binary installation
 bluepill-server --version
-# Output: bluepill-server 1.1.0
+# Output: bluepill-server 1.2.12
+
+# Link your Mac to BluePill Cloud (opens https://bluepill.nertwork.com/portal) &amp; start service
+bluepill-server login
+brew services start bluepill
+
+# Verify Cloud Relay status &amp; Cloud Managed Updates at any time
+bluepill-server relay-status
+bluepill-server update-status
+# Apply confirmed Mac server update (Homebrew upgrade with SHA256 release bottle fallback + LaunchAgent restart)
+bluepill-server update --confirm
 </code></pre>
+<blockquote>
+<p>[!NOTE]
+<strong>Hardened Mac Server Cloud Managed Updates (<code>v1.2.12+</code>):</strong> Strictly gated to Macs signed into BluePill Cloud (never phones home when self-hosted offline). <code>bluepill-server update --confirm</code> (or <code>POST /api/v1/server/update/apply</code> from the desktop client) first attempts <code>brew update</code> + <code>brew upgrade nertwork/tap/bluepill</code>. If Homebrew lacks <code>git</code>/Xcode CLT or the tap lags behind the latest GitHub release, it automatically falls back to downloading <code>SHA256SUMS.txt</code> and <code>bluepill-&lt;ver&gt;.all.bottle.tar.gz</code> over an HTTPS host allowlist with redirect verification (<code>_SafeRedirectHandler</code>), verifies the SHA256 digest and Python AST, atomically swaps <code>bluepill-server</code>, and performs a LaunchAgent-aware restart (<code>launchctl kickstart -k</code> for <code>com.nertwork.bluepill-server</code> or <code>homebrew.mxcl.bluepill</code>, falling back to <code>brew services restart bluepill</code>).</p>
+</blockquote>
+<p>Then open the <strong>BluePill Desktop Client</strong> on Linux or Windows and click <strong>"Sign in at bluepill.nertwork.com →"</strong> (or <strong>"Try Live Demo"</strong>).</p>
 <hr />
 <h3 id="full-disk-access-permissions">Full Disk Access &amp; Permissions</h3>
 <p>macOS Privacy protections (TCC) protect <code>~/Library/Messages/chat.db</code> and Contacts databases. You must grant <strong>Full Disk Access</strong> to allow <code>bluepill-server</code> to read messages and resolve contacts.</p>
@@ -911,7 +953,7 @@ bluepill-server --version
 cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
 {
   &quot;host&quot;: &quot;0.0.0.0&quot;,
-  &quot;port&quot;: 1234,
+  &quot;port&quot;: 1235,
   &quot;password&quot;: &quot;CHANGE_ME_TO_A_SECURE_TOKEN&quot;,
   &quot;helperPort&quot;: 45670,
   &quot;enableBackgroundDaemons&quot;: true
@@ -919,6 +961,12 @@ cat &lt;&lt; 'EOF_CONFIG' &gt; ~/.config/bluepill/server.json
 EOF_CONFIG
 chmod 600 ~/.config/bluepill/server.json
 </code></pre>
+<blockquote>
+<p>[!NOTE]
+<code>bluepill-server</code> reads <code>password</code> and the iCloud module toggles (<code>enableNotes</code>, <code>enableCalendar</code>, <code>enablePhotos</code>) from <code>server.json</code>, but it takes its <strong>listen address and port from the command line</strong> (<code>--host</code> / <code>--port</code>, or <code>BLUEPILL_HOST</code> / <code>BLUEPILL_PORT</code>). Without <code>--host</code> it listens on <code>127.0.0.1</code> only, so Linux clients on your LAN or tailnet can't reach it. To accept remote connections, start it with <code>--host &lt;the Mac's Tailscale IP&gt;</code> (recommended; WireGuard-encrypted) or <code>--host 0.0.0.0</code>. The Homebrew service listens on port <code>1235</code>, which is the port the Linux client uses when you don't enter one.</p>
+<p>[!WARNING]
+The relay speaks plain HTTP. With <code>--host 0.0.0.0</code>, the relay password and your messages cross the LAN unencrypted. On any network you don't fully trust, bind to the Tailscale IP or use <a href="#reverse-proxy--tls-termination">Reverse Proxy &amp; TLS Termination</a>.</p>
+</blockquote>
 <h4 id="2-run-built-in-self-test">2. Run Built-In Self-Test</h4>
 <p>Verify timestamp conversion, typedstream parsing, and database bindings:</p>
 <pre><code class="language-bash">bluepill-server --selftest &lt;/dev/null
@@ -950,7 +998,7 @@ cat &lt;&lt; 'EOF_PLIST' &gt; ~/Library/LaunchAgents/com.nertwork.bluepill-serve
         &lt;string&gt;/opt/homebrew/bin/bluepill-server&lt;/string&gt;
         &lt;string&gt;serve&lt;/string&gt;
         &lt;string&gt;--port&lt;/string&gt;
-        &lt;string&gt;1234&lt;/string&gt;
+        &lt;string&gt;1235&lt;/string&gt;
         &lt;string&gt;--password&lt;/string&gt;
         &lt;string&gt;CHANGE_ME_TO_A_SECURE_TOKEN&lt;/string&gt;
     &lt;/array&gt;
@@ -1038,7 +1086,10 @@ EOF_PLIST
 <ul>
 <li>Connects over LAN, WireGuard, or Tailscale.</li>
 <li>Full two-way push event delivery via WebSockets.</li>
-<li>URL Format: <code>http://192.168.1.50:1235</code> or <code>https://bluepill.example.com</code>.</li>
+<li>URL Format: <code>http://192.168.1.50:1235</code> or <code>https://bluepill.example.com:443</code>.</li>
+<li>In <strong>⚙ Settings</strong>, a URL without a scheme uses <code>http://</code>, and an empty <strong>Port</strong> field uses <code>1235</code> for both <code>http://</code> and <code>https://</code>. A port typed into the URL (<code>host:8080</code>) moves into the Port field.</li>
+<li>The client sends the relay password over plain <code>http://</code> only to localhost, Tailscale (<code>100.64.0.0/10</code>, <code>fd7a:115c:a1e0::/48</code>, <code>*.ts.net</code>, or a custom-domain name that resolves only to devices on your tailnet, confirmed with <code>tailscale status</code>) and private LAN addresses (RFC 1918, link-local, IPv6 ULA, <code>*.local</code>). A public host needs <code>https://</code>, and Settings shows a warning when an <code>http://</code> URL would be refused.</li>
+<li><strong>Tailscale:</strong> if <code>tailscale</code> is installed and connected on the Linux client, Settings lists the online Macs on your tailnet, checks each for a relay on <code>:1235</code>, and fills in the URL with one click. If exactly one relay answers on first run, it's filled in for you. The relay must be started with <code>--host</code> (see <a href="#configuration--self-test">Configuration &amp; Self-Test</a>) to be reachable.</li>
 </ul>
 <h4 id="method-2-direct-ssh-transport-ssh">Method 2: Direct SSH Transport (<code>ssh://</code>)</h4>
 <ul>
@@ -1052,7 +1103,7 @@ EOF_PLIST
 <p>To expose your relay over HTTPS with public or private TLS certificates:</p>
 <h4 id="caddy-configuration-etccaddycaddyfile">Caddy Configuration (<code>/etc/caddy/Caddyfile</code>)</h4>
 <pre><code class="language-caddy">bluepill.example.com {
-    reverse_proxy 127.0.0.1:1234 {
+    reverse_proxy 127.0.0.1:1235 {
         header_up Host {host}
         header_up X-Real-IP {remote_host}
     }
@@ -1067,7 +1118,7 @@ EOF_PLIST
     ssl_certificate_key /etc/letsencrypt/live/bluepill.example.com/privkey.pem;
 
     location / {
-        proxy_pass http://127.0.0.1:1234;
+        proxy_pass http://127.0.0.1:1235;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection &quot;upgrade&quot;;
@@ -1080,31 +1131,36 @@ EOF_PLIST
 </code></pre>
 <h4 id="tailscale-serve">Tailscale Serve</h4>
 <p>If using Tailscale on your Mac, terminate TLS effortlessly:</p>
-<pre><code class="language-bash">tailscale serve --bg 1234
+<pre><code class="language-bash">tailscale serve --bg 1235
 </code></pre>
+<h4 id="client-port-for-reverse-proxies">Client Port for Reverse Proxies</h4>
+<p>Caddy, Nginx, and Tailscale Serve all listen on <code>443</code>. In the Linux client's <strong>⚙ Settings</strong>, enter <code>https://&lt;your-host&gt;</code> and set <strong>Port</strong> to <code>443</code>. An empty Port field means <code>1235</code>. Saved <code>config.json</code> URLs are used exactly as written, so a saved <code>https://bluepill.example.com</code> keeps using <code>443</code>.</p>
 <hr />
-<h2 id="4-built-in-web-ui-operations-web">4. Built-In Web UI Operations (<code>/web</code>)</h2>
-<p>Every instance of <code>bluepill-server</code> includes an embedded, dark-slate Web client accessible at:</p>
-<pre><code class="language-text">http://&lt;relay-host&gt;:1234/web
+<h2 id="4-built-in-web-ui-operations-web-tslugweb">4. Built-In Web UI Operations (<code>/web</code> &amp; <code>/t/&lt;slug&gt;/web</code>)</h2>
+<p>Every instance of <code>bluepill-server</code> includes a unified <strong>Liquid Glass / Matrix / Light</strong> Web Client accessible locally at:</p>
+<pre><code class="language-text">http://&lt;relay-host&gt;:1235/web
 </code></pre>
-<h3 id="key-capabilities-in-the-web-ui">Key Capabilities in the Web UI:</h3>
+<p>Or remotely through your BluePill Cloud Relay at <code>https://bluepill.nertwork.com/t/&lt;slug&gt;/web</code> (or try the hosted sandbox instantly at <a href="https://bluepill.nertwork.com/demo">https://bluepill.nertwork.com/demo</a>; Cloud Relay portal at <a href="https://bluepill.nertwork.com/signup">https://bluepill.nertwork.com/signup</a>).</p>
+<h3 id="key-capabilities-hardening-in-the-web-ui-v1212">Key Capabilities &amp; Hardening in the Web UI (<code>v1.2.12+</code>):</h3>
 <ol>
-<li><strong>Authentication:</strong></li>
-<li>Enter your relay password in the top-right authorization input or pass it in the query string: <code>http://&lt;host&gt;:1234/web?password=YOUR_PASSWORD</code>.</li>
+<li><strong>Authentication &amp; Security Hardening:</strong></li>
+<li>Auto-populates Cloud Relay credentials when signed into <code>bluepill.nertwork.com</code>, or accepts your relay password via the auth modal / <code>localStorage</code> (clearing empty keys cleanly and showing inline invalid-password feedback).</li>
 <li>
-<p>Credentials are saved in browser <code>localStorage</code>.</p>
+<p>Enforces XSS escaping across message reactions and dynamic DOM attributes, <code>rel="noopener noreferrer"</code> on attachment download links, strict CSP (<code>object-src 'none'; base-uri 'self'</code>), <code>Cache-Control: no-store, private</code> on <code>/t/&lt;slug&gt;/web</code> responses, and <code>cookie</code> header stripping across Cloud Relay proxy modes.</p>
 </li>
 <li>
-<p><strong>Pinned Conversations Avatar Bar:</strong></p>
+<p><strong>Contact Resolution, <code>lastMessage</code> Previews &amp; Pinned Conversations:</strong></p>
 </li>
+<li>Resolves macOS <code>AddressBook</code> contacts across <code>chat_id</code> and participant handles and displays <code>lastMessage</code> text/attachment previews directly in the sidebar chat list (chunked <code>query_chats</code> queries with <code>COALESCE</code> NULL-date handling and deleted/system message filtering).</li>
 <li>Displays circular avatar shortcuts synchronized with macOS <code>com.apple.messages.pinning.plist</code>.</li>
 <li>
 <p>Click any avatar to jump directly to the thread.</p>
 </li>
 <li>
-<p><strong>Inline 28-Bar Voice Memo Player &amp; <code>🎙</code> Recorder:</strong></p>
+<p><strong>Inline Voice Memo Player (<code>.caf</code> Transcoding) &amp; Lazy-Loaded Photos:</strong></p>
 </li>
-<li>Renders animated 28-bar audio waveforms for incoming audio clips.</li>
+<li>Plays inline <code>&lt;audio&gt;</code> / <code>&lt;video&gt;</code> attachments and automatically requests server-side <code>.caf</code> (<code>audio/x-caf</code>) transcoding (<code>/api/v1/attachment/&lt;guid&gt;/live?transcode=1</code>) with private <code>0700</code> atomic <code>.m4a</code>/<code>.wav</code> caching.</li>
+<li>Photos tab renders iCloud <code>Photos.app</code> items with <code>loading="lazy" decoding="async"</code>, title/filename/timestamp fallbacks, and avoids tearing down active audio/video playback during background polls.</li>
 <li>
 <p>Click the <code>🎙</code> microphone icon to record voice memos in your browser and dispatch them as <code>.m4a</code> audio attachments.</p>
 </li>
@@ -1409,8 +1465,11 @@ sqlite3 ~/Library/Messages/chat.db &quot;PRAGMA wal_checkpoint(PASSIVE);&quot; &
 sudo pmset -c sleep 0
 sudo pmset -c disablesleep 1
 
-# Or run bluepill-server wrapped in caffeinate
-caffeinate -s bluepill-server serve --port 1234
+# Or run bluepill-server wrapped in caffeinate. Stop the Homebrew service first,
+# because it already holds port 1235, then start it again when you're done:
+brew services stop bluepill
+caffeinate -s bluepill-server serve --port 1235
+brew services start bluepill
 </code></pre>
 <h3 id="runbook-3-diagnosing-private-api-45670-unavailability">Runbook 3: Diagnosing Private API (:45670) Unavailability</h3>
 <p>If <code>/api/v1/server/info</code> reports <code>private_api: false</code>:
