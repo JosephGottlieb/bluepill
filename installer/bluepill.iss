@@ -53,6 +53,7 @@ Name: "{autodesktop}\BluePill"; Filename: "{app}\bluepill.exe"; Tasks: desktopic
 
 [Run]
 Filename: "{app}\bluepill.exe"; Description: "{cm:LaunchProgram,BluePill}"; Flags: nowait postinstall skipifsilent
+Filename: "{app}\bluepill.exe"; Parameters: ""; Flags: nowait postinstall runasoriginaluser; Check: WizardSilent
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

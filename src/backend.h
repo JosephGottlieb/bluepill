@@ -77,6 +77,35 @@ struct MessageModel {
     };
 };
 
+struct ClientUpdateEnv {
+    QString platform;        // "windows", "linux", "macos", etc.
+    QString cpuArch;         // "x86_64", "aarch64", "arm64", etc.
+    QString distroId;        // lowercase ID from /etc/os-release
+    QString distroIdLike;    // lowercase ID_LIKE from /etc/os-release
+    bool winDirWritable = false;
+    bool hasPacman = false;
+    bool hasPkexec = false;
+    bool hasAptGet = false;
+    bool hasDnf = false;
+    QString aurHelper;       // "yay", "paru", or empty
+    bool hasTerminal = false;
+    bool bluepillBinInstalled = false;
+    QString winInstallerUrl;
+    QString archUrl;
+    QString debUrl;
+    QString rpmUrl;
+};
+
+struct ClientUpdateStrategy {
+    QString kind;            // "windows-silent", "windows-interactive", "arch-pacman", "arch-aur", "deb-apt", "rpm-dnf", "manual"
+    QString methodLabel;
+    bool directSupported = false;
+    bool silentSupported = false;
+    QString assetUrl;
+    QString aurHelper;
+    QString aurPackage;
+};
+
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool connected READ connected NOTIFY statusChanged)
@@ -108,7 +137,8 @@ class Backend : public QObject {
     Q_PROPERTY(bool updateApplying READ updateApplying NOTIFY updateStateChanged)
     Q_PROPERTY(QString updateStatusText READ updateStatusText NOTIFY updateStateChanged)
     Q_PROPERTY(bool anyUpdateAvailable READ anyUpdateAvailable NOTIFY updateStateChanged)
-    Q_PROPERTY(bool silentAutoUpdateSupported READ silentAutoUpdateSupported CONSTANT)
+    Q_PROPERTY(bool silentAutoUpdateSupported READ silentAutoUpdateSupported NOTIFY updateStateChanged)
+    Q_PROPERTY(QString clientUpdateMethod READ clientUpdateMethod NOTIFY updateStateChanged)
     Q_PROPERTY(QVariantList tailscaleRelays READ tailscaleRelays NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(QString tailscaleStatus READ tailscaleStatus NOTIFY tailscaleRelaysChanged)
     Q_PROPERTY(bool tailscaleScanning READ tailscaleScanning NOTIFY tailscaleRelaysChanged)
@@ -428,11 +458,16 @@ public:
     QString updateStatusText() const { return m_updateStatusText; }
     bool anyUpdateAvailable() const { return clientUpdateAvailable() || serverUpdateAvailable(); }
     bool silentAutoUpdateSupported() const;
+    QString clientUpdateMethod() const;
+    static ClientUpdateStrategy detectClientUpdateStrategy(const ClientUpdateEnv &env);
+    static QHash<QString, QString> parseSha256Sums(const QByteArray &content);
     Q_INVOKABLE static int compareSemver(const QString &a, const QString &b);
     Q_INVOKABLE void checkForUpdatesNow();
     Q_INVOKABLE void confirmClientUpdate();
     Q_INVOKABLE bool confirmServerUpdate(bool confirmed = false);
     void setUpdatesFeedUrlForTest(const QString &url) { m_updatesFeedUrlOverride = url; }
+    void setAllowLocalhostCloudForTest(bool allow) { m_allowLocalhostCloudForTest = allow; }
+    void setServerUpdatePollIntervalMsForTest(int ms) { m_serverUpdatePollIntervalMs = std::max(10, ms); }
     void checkForCloudUpdates(bool manual = false);
     Q_INVOKABLE void registerWindow(QObject *window);
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -887,6 +922,7 @@ private:
     QString m_clientDebUrl;
     QString m_clientRpmUrl;
     QString m_clientArchUrl;
+    QString m_clientChecksumsUrl;
     bool m_serverUpdateAvailable = false;
     QString m_serverCurrentVersion;
     QString m_serverLatestVersion;
@@ -896,7 +932,26 @@ private:
     bool m_initialCloudUpdateChecked = false;
     QString m_updateStatusText;
     QString m_updatesFeedUrlOverride;
+    bool m_allowLocalhostCloudForTest = false;
     QTimer m_cloudUpdateTimer;
+    QTimer m_serverUpdatePollTimer;
+    int m_serverUpdatePollAttempts = 0;
+    int m_serverUpdatePollIntervalMs = 2500;
+    QString m_serverUpdateTargetVersion;
+    quint64 m_serverUpdatePollGen = 0;
+    ClientUpdateEnv currentClientUpdateEnv() const;
+    void downloadVerifiedClientPackage(const QString &assetUrl,
+                                       const QString &checksumsUrl,
+                                       bool requireChecksum,
+                                       const QString &fallbackFileName,
+                                       std::function<void(const QString &localFilePath)> onReady);
+    void installLinuxPackageWithPkexecOrTerminal(const QString &tmpPath,
+                                                 const QStringList &pkexecArgs,
+                                                 const QString &sudoFallbackCmd);
+    void launchLinuxCommandInTerminal(const QString &shellCmd,
+                                      const QString &cleanupFilePath,
+                                      const QString &statusDesc);
+    void pollServerUpdateStatus();
     bool m_cloudSignInPending = false;
     QString m_cloudAccountEmail;
     QString m_cloudSignInError;

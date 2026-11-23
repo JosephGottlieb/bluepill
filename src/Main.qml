@@ -11752,10 +11752,13 @@ ApplicationWindow {
         }
 
         Rectangle {
-            width: Math.min(480, root.width - 40)
+            id: cloudUpdateModalCard
+            objectName: "cloudUpdateModalCard"
+            width: Math.min(540, root.width - 40)
             height: cloudUpdateModalCol.implicitHeight + 40
             anchors.centerIn: parent
             radius: 12
+            clip: true
             color: theme.darkBackground
             border.width: 1
             border.color: theme.accent
@@ -11774,6 +11777,7 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize + 2
                     font.bold: true
                     color: theme.brightForeground
+                    elide: Text.ElideRight
                 }
 
                 Text {
@@ -11786,9 +11790,12 @@ ApplicationWindow {
 
                 // Client App Update Section
                 Rectangle {
+                    id: clientUpdateCard
+                    objectName: "clientUpdateCard"
                     Layout.fillWidth: true
                     implicitHeight: clientUpdRow.implicitHeight + 18
                     radius: 8
+                    clip: true
                     color: theme.lighterBackground
                     border.width: 1
                     border.color: backend.clientUpdateAvailable ? theme.accent : theme.muted
@@ -11800,34 +11807,50 @@ ApplicationWindow {
                         spacing: 10
                         ColumnLayout {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             spacing: 2
                             Text {
-                                text: i18n.tr("Client App Update")
+                                Layout.fillWidth: true
+                                text: backend.clientUpdateMethod.length > 0
+                                      ? i18n.tr("Client App Update (%1)").arg(backend.clientUpdateMethod)
+                                      : i18n.tr("Client App Update")
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
                                 color: theme.brightForeground
+                                elide: Text.ElideRight
                             }
                             Text {
+                                Layout.fillWidth: true
                                 text: backend.clientUpdateAvailable
-                                      ? ("v" + (Qt.application.version || "1.2.7") + " → v" + backend.clientLatestVersion)
-                                      : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.7")
+                                      ? ("v" + (Qt.application.version || "1.2.11") + " → v" + backend.clientLatestVersion)
+                                      : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.11")
                                 font.pixelSize: theme.fontSize - 2
                                 color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
+                                elide: Text.ElideRight
                             }
                         }
                         Rectangle {
                             id: confirmClientUpdateBtn
                             objectName: "confirmClientUpdateBtn"
+                            Layout.alignment: Qt.AlignVCenter
+                            Layout.preferredHeight: 32
+                            Layout.preferredWidth: Math.min(confirmClientTxt.implicitWidth + 24, Math.max(120, Math.floor(clientUpdRow.width * 0.45)))
+                            Layout.minimumWidth: 96
                             height: 32
-                            implicitWidth: confirmClientTxt.implicitWidth + 20
+                            implicitWidth: confirmClientTxt.implicitWidth + 24
                             radius: 7
                             enabled: backend.cloudLoggedIn && backend.clientUpdateAvailable && !backend.updateApplying
                             opacity: enabled ? 1.0 : 0.45
                             color: theme.accent
                             Text {
                                 id: confirmClientTxt
-                                anchors.centerIn: parent
-                                text: backend.silentAutoUpdateSupported ? i18n.tr("Update & Restart") : i18n.tr("Confirm & Update App")
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                                text: backend.silentAutoUpdateSupported ? i18n.tr("Update & Restart") : i18n.tr("Update App")
                                 font.pixelSize: theme.fontSize - 2
                                 font.bold: true
                                 color: theme.onAccent
@@ -11844,9 +11867,12 @@ ApplicationWindow {
 
                 // Mac Server Update Section
                 Rectangle {
+                    id: serverUpdateCard
+                    objectName: "serverUpdateCard"
                     Layout.fillWidth: true
                     implicitHeight: srvUpdRow.implicitHeight + 18
                     radius: 8
+                    clip: true
                     color: theme.lighterBackground
                     border.width: 1
                     border.color: backend.serverUpdateAvailable ? theme.accent : theme.muted
@@ -11858,34 +11884,50 @@ ApplicationWindow {
                         spacing: 10
                         ColumnLayout {
                             Layout.fillWidth: true
+                            Layout.minimumWidth: 0
                             spacing: 2
                             Text {
+                                Layout.fillWidth: true
                                 text: i18n.tr("Mac Server Update (%1)").arg(backend.serverUpdateMethod || "homebrew")
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
                                 color: theme.brightForeground
+                                elide: Text.ElideRight
                             }
                             Text {
+                                Layout.fillWidth: true
                                 text: backend.serverUpdateAvailable
                                       ? ("v" + (backend.serverCurrentVersion || "?") + " → v" + backend.serverLatestVersion)
-                                      : i18n.tr("Up to date")
+                                      : (backend.serverCurrentVersion.length > 0
+                                         ? i18n.tr("Up to date (v%1)").arg(backend.serverCurrentVersion)
+                                         : i18n.tr("Up to date"))
                                 font.pixelSize: theme.fontSize - 2
                                 color: backend.serverUpdateAvailable ? theme.accent : theme.darkForeground
+                                elide: Text.ElideRight
                             }
                         }
                         Rectangle {
                             id: confirmServerUpdateBtn
                             objectName: "confirmServerUpdateBtn"
+                            Layout.alignment: Qt.AlignVCenter
+                            Layout.preferredHeight: 32
+                            Layout.preferredWidth: Math.min(confirmSrvTxt.implicitWidth + 24, Math.max(120, Math.floor(srvUpdRow.width * 0.45)))
+                            Layout.minimumWidth: 96
                             height: 32
-                            implicitWidth: confirmSrvTxt.implicitWidth + 20
+                            implicitWidth: confirmSrvTxt.implicitWidth + 24
                             radius: 7
                             enabled: backend.cloudLoggedIn && backend.serverUpdateAvailable && !backend.updateApplying
                             opacity: enabled ? 1.0 : 0.45
                             color: theme.green
                             Text {
                                 id: confirmSrvTxt
-                                anchors.centerIn: parent
-                                text: i18n.tr("Confirm & Update Mac Server")
+                                anchors.fill: parent
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 10
+                                horizontalAlignment: Text.AlignHCenter
+                                verticalAlignment: Text.AlignVCenter
+                                elide: Text.ElideRight
+                                text: i18n.tr("Update Server")
                                 font.pixelSize: theme.fontSize - 2
                                 font.bold: true
                                 color: "#ffffff"

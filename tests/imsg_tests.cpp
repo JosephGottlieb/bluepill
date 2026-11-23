@@ -11512,6 +11512,420 @@ private slots:
         QVERIFY2(unixUrl.endsWith(QStringLiteral("/tmp/pic.png")), qPrintable(unixUrl));
     }
 
+    void testClientUpdateStrategyAndChecksums() {
+        // 1. parseSha256Sums: valid + malformed lines
+        const QByteArray sumsContent =
+            "# Release checksums\r\n"
+            "\r\n"
+            "2cb93f6ed4b21ee986bdae39e4272a1711704dccf9eed76717096eec67f95a5b  bluepill-1.2.11-1-x86_64.pkg.tar.zst\r\n"
+            "AABBCCDDEEFF00112233445566778899AABBCCDDEEFF00112233445566778899 *./dist/BluePill-Setup-1.2.11-win64.exe\n"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef  packages/bluepill_1.2.11_amd64.deb\n"
+            "deadbeef  too-short-hash.rpm\n"
+            "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz  non-hex-hash.rpm\n"
+            "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef\n"
+            "not-a-checksum-line\n";
+        const QHash<QString, QString> parsed = Backend::parseSha256Sums(sumsContent);
+        QCOMPARE(parsed.size(), 3);
+        QCOMPARE(parsed.value(QStringLiteral("bluepill-1.2.11-1-x86_64.pkg.tar.zst")),
+                 QStringLiteral("2cb93f6ed4b21ee986bdae39e4272a1711704dccf9eed76717096eec67f95a5b"));
+        QCOMPARE(parsed.value(QStringLiteral("BluePill-Setup-1.2.11-win64.exe")),
+                 QStringLiteral("aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"));
+        QCOMPARE(parsed.value(QStringLiteral("bluepill_1.2.11_amd64.deb")),
+                 QStringLiteral("0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"));
+        QVERIFY(!parsed.contains(QStringLiteral("too-short-hash.rpm")));
+        QVERIFY(!parsed.contains(QStringLiteral("non-hex-hash.rpm")));
+
+        // 2. Windows writable -> silent; non-writable -> interactive (still direct)
+        {
+            ClientUpdateEnv env;
+            env.platform = QStringLiteral("windows");
+            env.cpuArch = QStringLiteral("x86_64");
+            env.winInstallerUrl = QStringLiteral("https://example.com/BluePill-Setup.exe");
+            env.winDirWritable = true;
+            const ClientUpdateStrategy sWinSilent = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(sWinSilent.kind, QStringLiteral("windows-silent"));
+            QCOMPARE(sWinSilent.directSupported, true);
+            QCOMPARE(sWinSilent.silentSupported, true);
+
+            env.winDirWritable = false;
+            const ClientUpdateStrategy sWinAdmin = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(sWinAdmin.kind, QStringLiteral("windows-interactive"));
+            QCOMPARE(sWinAdmin.directSupported, true);
+            QCOMPARE(sWinAdmin.silentSupported, false);
+        }
+
+        // 3. Arch / Omarchy x86_64 with pacman + pkexec + archUrl
+        {
+            ClientUpdateEnv env;
+            env.platform = QStringLiteral("linux");
+            env.cpuArch = QStringLiteral("x86_64");
+            env.distroId = QStringLiteral("omarchy");
+            env.distroIdLike = QStringLiteral("arch");
+            env.hasPacman = true;
+            env.hasPkexec = true;
+            env.hasTerminal = true;
+            env.archUrl = QStringLiteral("https://example.com/bluepill.pkg.tar.zst");
+            const ClientUpdateStrategy s = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(s.kind, QStringLiteral("arch-pacman"));
+            QCOMPARE(s.methodLabel, QStringLiteral("pacman"));
+            QCOMPARE(s.directSupported, true);
+            QCOMPARE(s.silentSupported, true);
+
+            // Without pkexec and without AUR helper -> directSupported (terminal fallback), silentSupported false
+            env.hasPkexec = false;
+            const ClientUpdateStrategy sNoPk = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(sNoPk.kind, QStringLiteral("arch-pacman"));
+            QCOMPARE(sNoPk.directSupported, true);
+            QCOMPARE(sNoPk.silentSupported, false);
+
+            // No archUrl + yay -> AUR strategy picks bluepill or bluepill-bin based on install
+            env.archUrl.clear();
+            env.aurHelper = QStringLiteral("yay");
+            env.bluepillBinInstalled = true;
+            const ClientUpdateStrategy sAurBin = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(sAurBin.kind, QStringLiteral("arch-aur"));
+            QCOMPARE(sAurBin.aurHelper, QStringLiteral("yay"));
+            QCOMPARE(sAurBin.aurPackage, QStringLiteral("bluepill-bin"));
+            QCOMPARE(sAurBin.silentSupported, true);
+
+            env.bluepillBinInstalled = false;
+            const ClientUpdateStrategy sAurSrc = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(sAurSrc.kind, QStringLiteral("arch-aur"));
+            QCOMPARE(sAurSrc.aurPackage, QStringLiteral("bluepill"));
+        }
+
+        // 4. Arch / Omarchy aarch64 -> AUR strategy with bluepill (not bluepill-bin)
+        {
+            ClientUpdateEnv env;
+            env.platform = QStringLiteral("linux");
+            env.cpuArch = QStringLiteral("arm64");
+            env.distroId = QStringLiteral("arch");
+            env.hasPacman = true;
+            env.hasPkexec = true;
+            env.hasTerminal = true;
+            env.aurHelper = QStringLiteral("paru");
+            env.bluepillBinInstalled = true;
+            env.archUrl = QStringLiteral("https://example.com/bluepill-x86_64.pkg.tar.zst");
+            const ClientUpdateStrategy s = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(s.kind, QStringLiteral("arch-aur"));
+            QCOMPARE(s.methodLabel, QStringLiteral("AUR (paru)"));
+            QCOMPARE(s.aurHelper, QStringLiteral("paru"));
+            QCOMPARE(s.aurPackage, QStringLiteral("bluepill"));
+            QCOMPARE(s.directSupported, true);
+            QCOMPARE(s.silentSupported, true);
+        }
+
+        // 5. Debian / Ubuntu x86_64
+        {
+            ClientUpdateEnv env;
+            env.platform = QStringLiteral("linux");
+            env.cpuArch = QStringLiteral("x86_64");
+            env.distroId = QStringLiteral("ubuntu");
+            env.distroIdLike = QStringLiteral("debian");
+            env.hasAptGet = true;
+            env.hasPkexec = true;
+            env.debUrl = QStringLiteral("https://example.com/bluepill_amd64.deb");
+            const ClientUpdateStrategy s = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(s.kind, QStringLiteral("deb-apt"));
+            QCOMPARE(s.methodLabel, QStringLiteral("apt"));
+            QCOMPARE(s.directSupported, true);
+            QCOMPARE(s.silentSupported, true);
+        }
+
+        // 6. Fedora / RHEL x86_64
+        {
+            ClientUpdateEnv env;
+            env.platform = QStringLiteral("linux");
+            env.cpuArch = QStringLiteral("x86_64");
+            env.distroId = QStringLiteral("fedora");
+            env.hasDnf = true;
+            env.hasPkexec = true;
+            env.rpmUrl = QStringLiteral("https://example.com/bluepill.x86_64.rpm");
+            const ClientUpdateStrategy s = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(s.kind, QStringLiteral("rpm-dnf"));
+            QCOMPARE(s.methodLabel, QStringLiteral("dnf"));
+            QCOMPARE(s.directSupported, true);
+            QCOMPARE(s.silentSupported, true);
+        }
+
+        // 7. Fallback -> manual
+        {
+            ClientUpdateEnv env;
+            env.platform = QStringLiteral("linux");
+            env.cpuArch = QStringLiteral("riscv64");
+            env.distroId = QStringLiteral("gentoo");
+            const ClientUpdateStrategy s = Backend::detectClientUpdateStrategy(env);
+            QCOMPARE(s.kind, QStringLiteral("manual"));
+            QCOMPARE(s.directSupported, false);
+            QCOMPARE(s.silentSupported, false);
+        }
+    }
+
+    void testCloudUpdateModalLayoutBounds() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        QTcpServer mockFeed;
+        QVERIFY(mockFeed.listen(QHostAddress::LocalHost, 0));
+        QObject::connect(&mockFeed, &QTcpServer::newConnection, &mockFeed, [&]() {
+            while (mockFeed.hasPendingConnections()) {
+                QTcpSocket *s = mockFeed.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [s]() {
+                    s->readAll();
+                    const QByteArray body = QJsonDocument(QJsonObject{
+                        {QStringLiteral("version"), QStringLiteral("9.9.9")},
+                        {QStringLiteral("release_url"), QStringLiteral("https://github.com/nertwork/bluepill/releases/tag/v9.9.9")},
+                        {QStringLiteral("checksums_url"), QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v9.9.9/SHA256SUMS.txt")},
+                        {QStringLiteral("assets"), QJsonObject{
+                            {QStringLiteral("windows"), QStringLiteral("https://example.com/BluePill-Setup-9.9.9-win64.exe")},
+                            {QStringLiteral("arch"), QStringLiteral("https://example.com/bluepill-9.9.9-1-x86_64.pkg.tar.zst")},
+                            {QStringLiteral("deb"), QStringLiteral("https://example.com/bluepill_9.9.9_amd64.deb")},
+                            {QStringLiteral("rpm"), QStringLiteral("https://example.com/bluepill-9.9.9-1.x86_64.rpm")}
+                        }}
+                    }).toJson(QJsonDocument::Compact);
+                    const QByteArray resp =
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        QTcpServer mockRelay;
+        QVERIFY(mockRelay.listen(QHostAddress::LocalHost, 0));
+        QObject::connect(&mockRelay, &QTcpServer::newConnection, &mockRelay, [&]() {
+            while (mockRelay.hasPendingConnections()) {
+                QTcpSocket *s = mockRelay.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [s]() {
+                    s->readAll();
+                    const QByteArray body = QJsonDocument(QJsonObject{
+                        {QStringLiteral("status"), 200},
+                        {QStringLiteral("data"), QJsonObject{
+                            {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
+                            {QStringLiteral("latest_version"), QStringLiteral("9.9.9")},
+                            {QStringLiteral("update_available"), true},
+                            {QStringLiteral("method"), QStringLiteral("homebrew")},
+                            {QStringLiteral("applying"), false}
+                        }}
+                    }).toJson(QJsonDocument::Compact);
+                    const QByteArray resp =
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        const QString prevAppVer = QCoreApplication::applicationVersion();
+        QCoreApplication::setApplicationVersion(QStringLiteral("1.2.11"));
+        auto restoreVer = qScopeGuard([&]() { QCoreApplication::setApplicationVersion(prevAppVer); });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_modal.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_modal.json")));
+        b.setAllowLocalhostCloudForTest(true);
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockRelay.serverPort()), QString(), QStringLiteral("pw"));
+        b.setUpdatesFeedUrlForTest(QStringLiteral("http://127.0.0.1:%1/updates/latest").arg(mockFeed.serverPort()));
+
+        b.checkForUpdatesNow();
+        QTRY_COMPARE_WITH_TIMEOUT(b.updateChecking(), false, 3000);
+        QCOMPARE(b.clientUpdateAvailable(), true);
+        QCOMPARE(b.serverUpdateAvailable(), true);
+
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &b);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        auto *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->resize(960, 720);
+        win->show();
+        win->setProperty("showUpdateModal", true);
+        QTest::qWait(80);
+
+        auto *card = win->findChild<QQuickItem *>(QStringLiteral("cloudUpdateModalCard"));
+        auto *clientCard = win->findChild<QQuickItem *>(QStringLiteral("clientUpdateCard"));
+        auto *serverCard = win->findChild<QQuickItem *>(QStringLiteral("serverUpdateCard"));
+        auto *clientBtn = win->findChild<QQuickItem *>(QStringLiteral("confirmClientUpdateBtn"));
+        auto *serverBtn = win->findChild<QQuickItem *>(QStringLiteral("confirmServerUpdateBtn"));
+        QVERIFY(card != nullptr);
+        QVERIFY(clientCard != nullptr);
+        QVERIFY(serverCard != nullptr);
+        QVERIFY(clientBtn != nullptr);
+        QVERIFY(serverBtn != nullptr);
+
+        auto verifyBounds = [&](const QList<QSize> &sizes) {
+            for (const QSize &sz : sizes) {
+                win->resize(sz);
+                QCoreApplication::processEvents();
+                QTest::qWait(50);
+
+                QVERIFY(card->width() > 0);
+                QVERIFY(card->height() > 0);
+                QVERIFY(clientBtn->width() > 0);
+                QVERIFY(serverBtn->width() > 0);
+                QVERIFY(clientCard->width() <= card->width());
+                QVERIFY(serverCard->width() <= card->width());
+
+                const QPointF cPos = clientBtn->mapToItem(card, QPointF(0, 0));
+                const QPointF sPos = serverBtn->mapToItem(card, QPointF(0, 0));
+                QVERIFY2(cPos.x() >= 0 && cPos.x() + clientBtn->width() <= card->width() + 0.5,
+                         qPrintable(QStringLiteral("clientBtn overflow at %1x%2: x=%3 w=%4 cardW=%5")
+                                        .arg(sz.width()).arg(sz.height())
+                                        .arg(cPos.x()).arg(clientBtn->width()).arg(card->width())));
+                QVERIFY2(sPos.x() >= 0 && sPos.x() + serverBtn->width() <= card->width() + 0.5,
+                         qPrintable(QStringLiteral("serverBtn overflow at %1x%2: x=%3 w=%4 cardW=%5")
+                                        .arg(sz.width()).arg(sz.height())
+                                        .arg(sPos.x()).arg(serverBtn->width()).arg(card->width())));
+                QVERIFY(cPos.y() >= 0 && cPos.y() + clientBtn->height() <= card->height() + 0.5);
+                QVERIFY(sPos.y() >= 0 && sPos.y() + serverBtn->height() <= card->height() + 0.5);
+            }
+        };
+        verifyBounds({QSize(960, 720), QSize(420, 620)});
+        win->setProperty("showUpdateModal", false);
+    }
+
+    void testConfirmServerUpdatePolling() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        int statusStep = 0;
+        bool simulateError = false;
+        QTcpServer mockRelay;
+        QVERIFY(mockRelay.listen(QHostAddress::LocalHost, 0));
+        QObject::connect(&mockRelay, &QTcpServer::newConnection, &mockRelay, [&]() {
+            while (mockRelay.hasPendingConnections()) {
+                QTcpSocket *s = mockRelay.nextPendingConnection();
+                auto reqBuf = std::make_shared<QByteArray>();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s, reqBuf]() {
+                    reqBuf->append(s->readAll());
+                    const int hdrEnd = reqBuf->indexOf("\r\n\r\n");
+                    if (hdrEnd < 0) return;
+                    const QByteArray firstLine = reqBuf->left(reqBuf->indexOf('\n')).trimmed();
+                    QByteArray statusLine = "HTTP/1.1 200 OK\r\n";
+                    QByteArray jsonBody;
+                    if (firstLine.contains("/api/v1/server/update/check")) {
+                        jsonBody = QJsonDocument(QJsonObject{
+                            {QStringLiteral("status"), 200},
+                            {QStringLiteral("data"), QJsonObject{
+                                {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
+                                {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                {QStringLiteral("update_available"), true},
+                                {QStringLiteral("method"), QStringLiteral("homebrew")},
+                                {QStringLiteral("applying"), false}
+                            }}
+                        }).toJson(QJsonDocument::Compact);
+                    } else if (firstLine.contains("/api/v1/server/update/apply")) {
+                        statusStep = 0;
+                        jsonBody = QJsonDocument(QJsonObject{
+                            {QStringLiteral("status"), 200},
+                            {QStringLiteral("data"), QJsonObject{
+                                {QStringLiteral("started"), true},
+                                {QStringLiteral("target_version"), QStringLiteral("1.2.12")}
+                            }}
+                        }).toJson(QJsonDocument::Compact);
+                    } else if (firstLine.contains("/api/v1/server/update/status")) {
+                        ++statusStep;
+                        if (simulateError) {
+                            jsonBody = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{
+                                    {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
+                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("update_available"), true},
+                                    {QStringLiteral("method"), QStringLiteral("homebrew")},
+                                    {QStringLiteral("applying"), false},
+                                    {QStringLiteral("last_error"), QStringLiteral("brew upgrade failed (exit 1)")}
+                                }}
+                            }).toJson(QJsonDocument::Compact);
+                        } else if (statusStep == 1) {
+                            jsonBody = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{
+                                    {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
+                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("update_available"), true},
+                                    {QStringLiteral("method"), QStringLiteral("homebrew")},
+                                    {QStringLiteral("applying"), true},
+                                    {QStringLiteral("last_error"), QString()}
+                                }}
+                            }).toJson(QJsonDocument::Compact);
+                        } else if (statusStep == 2) {
+                            statusLine = "HTTP/1.1 502 Bad Gateway\r\n";
+                            jsonBody = QByteArray("{\"error\":\"restarting\"}");
+                        } else {
+                            jsonBody = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{
+                                    {QStringLiteral("current_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("update_available"), false},
+                                    {QStringLiteral("method"), QStringLiteral("homebrew")},
+                                    {QStringLiteral("applying"), false},
+                                    {QStringLiteral("last_error"), QString()}
+                                }}
+                            }).toJson(QJsonDocument::Compact);
+                        }
+                    }
+                    const QByteArray resp =
+                        statusLine + "Content-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(jsonBody.size()) + "\r\nConnection: close\r\n\r\n" + jsonBody;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_srvupd.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_srvupd.json")));
+        b.setAllowLocalhostCloudForTest(true);
+        b.setServerUpdatePollIntervalMsForTest(25);
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockRelay.serverPort()), QString(), QStringLiteral("pw"));
+        b.setUpdatesFeedUrlForTest(QStringLiteral("http://127.0.0.1:%1/unused-feed").arg(mockRelay.serverPort()));
+
+        b.checkForUpdatesNow();
+        QTRY_COMPARE_WITH_TIMEOUT(b.updateChecking(), false, 3000);
+        QCOMPARE(b.serverUpdateAvailable(), true);
+
+        // Scenario A: Tolerates transient 502 during restart, then clears on version >= target
+        QSignalSpy toastSpy(&b, &Backend::toastMessage);
+        QCOMPARE(b.confirmServerUpdate(true), true);
+        QCOMPARE(b.updateApplying(), true);
+        QCOMPARE(b.serverUpdateAvailable(), true);
+
+        QTRY_COMPARE_WITH_TIMEOUT(b.updateApplying(), false, 3000);
+        QVERIFY(statusStep >= 3);
+        QCOMPARE(b.serverUpdateAvailable(), false);
+        QCOMPARE(b.serverCurrentVersion(), QStringLiteral("1.2.12"));
+        QVERIFY(toastSpy.count() >= 1);
+
+        // Scenario B: Failure surfaces real error and keeps serverUpdateAvailable == true
+        simulateError = true;
+        b.checkForUpdatesNow();
+        QTRY_COMPARE_WITH_TIMEOUT(b.updateChecking(), false, 3000);
+        QCOMPARE(b.serverUpdateAvailable(), true);
+        QCOMPARE(b.confirmServerUpdate(true), true);
+        QTRY_COMPARE_WITH_TIMEOUT(b.updateApplying(), false, 3000);
+        QCOMPARE(b.serverUpdateAvailable(), true);
+        QVERIFY(b.updateStatusText().contains(QStringLiteral("brew upgrade failed (exit 1)")));
+    }
+
 };
 
 QTEST_MAIN(ImsgTests)

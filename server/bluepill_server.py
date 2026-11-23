@@ -2686,6 +2686,77 @@ class BluePillEngine:
 
             pinned_guids = {p["guid"] for p in self.query_pinned_chats()}
 
+            last_message_by_chat: Dict[int, Dict[str, Any]] = {}
+            if chat_ids:
+                try:
+                    msg_cols = _sqlite_columns(conn, "message")
+                    if {"ROWID", "guid", "date"}.issubset(msg_cols):
+                        placeholders = ",".join("?" for _ in chat_ids)
+                        assoc_filter_m2 = (
+                            "AND COALESCE(m2.associated_message_type, 0) < 2000"
+                            if "associated_message_type" in msg_cols
+                            else ""
+                        )
+                        assoc_filter_m3 = (
+                            "AND COALESCE(m3.associated_message_type, 0) < 2000"
+                            if "associated_message_type" in msg_cols
+                            else ""
+                        )
+                        text_expr = "m.text" if "text" in msg_cols else "'' AS text"
+                        attr_expr = "m.attributedBody" if "attributedBody" in msg_cols else "NULL AS attributedBody"
+                        from_me_expr = "m.is_from_me" if "is_from_me" in msg_cols else "0 AS is_from_me"
+                        att_expr = (
+                            "m.cache_has_attachments"
+                            if "cache_has_attachments" in msg_cols
+                            else "0 AS cache_has_attachments"
+                        )
+                        lm_rows = conn.execute(
+                            f"""
+                            SELECT pick.chat_id, m.ROWID AS msg_rowid, m.guid, {text_expr}, {attr_expr},
+                                   m.date, {from_me_expr}, {att_expr}
+                            FROM (
+                                SELECT cmj2.chat_id, MAX(cmj2.message_id) AS max_mid
+                                FROM chat_message_join cmj2
+                                JOIN message m2 ON m2.ROWID = cmj2.message_id
+                                JOIN (
+                                    SELECT cmj3.chat_id, MAX(cmj3.message_date) AS max_dt
+                                    FROM chat_message_join cmj3
+                                    JOIN message m3 ON m3.ROWID = cmj3.message_id
+                                    WHERE cmj3.chat_id IN ({placeholders}) {assoc_filter_m3}
+                                    GROUP BY cmj3.chat_id
+                                ) latest ON latest.chat_id = cmj2.chat_id AND latest.max_dt = cmj2.message_date
+                                WHERE 1=1 {assoc_filter_m2}
+                                GROUP BY cmj2.chat_id
+                            ) pick
+                            JOIN message m ON m.ROWID = pick.max_mid
+                            """,
+                            chat_ids,
+                        ).fetchall()
+                        for lmr in lm_rows:
+                            cid_lm = int(lmr["chat_id"])
+                            m_guid = lmr["guid"] or ""
+                            norm_mg = m_guid.split("/", 1)[-1] if "/" in m_guid else m_guid
+                            if m_guid in self.deleted_message_guids or norm_mg in self.deleted_message_guids:
+                                continue
+                            raw_txt = lmr["text"]
+                            attr_b = lmr["attributedBody"]
+                            dec_attr = decode_attributed_body(attr_b) if attr_b else ""
+                            txt = (raw_txt if (raw_txt is not None and str(raw_txt).strip() != "") else dec_attr) or ""
+                            txt = txt.replace("\ufffc", "").strip()
+                            has_att = bool(lmr["cache_has_attachments"])
+                            if not txt and has_att:
+                                txt = "Attachment"
+                            last_message_by_chat[cid_lm] = {
+                                "originalROWID": int(lmr["msg_rowid"]),
+                                "guid": m_guid,
+                                "text": txt,
+                                "dateCreated": apple_ts_to_epoch_ms(lmr["date"]),
+                                "isFromMe": bool(lmr["is_from_me"]),
+                                "hasAttachments": has_att,
+                            }
+                except sqlite3.Error:
+                    pass
+
             raw_entries: List[Dict[str, Any]] = []
             for r in rows:
                 cid = int(r["rowid"])
@@ -2717,6 +2788,7 @@ class BluePillEngine:
                         "originalGroupId": r["original_group_id"] or "",
                         "lastReadMessageTimestamp": last_read_ms,
                         "lastMessageDate": last_msg_ms,
+                        "lastMessage": last_message_by_chat.get(cid),
                         "properties": [],
                         "participants": row_parts if with_participants else [],
                         "_mergeKey": merge_key,
@@ -2772,6 +2844,13 @@ class BluePillEngine:
                 best["isMuted"] = any(bool(c.get("isMuted")) for c in ranked)
                 best["lastReadMessageTimestamp"] = max(int(c.get("lastReadMessageTimestamp") or 0) for c in ranked)
                 best["lastMessageDate"] = max(int(c.get("lastMessageDate") or 0) for c in ranked)
+                newest_lm_item = max(
+                    (c for c in ranked if isinstance(c.get("lastMessage"), dict)),
+                    key=lambda c: (int((c["lastMessage"] or {}).get("dateCreated") or 0), int(c.get("originalROWID") or 0)),
+                    default=None,
+                )
+                if newest_lm_item is not None:
+                    best["lastMessage"] = newest_lm_item["lastMessage"]
                 if not str(best.get("displayName") or "").strip():
                     for c in ranked:
                         dn = str(c.get("displayName") or "").strip()
@@ -3498,6 +3577,24 @@ class BluePillEngine:
                 or mimetypes.guess_type(real_path)[0]
                 or "application/octet-stream"
             )
+            if not mime or mime == "application/octet-stream":
+                ext_low = os.path.splitext(real_path)[1].lower()
+                mime = {
+                    ".heic": "image/heic",
+                    ".heif": "image/heif",
+                    ".webp": "image/webp",
+                    ".jpg": "image/jpeg",
+                    ".jpeg": "image/jpeg",
+                    ".png": "image/png",
+                    ".gif": "image/gif",
+                    ".mov": "video/quicktime",
+                    ".mp4": "video/mp4",
+                    ".m4v": "video/x-m4v",
+                    ".caf": "audio/x-caf",
+                    ".m4a": "audio/mp4",
+                    ".wav": "audio/wav",
+                    ".mp3": "audio/mpeg",
+                }.get(ext_low, mime or "application/octet-stream")
             return self._postprocess_resolved_attachment(
                 real_path,
                 mime,
@@ -8022,58 +8119,167 @@ class BluePillEngine:
             )
         return self.get_update_status()
 
+    @staticmethod
+    def _extract_version_from_script(path: str) -> str:
+        try:
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(8192)
+            m = re.search(r'^VERSION\s*=\s*["\']([^"\']+)["\']', head, re.MULTILINE)
+            if m:
+                return m.group(1).strip().lstrip("vV")
+        except Exception:
+            pass
+        return ""
+
+    @staticmethod
+    def _restart_macos_service() -> None:
+        if sys.platform != "darwin":
+            return
+        uid = os.getuid()
+        loaded = ""
+        try:
+            proc = subprocess.run(
+                ["launchctl", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=False,
+            )
+            loaded = proc.stdout or ""
+        except Exception:
+            pass
+        if "com.nertwork.bluepill-server" in loaded:
+            subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{uid}/com.nertwork.bluepill-server"],
+                check=False,
+                timeout=15,
+            )
+            return
+        if "homebrew.mxcl.bluepill" in loaded:
+            res = subprocess.run(
+                ["launchctl", "kickstart", "-k", f"gui/{uid}/homebrew.mxcl.bluepill"],
+                check=False,
+                timeout=15,
+            )
+            if res.returncode == 0:
+                return
+            brew_bin = shutil.which("brew") or "/opt/homebrew/bin/brew"
+            if not os.path.exists(brew_bin) and os.path.exists("/usr/local/bin/brew"):
+                brew_bin = "/usr/local/bin/brew"
+            if os.path.exists(brew_bin):
+                subprocess.run([brew_bin, "services", "restart", "bluepill"], check=False, timeout=60)
+                return
+        subprocess.run(
+            ["launchctl", "kickstart", "-k", f"gui/{uid}/com.nertwork.bluepill-server"],
+            check=False,
+            timeout=15,
+        )
+
+    def _apply_standalone_bottle_update(self, target_version: str, checksums_url: str) -> None:
+        ver = str(target_version or VERSION).lstrip("vV")
+        chk_url = checksums_url or f"https://github.com/nertwork/bluepill/releases/download/v{ver}/SHA256SUMS.txt"
+        bottle_candidates = [
+            f"bluepill-{ver}.all.bottle.tar.gz",
+            f"bluepill--{ver}.all.bottle.tar.gz",
+        ]
+        with urllib.request.urlopen(urllib.request.Request(chk_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=15.0) as r:
+            sums_txt = r.read().decode("utf-8", errors="replace")
+        expected_sha = ""
+        bottle_name = bottle_candidates[0]
+        for line in sums_txt.splitlines():
+            parts = line.strip().split()
+            if len(parts) >= 2 and os.path.basename(parts[1]) in bottle_candidates:
+                expected_sha = parts[0].lower()
+                bottle_name = os.path.basename(parts[1])
+                break
+        if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            raise RuntimeError(f"Checksum for {bottle_candidates[0]} missing from SHA256SUMS.txt")
+        bottle_url = f"https://github.com/nertwork/bluepill/releases/download/v{ver}/{bottle_name}"
+        with urllib.request.urlopen(urllib.request.Request(bottle_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=60.0) as r:
+            bottle_bytes = r.read()
+        actual_sha = hashlib.sha256(bottle_bytes).hexdigest().lower()
+        if actual_sha != expected_sha:
+            raise RuntimeError(f"SHA256 mismatch for {bottle_name}: {actual_sha} != {expected_sha}")
+        extracted_src: Optional[bytes] = None
+        with tarfile.open(fileobj=io.BytesIO(bottle_bytes), mode="r:gz") as tf:
+            for member in tf.getmembers():
+                if member.isfile() and member.name.endswith("/bin/bluepill-server"):
+                    fobj = tf.extractfile(member)
+                    if fobj is not None:
+                        extracted_src = fobj.read()
+                    break
+        if not extracted_src:
+            raise RuntimeError(f"bluepill-server missing from {bottle_name}")
+        ast.parse(extracted_src.decode("utf-8"))
+        target_path = os.path.realpath(__file__)
+        tmp_path = f"{target_path}.update.{os.getpid()}"
+        with open(tmp_path, "wb") as out_f:
+            out_f.write(extracted_src)
+        os.chmod(tmp_path, 0o755)
+        os.replace(tmp_path, target_path)
+        self.logger.info("[updates] Replaced %s with verified v%s release bottle; restarting service...", target_path, ver)
+        self._restart_macos_service()
+
     def _run_server_update_worker(self, method: str, target_version: str, checksums_url: str) -> None:
         try:
             if method == "homebrew":
                 brew_bin = shutil.which("brew") or "/opt/homebrew/bin/brew"
                 if not os.path.exists(brew_bin) and os.path.exists("/usr/local/bin/brew"):
                     brew_bin = "/usr/local/bin/brew"
-                subprocess.run([brew_bin, "update"], check=True, timeout=180)
-                subprocess.run([brew_bin, "upgrade", "nertwork/tap/bluepill"], check=True, timeout=300)
-                subprocess.run([brew_bin, "services", "restart", "bluepill"], check=True, timeout=60)
-            else:
-                ver = str(target_version or VERSION).lstrip("vV")
-                chk_url = checksums_url or f"https://github.com/nertwork/bluepill/releases/download/v{ver}/SHA256SUMS.txt"
-                bottle_name = f"bluepill-{ver}.all.bottle.tar.gz"
-                bottle_url = f"https://github.com/nertwork/bluepill/releases/download/v{ver}/{bottle_name}"
-                with urllib.request.urlopen(urllib.request.Request(chk_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=15.0) as r:
-                    sums_txt = r.read().decode("utf-8", errors="replace")
-                expected_sha = ""
-                for line in sums_txt.splitlines():
-                    parts = line.strip().split()
-                    if len(parts) >= 2 and os.path.basename(parts[1]) == bottle_name:
-                        expected_sha = parts[0].lower()
-                        break
-                if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
-                    raise RuntimeError(f"Checksum for {bottle_name} missing from SHA256SUMS.txt")
-                with urllib.request.urlopen(urllib.request.Request(bottle_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=60.0) as r:
-                    bottle_bytes = r.read()
-                actual_sha = hashlib.sha256(bottle_bytes).hexdigest().lower()
-                if actual_sha != expected_sha:
-                    raise RuntimeError(f"SHA256 mismatch for {bottle_name}: {actual_sha} != {expected_sha}")
-                extracted_src: Optional[bytes] = None
-                with tarfile.open(fileobj=io.BytesIO(bottle_bytes), mode="r:gz") as tf:
-                    for member in tf.getmembers():
-                        if member.isfile() and member.name.endswith("/bin/bluepill-server"):
-                            fobj = tf.extractfile(member)
-                            if fobj is not None:
-                                extracted_src = fobj.read()
-                            break
-                if not extracted_src:
-                    raise RuntimeError(f"bluepill-server missing from {bottle_name}")
-                ast.parse(extracted_src.decode("utf-8"))
-                target_path = os.path.realpath(__file__)
-                tmp_path = f"{target_path}.update.{os.getpid()}"
-                with open(tmp_path, "wb") as out_f:
-                    out_f.write(extracted_src)
-                os.chmod(tmp_path, 0o755)
-                os.replace(tmp_path, target_path)
-                if sys.platform == "darwin":
-                    subprocess.run(
-                        ["launchctl", "kickstart", "-k", f"gui/{os.getuid()}/com.nertwork.bluepill-server"],
+                brew_env = dict(os.environ)
+                brew_env.setdefault("HOME", os.path.expanduser("~"))
+                cur_path = brew_env.get("PATH", "")
+                for extra in ("/opt/homebrew/bin", "/usr/local/bin"):
+                    if extra not in cur_path.split(os.pathsep):
+                        cur_path = f"{extra}{os.pathsep}{cur_path}" if cur_path else extra
+                brew_env["PATH"] = cur_path
+                brew_ok = False
+                brew_err = ""
+                try:
+                    p_upd = subprocess.run(
+                        [brew_bin, "update"],
+                        capture_output=True,
+                        text=True,
+                        env=brew_env,
+                        timeout=180,
                         check=False,
-                        timeout=15,
                     )
+                    if p_upd.returncode != 0:
+                        detail = (p_upd.stderr or p_upd.stdout or "").strip().splitlines()
+                        brew_err = f"brew update failed (exit {p_upd.returncode})" + (f": {detail[-1]}" if detail else "")
+                    else:
+                        p_upg = subprocess.run(
+                            [brew_bin, "upgrade", "nertwork/tap/bluepill"],
+                            capture_output=True,
+                            text=True,
+                            env=brew_env,
+                            timeout=300,
+                            check=False,
+                        )
+                        if p_upg.returncode != 0:
+                            detail = (p_upg.stderr or p_upg.stdout or "").strip().splitlines()
+                            brew_err = f"brew upgrade failed (exit {p_upg.returncode})" + (f": {detail[-1]}" if detail else "")
+                        else:
+                            installed_ver = self._extract_version_from_script(os.path.realpath(__file__))
+                            if not installed_ver or self._parse_semver(installed_ver) < self._parse_semver(target_version):
+                                brew_err = f"Homebrew tap still at v{installed_ver or VERSION} (< v{target_version})"
+                            else:
+                                brew_ok = True
+                except Exception as exc:
+                    brew_err = str(exc)
+
+                if brew_ok:
+                    self.logger.info("[updates] Homebrew upgraded bluepill to v%s; restarting service...", target_version)
+                    self._restart_macos_service()
+                else:
+                    self.logger.warning(
+                        "[updates] Homebrew update unavailable (%s); falling back to verified SHA256 bottle v%s",
+                        brew_err,
+                        target_version,
+                    )
+                    self._apply_standalone_bottle_update(target_version, checksums_url)
+            else:
+                self._apply_standalone_bottle_update(target_version, checksums_url)
         except Exception as exc:
             self.logger.error("[updates] Server update failed: %s", exc)
             with self._update_lock:
@@ -8480,7 +8686,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.8</span>
+      <span class="pill pill-blue">v1.2.11</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -8729,7 +8935,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 <div class="toast-container" id="toastContainer"></div>
 
 <script>
-    let apiKey = new URLSearchParams(location.search).get('password') || localStorage.getItem('bluepill_key') || '';
+    function detectBasePath() {
+      const loc = (typeof window !== 'undefined' && window.location) ? window.location : null;
+      const p = (loc && loc.pathname) ? String(loc.pathname) : '';
+      const m = p.match(/^(.*)\/(?:web|ui)\/?$/i);
+      if (m && m[1]) return m[1].replace(/\/+$/, '');
+      return '';
+    }
+    const BASE_PATH = detectBasePath();
+    const KEY_STORAGE = BASE_PATH ? ('bluepill_key_' + BASE_PATH) : 'bluepill_key';
+    let apiKey = new URLSearchParams(location.search).get('password') || localStorage.getItem(KEY_STORAGE) || '';
     document.getElementById('apiKeyInput').value = apiKey;
     let activeChatGuid = '';
     let contactMap = {};
@@ -8809,12 +9024,16 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     }
 
     function apiUrl(path) {
-      if (!apiKey) return path;
+      const raw = String(path || '');
+      const prefixed = (BASE_PATH && raw.startsWith('/') && !raw.startsWith(BASE_PATH + '/'))
+        ? (BASE_PATH + raw)
+        : raw;
+      if (!apiKey) return prefixed;
       if (!isTrustedPasswordTransport()) {
         throw new Error('HTTPS Required for Remote Password');
       }
-      const sep = path.includes('?') ? '&' : '?';
-      return `${path}${sep}password=${encodeURIComponent(apiKey)}`;
+      const sep = prefixed.includes('?') ? '&' : '?';
+      return `${prefixed}${sep}password=${encodeURIComponent(apiKey)}`;
     }
 
     function setConnStatus(state, text) {
@@ -8831,7 +9050,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     async function connectRelay() {
       apiKey = document.getElementById('apiKeyInput').value.trim();
-      localStorage.setItem('bluepill_key', apiKey);
+      if (apiKey) localStorage.setItem(KEY_STORAGE, apiKey);
       if (apiKey && !isTrustedPasswordTransport()) {
         stopChatSocketIo();
         if (typeof stopPhotosSocketIo === 'function') stopPhotosSocketIo();
@@ -8841,7 +9060,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       try {
         const res = await fetch(apiUrl('/api/v1/server/info'));
         const j = await res.json();
-        if (j && j.data) {
+        if (res.ok && j && j.data) {
           setConnStatus(
             'online',
             `Connected · macOS ${j.data.os_version} · BluePill v${j.data.server_version} · Private API: ${j.data.private_api ? 'Active' : 'Fallback'}`
@@ -8918,7 +9137,9 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
         top.appendChild(badge);
         const sub = document.createElement('div');
         sub.className = 'chat-sub';
-        sub.textContent = (c.lastMessage && c.lastMessage.text) ? c.lastMessage.text : (c.guid || '');
+        sub.textContent = (c.lastMessage && c.lastMessage.text)
+          ? c.lastMessage.text
+          : (c.lastMessage && c.lastMessage.hasAttachments ? '📎 Attachment' : (c.guid || ''));
         col.appendChild(top);
         col.appendChild(sub);
         row.appendChild(av);
@@ -9251,12 +9472,53 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const hasAtt = m.attachments && m.attachments.length > 0;
       if (hasAtt) {
         m.attachments.forEach(a => {
-          if ((a.mimeType || '').startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|gif|webp)$/i.test(a.transferName || '')) {
+          const tname = String(a.transferName || 'Attachment');
+          const mime = String(a.mimeType || '').toLowerCase();
+          if (a.hideAttachment || /\.pluginPayloadAttachment$/i.test(tname)) return;
+          const isImg = mime.startsWith('image/') || /\.(heic|heif|jpg|jpeg|png|gif|webp)$/i.test(tname);
+          const isAud = Boolean(a.isAudio) || mime.startsWith('audio/') || /\.(m4a|mp3|wav|caf|ogg|aac|amr)$/i.test(tname);
+          const isVid = mime.startsWith('video/') || /\.(mp4|mov|webm|m4v)$/i.test(tname);
+          if (isImg) {
             const img = document.createElement('img');
             const srcUrl = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download?height=600`);
             img.src = srcUrl;
-            img.onclick = () => openLightbox(a.transferName || 'Attachment', srcUrl);
+            img.alt = tname;
+            img.onclick = () => openLightbox(tname, srcUrl);
+            img.onerror = () => {
+              const fallback = document.createElement('a');
+              fallback.href = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download`);
+              fallback.target = '_blank';
+              fallback.rel = 'noopener';
+              fallback.className = 'pill';
+              fallback.style.marginTop = '6px';
+              fallback.textContent = '📎 ' + tname;
+              if (img.parentNode) img.parentNode.replaceChild(fallback, img);
+            };
             bubble.appendChild(img);
+          } else if (isAud) {
+            const aud = document.createElement('audio');
+            aud.controls = true;
+            aud.preload = 'metadata';
+            aud.style.cssText = 'max-width:250px;height:36px;margin-top:6px;display:block;';
+            const isCaf = mime === 'audio/x-caf' || /\.caf$/i.test(tname);
+            aud.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/${isCaf ? 'live?transcode=1' : 'download'}`);
+            bubble.appendChild(aud);
+          } else if (isVid) {
+            const vid = document.createElement('video');
+            vid.controls = true;
+            vid.preload = 'metadata';
+            vid.style.cssText = 'max-width:260px;border-radius:12px;margin-top:6px;display:block;';
+            vid.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/live`);
+            bubble.appendChild(vid);
+          } else if (a.guid) {
+            const dl = document.createElement('a');
+            dl.href = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download`);
+            dl.target = '_blank';
+            dl.rel = 'noopener';
+            dl.className = 'pill';
+            dl.style.marginTop = '6px';
+            dl.textContent = '📎 ' + tname;
+            bubble.appendChild(dl);
           }
         });
       }
@@ -9425,7 +9687,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
 
     function startChatSocketIo() {
       stopChatSocketIo();
-      if (!apiKey || !isTrustedPasswordTransport()) return;
+      if ((!apiKey && !BASE_PATH.startsWith('/t/')) || (apiKey && !isTrustedPasswordTransport())) return;
       chatSioLoopActive = true;
       const myGen = ++chatSioGen;
       (async () => {
@@ -9679,7 +9941,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       }
     }
 
-    if (apiKey) connectRelay();
+    if (apiKey || BASE_PATH.startsWith('/t/')) connectRelay();
 </script>
 
 <script>
@@ -11308,12 +11570,14 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             qs = urllib.parse.parse_qs(parsed.query)
             original_flag = str((qs.get("raw_heic") or ["false"])[0]).lower() == "true"
             preview_flag = str((qs.get("preview") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
+            transcode_flag = str((qs.get("transcode") or ["0"])[0] or "0").strip().lower() in ("1", "true", "yes")
             resize_val = int((qs.get("height") or qs.get("width") or ["0"])[0] or 0) or None
             try:
                 resolved = self.engine.resolve_attachment_file(
                     att_guid,
                     convert_heic=not original_flag,
                     resize=resize_val,
+                    transcode_audio=transcode_flag,
                     allow_photos_library=False,
                     preview_only=preview_flag,
                 )
@@ -11328,6 +11592,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                         att_guid,
                         convert_heic=not original_flag,
                         resize=resize_val,
+                        transcode_audio=transcode_flag,
                         allow_photos_library=True,
                         preview_only=preview_flag,
                     )
@@ -11346,6 +11611,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
                                 att_guid,
                                 convert_heic=not original_flag,
                                 resize=resize_val,
+                                transcode_audio=transcode_flag,
                                 allow_photos_library=True,
                                 preview_only=preview_flag,
                             )
@@ -12219,6 +12485,16 @@ def run_selftest(engine: BluePillEngine) -> int:
         ) as cdl:
             assert cdl.read() == caf_bytes, "Downloaded converted CAF bytes mismatch"
 
+        # 2b) Web UI ?transcode=1 on CAF attachment returns playable audio/wav or audio/mp4
+        with _open_loopback_selftest(
+            f"/api/v1/attachment/{caf_dl_guid}/live?transcode=1&password=selftest-secret",
+        ) as ctc:
+            tc_ct = (ctc.headers.get("Content-Type") or "").lower()
+            tc_bytes = ctc.read()
+            assert tc_ct in ("audio/wav", "audio/mp4") and tc_bytes != caf_bytes, (
+                f"Expected transcoded audio for ?transcode=1, got {tc_ct} len={len(tc_bytes)}"
+            )
+
         # Verify query_messages IN (:g0,:g1) batching, missing-binding HTTP 400 validation, and pending/DB-confirmed send semantics
         tmp_db_fd, tmp_db_path = tempfile.mkstemp(prefix="bp_selftest_", suffix=".db")
         os.close(tmp_db_fd)
@@ -12242,6 +12518,13 @@ def run_selftest(engine: BluePillEngine) -> int:
             db_conn.commit()
             db_conn.close()
             db_eng = BluePillEngine(db_path=tmp_db_path, password="p", enable_background_daemons=False)
+            chats_with_lm = db_eng.query_chats(limit=10, with_participants=False)
+            assert chats_with_lm and isinstance(chats_with_lm[0].get("lastMessage"), dict), (
+                f"query_chats missing lastMessage: {chats_with_lm}"
+            )
+            assert chats_with_lm[0]["lastMessage"]["text"] == "gamma", (
+                f"Unexpected lastMessage text: {chats_with_lm[0]['lastMessage']}"
+            )
             batched = db_eng.query_messages({
                 "limit": 10,
                 "where": [{"statement": "message.guid IN (:g0,:g1)", "args": {"g0": "msg-batch-a", "g1": "msg-batch-c"}}],
@@ -13634,6 +13917,9 @@ def run_selftest(engine: BluePillEngine) -> int:
                 "theme-system",
                 "prefers-color-scheme",
                 "applyWebTheme",
+                "detectBasePath",
+                "BASE_PATH",
+                "transcode=1",
             ):
                 assert ui_marker in WEB_UI_HTML, f"Missing Web UI pending-text marker: {ui_marker}"
 
@@ -14011,6 +14297,25 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
   });
   const r7El = domMap.messagesPane.children.find(el => el.dataset.guid === 'r7-ui-13');
   assert.ok(r7El && collectText(r7El).includes('Not Delivered'), 'Outgoing error=4 with isRead=true,dateRead=0 did not render Not Delivered');
+
+  // 9) Tenant reverse-proxy BASE_PATH detection & apiUrl prefixing
+  const tenantSandbox = {
+    window: { location: { protocol: 'https:', hostname: 'bluepill.nertwork.com', pathname: '/t/james-v-farr/web' } },
+    location: { search: '?password=pw1' },
+    localStorage: { getItem: () => '', setItem: () => {} },
+    URLSearchParams: class { get(k) { return k === 'password' ? 'pw1' : ''; } },
+    document: { getElementById: (id) => domMap[id] || makeEl('div'), createElement: (tag) => makeEl(tag), body: makeEl('body') },
+    console, Array, Object, Number, Boolean, String, Math, JSON, Promise, Error, Set, Date: FakeDate,
+  };
+  vm.createContext(tenantSandbox);
+  vm.runInContext(chatScript, tenantSandbox);
+  assert.strictEqual(tenantSandbox.detectBasePath(), '/t/james-v-farr');
+  assert.strictEqual(tenantSandbox.apiUrl('/api/v1/server/info'), '/t/james-v-farr/api/v1/server/info?password=pw1');
+  assert.strictEqual(tenantSandbox.apiUrl('/t/james-v-farr/api/v1/server/info'), '/t/james-v-farr/api/v1/server/info?password=pw1');
+  assert.strictEqual(tenantSandbox.apiUrl('/socket.io?EIO=4&transport=polling'), '/t/james-v-farr/socket.io?EIO=4&transport=polling&password=pw1');
+  tenantSandbox.window.location.pathname = '/web';
+  assert.strictEqual(tenantSandbox.detectBasePath(), '');
+
   console.log('WEB_UI_REV5_NODE_OK');
 })().catch(err => { console.error(err); process.exit(1); });
 """
