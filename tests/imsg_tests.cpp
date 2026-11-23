@@ -562,9 +562,11 @@ private slots:
         QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
         QString qml = QString::fromUtf8(qmlFile.readAll());
 
-        // 1. Verify Search conversations placeholder explicitly uses Ctrl+F and NOT Ctrl+K
-        QVERIFY(qml.contains(QStringLiteral("placeholderText: i18n.tr(\"Search conversations...\") + \" (Ctrl+F)\"")));
+        // 1. Verify Search placeholder is concise macOS Messages style and NOT Ctrl+K
+        QVERIFY(qml.contains(QStringLiteral("placeholderText: i18n.tr(\"Search\")")));
         QVERIFY(!qml.contains(QStringLiteral("placeholderText: i18n.tr(\"Search conversations...\") + \" (Ctrl+K)\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"topFilterMenuBtn\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"composerPlusBtn\"")));
 
         // 2. Verify top bar has Ctrl+K shortcut button
         QVERIFY(qml.contains(QStringLiteral("Keyboard Shortcuts (Ctrl+K)")));
@@ -1643,16 +1645,16 @@ private slots:
         QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
         const QString qml = QString::fromUtf8(qmlFile.readAll());
 
-        // 1. Verify Bottom Message Composer Bar height & composerInput bottomPadding for descenders (p, q, g, y, j)
-        // The input hugs its text (even padding, room for descenders), and the bar hugs the input
-        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(160, Math.max(64, composerBox.Layout.preferredHeight + 20))")));
-        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(140, Math.max(44, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))")));
-        QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 8\n                                anchors.rightMargin: 8\n                                topPadding: 11\n                                bottomPadding: 11")));
+        // 1. Verify Bottom Message Composer Bar height & composerInput padding for descenders (p, q, g, y, j)
+        // The pill input hugs its text (even padding, room for descenders), and the bar hugs the input
+        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(156, Math.max(54, composerBox.Layout.preferredHeight + 16))")));
+        QVERIFY(qml.contains(QStringLiteral("Layout.preferredHeight: Math.min(138, Math.max(38, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))")));
+        QVERIFY(qml.contains(QStringLiteral("id: composerInput\n                                anchors.fill: parent\n                                anchors.leftMargin: 10\n                                anchors.rightMargin: 36\n                                topPadding: 9\n                                bottomPadding: 9")));
 
         // 2. Verify New Message modal, Search Bar, and Emoji Search Field bottomPadding & expanded heights
         QVERIFY(qml.contains(QStringLiteral("id: newChatRecipient\n                        anchors.fill: parent\n                        anchors.leftMargin: 10\n                        anchors.rightMargin: 10\n                        topPadding: 8\n                        bottomPadding: 12")));
         QVERIFY(qml.contains(QStringLiteral("id: newChatText\n                        anchors.fill: parent\n                        anchors.leftMargin: 10\n                        anchors.rightMargin: 10\n                        topPadding: 8\n                        bottomPadding: 12")));
-        QVERIFY(qml.contains(QStringLiteral("id: searchInput\n                                    Layout.fillWidth: true\n                                    Layout.fillHeight: true\n                                    topPadding: 6\n                                    bottomPadding: 10")));
+        QVERIFY(qml.contains(QStringLiteral("id: searchInput\n                                    Layout.fillWidth: true\n                                    Layout.fillHeight: true\n                                    topPadding: 4\n                                    bottomPadding: 4")));
 
         // 3. Verify Lexi Matthews (1 (415) 555-0170 / 4155550170) + organization/nickname fallback contact resolution
         Backend b;
@@ -2612,9 +2614,11 @@ private slots:
         QCOMPARE(byGuid(QStringLiteral("m-new")).value(QStringLiteral("text")).toString(), QStringLiteral("Final wording"));
 
         // An unsent draft survives editing (saved and cancelled), and effect/schedule are hidden meanwhile
+        QObject *appsMenu = win->findChild<QObject *>(QStringLiteral("composerAppsMenu"));
         QObject *effectBtn = win->findChild<QObject *>(QStringLiteral("composerEffectBtn"));
         QObject *scheduleBtn = win->findChild<QObject *>(QStringLiteral("composerScheduleBtn"));
-        QVERIFY(effectBtn && scheduleBtn);
+        QVERIFY(appsMenu && effectBtn && scheduleBtn);
+        appsMenu->setProperty("visible", true);
         QVERIFY(effectBtn->property("visible").toBool());
         composer->setProperty("text", QStringLiteral("half-written draft"));
         QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("Final wording")));
@@ -4103,22 +4107,13 @@ private slots:
         b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pins.json")));
         b.loadDemoData();
 
-        // Default pinnedRowFillRecent == false: only explicit Mac/user pins are shown (no recent backfill)
-        QCOMPARE(b.pinnedRowFillRecent(), false);
+        // Only explicit Mac/user pins are shown (no recent backfill)
         const QVariantList macPins = b.pinnedChats();
         QCOMPARE(macPins.size(), 3);
         QCOMPARE(macPins.first().toMap().value(QStringLiteral("shortTitle")).toString(), QStringLiteral("Alex"));
         const QString alexGuid = macPins.first().toMap().value(QStringLiteral("guid")).toString();
 
-        // With pinnedRowFillRecent == true (opt-in), 3 Mac pins + 1 recent backfill = 4 slots
-        b.setPinnedRowFillRecent(true);
-        const QVariantList filledSlots = b.pinnedChats();
-        QCOMPARE(filledSlots.size(), 4);
-        QCOMPARE(filledSlots.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
-        QCOMPARE(filledSlots.at(3).toMap().value(QStringLiteral("isPinned")).toBool(), false);
-        b.setPinnedRowFillRecent(false);
-
-        // No Mac pins and none added here (when pinnedRowFillRecent == false): the row is empty
+        // No Mac pins and none added here: the row is empty
         b.setMacPins({});
         QCOMPARE(b.pinnedChats().size(), 0);
         QCOMPARE(b.isChatPinned(alexGuid), false);
@@ -4229,7 +4224,6 @@ private slots:
         for (const QVariant &v : b.chats()) guids << v.toMap().value(QStringLiteral("guid")).toString();
         QCOMPARE(guids, (QStringList{smsGuid, imGuid}));  // SMS first
         // An iMessage pin resolves to the iMessage chat, not the first chat with that number
-        b.setPinnedRowFillRecent(false);
         b.setMacPins({QVariantMap{{"guid", imGuid}, {"chatIdentifier", "+15555550142"}}});
         QCOMPARE(b.pinnedChats().size(), 1);
         QCOMPARE(b.pinnedChats().first().toMap().value(QStringLiteral("guid")).toString(), imGuid);
@@ -10592,32 +10586,15 @@ private slots:
         QCOMPARE(b.historySyncDays(), 60);
         QCOMPARE(b.showTopBarStatusPill(), false);
         QCOMPARE(b.showPinnedRow(), true);
-        QCOMPARE(b.pinnedRowFillRecent(), false);
         QCOMPARE(b.hoverMessageActions(), true);
 
-        // 2. pinnedChats: default shows only explicit pins; opt-in pinnedRowFillRecent == true backfills 4 slots
+        // 2. pinnedChats: strictly shows only explicit pins
         b.setMacPins({});
         QCOMPARE(b.pinnedChats().size(), 0);
-        b.setPinnedRowFillRecent(true);
-        QVariantList fill0 = b.pinnedChats();
-        QCOMPARE(fill0.size(), 4);
-        for (const QVariant &v : fill0) {
-            QCOMPARE(v.toMap().value(QStringLiteral("isPinned")).toBool(), false);
-            QCOMPARE(v.toMap().value(QStringLiteral("pinned")).toBool(), false);
-        }
 
         const QString thirdChatGuid = b.chats().at(2).toMap().value(QStringLiteral("guid")).toString();
         b.togglePinChat(thirdChatGuid);
         QVERIFY(b.isChatPinned(thirdChatGuid));
-        QVariantList fill1 = b.pinnedChats();
-        QCOMPARE(fill1.size(), 4);
-        QCOMPARE(fill1.at(0).toMap().value(QStringLiteral("guid")).toString(), thirdChatGuid);
-        QCOMPARE(fill1.at(0).toMap().value(QStringLiteral("isPinned")).toBool(), true);
-        QCOMPARE(fill1.at(1).toMap().value(QStringLiteral("isPinned")).toBool(), false);
-        QCOMPARE(fill1.at(2).toMap().value(QStringLiteral("isPinned")).toBool(), false);
-        QCOMPARE(fill1.at(3).toMap().value(QStringLiteral("isPinned")).toBool(), false);
-
-        b.setPinnedRowFillRecent(false);
         QVariantList explicitOnly = b.pinnedChats();
         QCOMPARE(explicitOnly.size(), 1);
         QCOMPARE(explicitOnly.at(0).toMap().value(QStringLiteral("guid")).toString(), thirdChatGuid);
@@ -10671,7 +10648,7 @@ private slots:
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("uiAppearanceSection")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleTopBarStatusPillBtn")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleShowPinnedRowBtn")) != nullptr);
-        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("togglePinnedRowFillRecentBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("togglePinnedRowFillRecentBtn")) == nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleHoverMessageActionsBtn")) != nullptr);
 
         // Verify topBarStatusPill is hidden when showTopBarStatusPill == false and visible when true
@@ -10768,19 +10745,17 @@ private slots:
         QCOMPARE(built1Reacts.size(), 1);
         QCOMPARE(built1Reacts.first().toMap().value(QStringLiteral("emoji")).toString(), QStringLiteral("🚀"));
 
-        // Verify persistence of all 4 UI settings in state.json (in non-demo mode)
+        // Verify persistence of UI settings in state.json (in non-demo mode)
         Backend bPersist1(false);
         bPersist1.setStateFilePath(statePath);
         bPersist1.setShowTopBarStatusPill(true);
         bPersist1.setShowPinnedRow(false);
-        bPersist1.setPinnedRowFillRecent(false);
         bPersist1.setHoverMessageActions(false);
 
         Backend bPersist2(false);
         bPersist2.setStateFilePath(statePath);
         QCOMPARE(bPersist2.showTopBarStatusPill(), true);
         QCOMPARE(bPersist2.showPinnedRow(), false);
-        QCOMPARE(bPersist2.pinnedRowFillRecent(), false);
         QCOMPARE(bPersist2.hoverMessageActions(), false);
     }
 

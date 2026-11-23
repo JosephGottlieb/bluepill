@@ -1582,6 +1582,10 @@ ApplicationWindow {
                 root.closePhotoViewer()
             } else if (chatContextMenuPopup.visible) {
                 chatContextMenuPopup.visible = false
+            } else if (filterMenuPopup.visible) {
+                filterMenuPopup.visible = false
+            } else if (composerAppsMenu.visible) {
+                composerAppsMenu.visible = false
             } else if (effectMenuPopup.visible) {
                 effectMenuPopup.visible = false
             } else if (scheduleMenuPopup.visible) {
@@ -1656,17 +1660,17 @@ ApplicationWindow {
         anchors.fill: parent
         spacing: 0
 
-        // Top Omarchy Status & Command Bar
+        // Top Minimal Command Bar (macOS Messages-inspired)
         Rectangle {
             Layout.fillWidth: true
-            Layout.preferredHeight: 52
+            Layout.preferredHeight: 44
             color: theme.darkBackground
 
             RowLayout {
                 anchors.fill: parent
-                anchors.leftMargin: 16
-                anchors.rightMargin: 16
-                spacing: root.isNarrowWindow ? 8 : 12
+                anchors.leftMargin: 14
+                anchors.rightMargin: 14
+                spacing: root.isNarrowWindow ? 6 : 8
 
                 // App badge + connection dot. The relay status ("Connected v1.2.1 ·
                 // macOS …") shows only while hovering the dot.
@@ -1819,53 +1823,98 @@ ApplicationWindow {
 
                 Item { Layout.fillWidth: true }
 
-                // Filter pills
+                // Compact Filter Menu Button (macOS Messages-style)
                 RowLayout {
-                    spacing: root.isNarrowWindow ? 4 : 6
-                    Repeater {
-                        model: [
-                            { key: "all", label: i18n.tr("All") + (backend.totalChatCount > 0 ? " (" + backend.totalChatCount + ")" : "") },
-                            { key: "unread", label: i18n.tr("Unread") + (backend.totalUnread > 0 ? " (" + backend.totalUnread + ")" : "") },
-                            { key: "direct", label: i18n.tr("Direct") },
-                            { key: "groups", label: i18n.tr("Groups") },
-                            { key: "muted", label: i18n.tr("Muted") }
-                        ]
-                        delegate: Rectangle {
-                            required property var modelData
-                            height: 28
-                            radius: 7
-                            implicitWidth: pillText.implicitWidth + (root.isNarrowWindow ? 14 : 20)
-                            color: backend.filterMode === modelData.key ? theme.accent : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.filterMode === modelData.key ? theme.accent : theme.muted
+                    spacing: 4
 
+                    // Active filter badge chip (only shown when filtered)
+                    Rectangle {
+                        id: activeFilterChip
+                        objectName: "activeFilterChip"
+                        visible: backend.filterMode !== "all"
+                        height: 26
+                        radius: 13
+                        implicitWidth: activeFilterRow.implicitWidth + 16
+                        color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                        border.width: 1
+                        border.color: theme.accent
+                        RowLayout {
+                            id: activeFilterRow
+                            anchors.centerIn: parent
+                            spacing: 5
                             Text {
-                                id: pillText
-                                anchors.centerIn: parent
-                                text: modelData.label
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.filterMode === modelData.key
-                                color: backend.filterMode === modelData.key ? theme.onAccent : theme.foreground
+                                text: backend.filterMode === "unread"
+                                      ? (i18n.tr("Unread") + (backend.totalUnread > 0 ? " (" + backend.totalUnread + ")" : ""))
+                                      : (backend.filterMode === "direct" ? i18n.tr("Direct")
+                                         : (backend.filterMode === "groups" ? i18n.tr("Groups") : i18n.tr("Muted")))
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.accent
                             }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.setFilterMode(modelData.key)
+                            Text {
+                                text: "✕"
+                                font.pixelSize: theme.fontSize - 4
+                                color: theme.accent
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: backend.setFilterMode("all")
+                        }
+                    }
+
+                    Rectangle {
+                        id: topFilterMenuBtn
+                        objectName: "topFilterMenuBtn"
+                        width: 30
+                        height: 28
+                        radius: 7
+                        color: (filterMenuPopup.visible || topFilterMouse.containsMouse) ? theme.selection : "transparent"
+                        ToolTip.visible: topFilterMouse.containsMouse
+                        ToolTip.text: i18n.tr("Filter conversations")
+                        ToolTip.delay: 350
+
+                        Text {
+                            anchors.centerIn: parent
+                            text: "≡"
+                            font.pixelSize: theme.fontSize + 3
+                            color: (backend.filterMode !== "all" || filterMenuPopup.visible) ? theme.accent : theme.foreground
+                        }
+                        Rectangle {
+                            visible: backend.totalUnread > 0 && backend.filterMode === "all"
+                            width: 6
+                            height: 6
+                            radius: 3
+                            color: theme.accent
+                            anchors.top: parent.top
+                            anchors.right: parent.right
+                            anchors.topMargin: 4
+                            anchors.rightMargin: 4
+                        }
+                        MouseArea {
+                            id: topFilterMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                filterMenuPopup.visible = !filterMenuPopup.visible
+                                composerAppsMenu.visible = false
+                                effectMenuPopup.visible = false
+                                scheduleMenuPopup.visible = false
                             }
                         }
                     }
                 }
 
-                // Sync (was in the conversation header): conversations and contacts
+                // Sync conversations and contacts
                 Rectangle {
                     id: topSyncBtn
                     objectName: "topSyncBtn"
-                    width: 34
-                    height: 30
+                    width: 30
+                    height: 28
                     radius: 7
-                    color: topSyncMouse.containsMouse ? theme.selection : theme.lighterBackground
-                    border.width: 1
-                    border.color: (topSyncMouse.containsMouse || backend.syncingHistory) ? theme.accent : theme.muted
+                    color: topSyncMouse.containsMouse ? theme.selection : "transparent"
                     ToolTip.visible: topSyncMouse.containsMouse
                     ToolTip.text: backend.syncingHistory ? i18n.tr("Syncing…") : i18n.tr("Sync conversations and contacts (Ctrl+R)")
                     ToolTip.delay: 400
@@ -1896,20 +1945,23 @@ ApplicationWindow {
 
                 // Global Notifications Toggle Button
                 Rectangle {
-                    width: 32
-                    height: 30
+                    width: 30
+                    height: 28
                     radius: 7
-                    color: (backend.notificationsEnabled && !backend.omarchyDnd) ? theme.lighterBackground : theme.selection
-                    border.width: 1
-                    border.color: (backend.notificationsEnabled && !backend.omarchyDnd) ? theme.muted : theme.accent
+                    color: topNotifMouse.containsMouse ? theme.selection : ((!backend.notificationsEnabled || backend.omarchyDnd) ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.16) : "transparent")
+                    ToolTip.visible: topNotifMouse.containsMouse
+                    ToolTip.text: (backend.notificationsEnabled && !backend.omarchyDnd) ? i18n.tr("Mute notifications") : i18n.tr("Enable notifications")
+                    ToolTip.delay: 350
 
                     Text {
                         anchors.centerIn: parent
                         text: (backend.notificationsEnabled && !backend.omarchyDnd) ? "🔔" : "🔕"
-                        font.pixelSize: theme.fontSize
+                        font.pixelSize: theme.fontSize - 1
                     }
                     MouseArea {
+                        id: topNotifMouse
                         anchors.fill: parent
+                        hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onClicked: backend.toggleNotifications()
                     }
@@ -1919,12 +1971,10 @@ ApplicationWindow {
                 Rectangle {
                     id: topComposeBtn
                     objectName: "topComposeBtn"
-                    height: 30
-                    width: 34
+                    height: 28
+                    width: 30
                     radius: 7
-                    color: composeMouse.containsMouse ? theme.accent : theme.selection
-                    border.width: 1
-                    border.color: theme.accent
+                    color: composeMouse.containsMouse ? theme.accent : "transparent"
                     ToolTip.visible: composeMouse.containsMouse
                     ToolTip.text: i18n.tr("New Message (Ctrl+N)")
                     ToolTip.delay: 400
@@ -1934,7 +1984,7 @@ ApplicationWindow {
                         anchors.centerIn: parent
                         width: 24
                         height: 24
-                        scale: 0.8
+                        scale: 0.78
                         antialiasing: true
                         ShapePath {
                             strokeWidth: -1
@@ -1958,12 +2008,10 @@ ApplicationWindow {
                 Rectangle {
                     id: topServerConfigBtn
                     objectName: "topServerConfigBtn"
-                    height: 30
+                    height: 28
                     radius: 7
-                    implicitWidth: 34
-                    color: root.showServerConfigModal ? theme.accent : theme.lighterBackground
-                    border.width: 1
-                    border.color: (root.showServerConfigModal || backend.needsSetup) ? theme.accent : theme.muted
+                    implicitWidth: 30
+                    color: root.showServerConfigModal ? theme.accent : (serverTopMouse.containsMouse ? theme.selection : "transparent")
 
                     ToolTip.visible: serverTopMouse.containsMouse
                     ToolTip.text: i18n.tr("Settings (Ctrl+,)")
@@ -1976,7 +2024,7 @@ ApplicationWindow {
                         Text {
                             text: "⚙"
                             font.pixelSize: theme.fontSize + 2
-                            color: root.showServerConfigModal ? theme.onAccent : theme.foreground
+                            color: root.showServerConfigModal ? theme.onAccent : (backend.needsSetup ? theme.accent : theme.foreground)
                         }
                         Text {
                             // Icon only (the tooltip says "Settings"); kept for tests/accessibility
@@ -2000,33 +2048,20 @@ ApplicationWindow {
 
                 // Keyboard Shortcuts Button (Ctrl+K)
                 Rectangle {
-                    height: 30
+                    height: 28
+                    width: 30
                     radius: 7
-                    implicitWidth: shortcutsTopLbl.implicitWidth + 16
-                    color: root.showShortcutsModal ? theme.accent : theme.lighterBackground
-                    border.width: 1
-                    border.color: root.showShortcutsModal ? theme.accent : theme.muted
+                    color: root.showShortcutsModal ? theme.accent : (shortcutsTopMouse.containsMouse ? theme.selection : "transparent")
 
                     ToolTip.visible: shortcutsTopMouse.containsMouse
                     ToolTip.text: "Keyboard Shortcuts (Ctrl+K)"
                     ToolTip.delay: 400
 
-                    RowLayout {
-                        id: shortcutsTopLbl
+                    Text {
                         anchors.centerIn: parent
-                        spacing: 5
-                        Text {
-                            text: "⌨"
-                            font.pixelSize: theme.fontSize - 1
-                            color: root.showShortcutsModal ? theme.onAccent : theme.foreground
-                        }
-                        Text {
-                            visible: root.width >= 820
-                            text: "Ctrl+K"
-                            font.pixelSize: theme.fontSize - 2
-                            font.bold: true
-                            color: root.showShortcutsModal ? theme.onAccent : theme.foreground
-                        }
+                        text: "⌨"
+                        font.pixelSize: theme.fontSize - 1
+                        color: root.showShortcutsModal ? theme.onAccent : theme.foreground
                     }
                     MouseArea {
                         id: shortcutsTopMouse
@@ -2066,29 +2101,32 @@ ApplicationWindow {
                     anchors.fill: parent
                     spacing: 0
 
-                    // Search Bar
+                    // Search Bar (macOS Messages-style pill)
                     Rectangle {
                         Layout.fillWidth: true
-                        Layout.preferredHeight: Math.max(60, theme.fontSize + 40)
+                        Layout.preferredHeight: 48
                         color: "transparent"
 
                         Rectangle {
                             anchors.fill: parent
-                            anchors.margins: 10
-                            radius: 8
-                            color: theme.background
-                            border.width: 1
-                            border.color: searchInput.activeFocus ? theme.accent : theme.muted
+                            anchors.leftMargin: 10
+                            anchors.rightMargin: 10
+                            anchors.topMargin: 8
+                            anchors.bottomMargin: 8
+                            radius: 10
+                            color: theme.subtleSurface
+                            border.width: searchInput.activeFocus ? 1 : 0
+                            border.color: theme.accent
 
                             RowLayout {
                                 anchors.fill: parent
                                 anchors.leftMargin: 10
                                 anchors.rightMargin: 10
-                                spacing: 8
+                                spacing: 6
 
                                 Text {
                                     text: "⌕"
-                                    font.pixelSize: theme.fontSize + 1
+                                    font.pixelSize: theme.fontSize
                                     color: theme.darkForeground
                                 }
 
@@ -2096,10 +2134,10 @@ ApplicationWindow {
                                     id: searchInput
                                     Layout.fillWidth: true
                                     Layout.fillHeight: true
-                                    topPadding: 6
-                                    bottomPadding: 10
+                                    topPadding: 4
+                                    bottomPadding: 4
                                     verticalAlignment: TextInput.AlignVCenter
-                                    placeholderText: i18n.tr("Search conversations...") + " (Ctrl+F)"
+                                    placeholderText: i18n.tr("Search")
                                     placeholderTextColor: theme.darkForeground
                                     color: theme.brightForeground
                                     font.pixelSize: theme.fontSize - 1
@@ -2144,15 +2182,15 @@ ApplicationWindow {
                         }
                     }
 
-                    // iCloud Hub Quick Navigation Bar (Notes, Calendar, Photos)
+                    // Compact iCloud Hub Quick Strip (Notes, Calendar, Photos)
                     Rectangle {
                         id: icloudHubBar
                         objectName: "icloudHubBar"
                         visible: backend.icloudNotesEnabled || backend.icloudCalendarEnabled || backend.icloudPhotosEnabled
                         Layout.fillWidth: true
-                        Layout.preferredHeight: 32
-                        Layout.leftMargin: 12
-                        Layout.rightMargin: 12
+                        Layout.preferredHeight: 26
+                        Layout.leftMargin: 10
+                        Layout.rightMargin: 10
                         Layout.bottomMargin: 4
                         color: "transparent"
 
@@ -6191,85 +6229,89 @@ ApplicationWindow {
 
                 }
 
-                // Bottom Message Composer Bar
+                // Bottom Message Composer Bar (macOS Messages pill composer with unified + menu)
                 Rectangle {
                     visible: backend.selectedChatGuid.length > 0
                     Layout.fillWidth: true
-                    // Hugs the input: one line is as tall as the buttons, and it grows as text wraps
-                    Layout.preferredHeight: Math.min(160, Math.max(64, composerBox.Layout.preferredHeight + 20))
+                    // Hugs the input: sleek single-line pill that expands smoothly as text wraps
+                    Layout.preferredHeight: Math.min(156, Math.max(54, composerBox.Layout.preferredHeight + 16))
                     color: theme.darkBackground
 
                     Rectangle {
                         anchors.top: parent.top
                         width: parent.width
                         height: 1
-                        color: theme.lighterBackground
+                        color: theme.subtleBorder
                     }
 
                     RowLayout {
                         anchors.fill: parent
-                        anchors.margins: 10
-                        spacing: 10
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        anchors.topMargin: 8
+                        anchors.bottomMargin: 8
+                        spacing: 8
 
-                        // Emoji Picker Toggle Button (😊)
+                        // Unified "+" Apps / Actions Button (Effects, Send Later, iCloud Photos, Paste Image)
                         Rectangle {
-                            Layout.preferredWidth: 42
-                            Layout.preferredHeight: 42
+                            id: composerPlusBtn
+                            objectName: "composerPlusBtn"
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
                             Layout.alignment: Qt.AlignVCenter
-                            radius: theme.radius
-                            color: root.showEmojiPicker ? theme.selection : (emojiBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
-                            border.width: 1
-                            border.color: root.showEmojiPicker ? theme.accent : theme.muted
+                            radius: 17
+                            color: composerAppsMenu.visible ? theme.accent : (plusBtnMouse.containsMouse ? theme.selection : theme.lighterBackground)
 
                             Text {
                                 anchors.centerIn: parent
-                                text: "😊"
-                                font.pixelSize: theme.fontSize + 3
+                                text: "+"
+                                font.pixelSize: theme.fontSize + 5
+                                font.bold: true
+                                color: composerAppsMenu.visible ? theme.onAccent : theme.foreground
                             }
 
                             MouseArea {
-                                id: emojiBtnMouse
+                                id: plusBtnMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
-                                    root.showEmojiPicker = !root.showEmojiPicker
-                                    if (root.showEmojiPicker) {
-                                        emojiSearchField.forceActiveFocus()
-                                    } else {
-                                        composerInput.forceActiveFocus()
-                                    }
+                                    composerAppsMenu.visible = !composerAppsMenu.visible
+                                    effectMenuPopup.visible = false
+                                    scheduleMenuPopup.visible = false
+                                    filterMenuPopup.visible = false
                                 }
                             }
 
-                            ToolTip.visible: emojiBtnMouse.containsMouse
-                            ToolTip.text: i18n.tr("Emoji Picker (or type :shortcode:)")
-                            ToolTip.delay: 400
+                            ToolTip.visible: plusBtnMouse.containsMouse
+                            ToolTip.text: i18n.tr("More actions (Effects, Send Later, Photos)")
+                            ToolTip.delay: 350
                         }
 
+                        // Rounded Pill Message Input with inline Emoji trigger
                         Rectangle {
                             id: composerBox
                             objectName: "composerBox"
                             Layout.fillWidth: true
                             Layout.alignment: Qt.AlignVCenter
                             // No empty space under a single line; up to ~6 lines before scrolling
-                            Layout.preferredHeight: Math.min(140, Math.max(44, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))
-                            radius: theme.radius
+                            Layout.preferredHeight: Math.min(138, Math.max(38, Math.ceil(composerInput.contentHeight) + composerInput.topPadding + composerInput.bottomPadding))
+                            radius: 19
                             color: theme.background
                             border.width: 1
-                            border.color: composerInput.activeFocus ? theme.accent : theme.muted
+                            border.color: composerInput.activeFocus ? theme.accent : theme.subtleBorder
 
                             TextArea {
                                 id: composerInput
                                 anchors.fill: parent
-                                anchors.leftMargin: 8
-                                anchors.rightMargin: 8
-                                topPadding: 11
-                                bottomPadding: 11
+                                anchors.leftMargin: 10
+                                anchors.rightMargin: 36
+                                topPadding: 9
+                                bottomPadding: 9
                                 objectName: "composerInput"
                                 leftPadding: 4
                                 rightPadding: 4
-                                placeholderText: i18n.tr("Type an iMessage... (:smile: for emoji, Enter to send)")
+                                placeholderText: root.selectedChatIsGreen ? i18n.tr("Text Message") : i18n.tr("iMessage")
                                 placeholderTextColor: theme.darkForeground
                                 color: theme.brightForeground
                                 font.pixelSize: theme.fontSize
@@ -6426,174 +6468,96 @@ ApplicationWindow {
                                     }
                                 }
                             }
+
+                            // Inline Emoji Picker Toggle (😊) inside right edge of pill
+                            Rectangle {
+                                anchors.right: parent.right
+                                anchors.rightMargin: 6
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: 28
+                                height: 28
+                                radius: 14
+                                color: root.showEmojiPicker ? theme.selection : (emojiBtnMouse.containsMouse ? theme.lighterBackground : "transparent")
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "😊"
+                                    font.pixelSize: theme.fontSize + 1
+                                }
+
+                                MouseArea {
+                                    id: emojiBtnMouse
+                                    anchors.fill: parent
+                                    hoverEnabled: true
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.showEmojiPicker = !root.showEmojiPicker
+                                        if (root.showEmojiPicker) {
+                                            emojiSearchField.forceActiveFocus()
+                                        } else {
+                                            composerInput.forceActiveFocus()
+                                        }
+                                    }
+                                }
+
+                                ToolTip.visible: emojiBtnMouse.containsMouse
+                                ToolTip.text: i18n.tr("Emoji Picker (or type :shortcode:)")
+                                ToolTip.delay: 400
+                            }
                         }
 
-
-                        // Voice Memo Record/Stop Button (🎙)
+                        // Circular Action Button: Voice Memo (🎙) when empty, Send (↑) when ready
                         Rectangle {
-                            Layout.preferredWidth: 42
-                            Layout.preferredHeight: 42
+                            id: composerPrimaryActionBtn
+                            objectName: "composerPrimaryActionBtn"
+                            Layout.preferredWidth: 34
+                            Layout.preferredHeight: 34
                             Layout.alignment: Qt.AlignVCenter
-                            radius: theme.radius
-                            color: backend.recordingVoice ? "#e63946" : (voiceBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
-                            border.width: 1
-                            border.color: backend.recordingVoice ? "#ff4d6d" : theme.muted
+                            radius: 17
+                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat())
+                            color: backend.recordingVoice
+                                   ? "#e63946"
+                                   : (canSendNow
+                                      ? (root.selectedChatIsGreen ? "#1B6E38" : theme.accent)
+                                      : (composerActionMouse.containsMouse ? theme.selection : theme.lighterBackground))
+                            border.width: (!backend.recordingVoice && canSendNow && root.selectedChatIsGreen) ? 1 : 0
+                            border.color: "#268C48"
 
                             Text {
                                 anchors.centerIn: parent
-                                text: backend.recordingVoice ? "⏹" : "🎙"
-                                font.pixelSize: theme.fontSize + 3
-                                color: backend.recordingVoice ? "#ffffff" : theme.brightForeground
+                                text: backend.recordingVoice
+                                      ? "⏹"
+                                      : (parent.canSendNow
+                                         ? (root.editTargetGuid !== "" ? "✓" : "↑")
+                                         : "🎙")
+                                font.pixelSize: parent.canSendNow ? (theme.fontSize + 3) : (theme.fontSize + 1)
+                                font.bold: parent.canSendNow
+                                color: (backend.recordingVoice || parent.canSendNow) ? "#ffffff" : theme.foreground
                             }
 
                             MouseArea {
-                                id: voiceBtnMouse
+                                id: composerActionMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: {
                                     if (backend.recordingVoice) {
-                                        backend.stopVoiceRecordingForPreview();
+                                        backend.stopVoiceRecordingForPreview()
+                                    } else if (parent.canSendNow) {
+                                        root.sendComposerContent()
                                     } else {
-                                        backend.startVoiceRecording();
+                                        backend.startVoiceRecording()
                                     }
                                 }
                             }
 
-                            ToolTip.visible: voiceBtnMouse.containsMouse
-                            ToolTip.text: backend.recordingVoice ? i18n.tr("Stop & Preview Voice Memo") : i18n.tr("Record Voice Memo")
-                            ToolTip.delay: 400
-                        }
-
-                        // Expressive Send Effect Menu Button (✨)
-                        Rectangle {
-                            id: effectBtn
-                            objectName: "composerEffectBtn"
-                            visible: root.editTargetGuid === ""
-                            Layout.preferredWidth: 42
-                            Layout.preferredHeight: 42
-                            Layout.alignment: Qt.AlignVCenter
-                            radius: theme.radius
-                            color: effectMenuPopup.visible ? theme.selection : (effectBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
-                            border.width: 1
-                            border.color: effectMenuPopup.visible ? theme.accent : theme.muted
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "✨"
-                                font.pixelSize: theme.fontSize + 3
-                            }
-
-                            MouseArea {
-                                id: effectBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    effectMenuPopup.visible = !effectMenuPopup.visible;
-                                    scheduleMenuPopup.visible = false;
-                                }
-                            }
-
-                            ToolTip.visible: effectBtnMouse.containsMouse
-                            ToolTip.text: i18n.tr("Send with Effect")
-                            ToolTip.delay: 400
-                        }
-
-                        // Send Later Schedule Button (🕒)
-                        Rectangle {
-                            id: scheduleBtn
-                            objectName: "composerScheduleBtn"
-                            visible: root.editTargetGuid === ""
-                            Layout.preferredWidth: 42
-                            Layout.preferredHeight: 42
-                            Layout.alignment: Qt.AlignVCenter
-                            radius: theme.radius
-                            color: scheduleMenuPopup.visible ? theme.selection : (scheduleBtnMouse.containsMouse ? theme.lighterBackground : theme.background)
-                            border.width: 1
-                            border.color: scheduleMenuPopup.visible ? theme.accent : theme.muted
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "🕒"
-                                font.pixelSize: theme.fontSize + 3
-                            }
-
-                            MouseArea {
-                                id: scheduleBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    scheduleMenuPopup.visible = !scheduleMenuPopup.visible;
-                                    effectMenuPopup.visible = false;
-                                }
-                            }
-
-                            ToolTip.visible: scheduleBtnMouse.containsMouse
-                            ToolTip.text: i18n.tr("Send Later (+15m, +1h, Tomorrow 9 AM)")
-                            ToolTip.delay: 400
-                        }
-
-                        // iCloud Photos Hub Button
-                        Rectangle {
-                            id: icloudPhotosBtn
-                            objectName: "icloudPhotosBtn"
-                            visible: backend.icloudPhotosEnabled && root.width >= 760
-                            Layout.preferredWidth: 38
-                            Layout.preferredHeight: 38
-                            Layout.alignment: Qt.AlignVCenter
-                            radius: theme.radius
-                            color: icloudPhotosBtnMouse.containsMouse ? theme.lighterBackground : "transparent"
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: "☁️"
-                                font.pixelSize: theme.fontSize + 2
-                            }
-
-                            MouseArea {
-                                id: icloudPhotosBtnMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    backend.fetchIcloudPhotos()
-                                    icloudPhotosPopup.open()
-                                }
-                            }
-
-                            ToolTip.visible: icloudPhotosBtnMouse.containsMouse
-                            ToolTip.text: i18n.tr("iCloud & iMessage Photos")
-                            ToolTip.delay: 400
-                        }
-
-                        // Send Button
-                        Rectangle {
-                            Layout.preferredWidth: 82
-                            Layout.preferredHeight: 44
-                            Layout.alignment: Qt.AlignVCenter
-                            radius: theme.radius
-                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat())
-                            color: canSendNow
-                                   ? (root.selectedChatIsGreen ? "#1B6E38" : theme.accent)
-                                   : theme.lighterBackground
-                            border.width: (canSendNow && root.selectedChatIsGreen) ? 1 : 0
-                            border.color: "#268C48"
-
-                            Text {
-                                anchors.centerIn: parent
-                                text: root.editTargetGuid !== "" ? i18n.tr("Save") : (i18n.tr("Send") + " ↑")
-                                font.pixelSize: theme.fontSize - 1
-                                font.bold: true
-                                color: parent.canSendNow ? "#ffffff" : theme.darkForeground
-                            }
-
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: root.sendComposerContent()
-                            }
+                            ToolTip.visible: composerActionMouse.containsMouse
+                            ToolTip.text: backend.recordingVoice
+                                          ? i18n.tr("Stop & Preview Voice Memo")
+                                          : (parent.canSendNow
+                                             ? (root.editTargetGuid !== "" ? i18n.tr("Save edit") : i18n.tr("Send"))
+                                             : i18n.tr("Record Voice Memo"))
+                            ToolTip.delay: 350
                         }
                     }
                 }
@@ -11365,35 +11329,6 @@ ApplicationWindow {
                         }
 
                         Rectangle {
-                            id: togglePinnedRowFillRecentBtn
-                            objectName: "togglePinnedRowFillRecentBtn"
-                            Layout.fillWidth: true
-                            height: 34
-                            radius: 6
-                            opacity: backend.showPinnedRow ? 1.0 : 0.5
-                            color: backend.pinnedRowFillRecent ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.pinnedRowFillRecent ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.pinnedRowFillRecent ? "✓ " : "○ ") + i18n.tr("Fill 4 Pinned Slots with Recent")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.pinnedRowFillRecent
-                                color: backend.pinnedRowFillRecent ? theme.brightForeground : theme.darkForeground
-                            }
-                            ToolTip.visible: fillRecentToggleMouse.containsMouse
-                            ToolTip.text: i18n.tr("Fill empty pinned slots with most recent conversations (up to 4)")
-                            ToolTip.delay: 300
-                            MouseArea {
-                                id: fillRecentToggleMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.pinnedRowFillRecent = !backend.pinnedRowFillRecent
-                            }
-                        }
-
-                        Rectangle {
                             id: toggleHoverMessageActionsBtn
                             objectName: "toggleHoverMessageActionsBtn"
                             Layout.fillWidth: true
@@ -13390,6 +13325,226 @@ ApplicationWindow {
             font.pixelSize: theme.fontSize - 1
             font.bold: true
             color: theme.brightForeground
+        }
+    }
+
+    // Compact Top-Bar Filter Dropdown Popup
+    Rectangle {
+        id: filterMenuPopup
+        objectName: "filterMenuPopup"
+        visible: false
+        z: 995
+        width: 190
+        height: filterMenuCol.implicitHeight + 14
+        radius: 10
+        color: theme.darkerBackground
+        border.color: theme.muted
+        border.width: 1
+        x: Math.max(12, root.width - width - 150)
+        y: 48
+
+        ColumnLayout {
+            id: filterMenuCol
+            anchors.fill: parent
+            anchors.margins: 7
+            spacing: 2
+
+            Repeater {
+                model: [
+                    { key: "all", label: i18n.tr("All Conversations") + (backend.totalChatCount > 0 ? " (" + backend.totalChatCount + ")" : "") },
+                    { key: "unread", label: i18n.tr("Unread") + (backend.totalUnread > 0 ? " (" + backend.totalUnread + ")" : "") },
+                    { key: "direct", label: i18n.tr("Direct Messages") },
+                    { key: "groups", label: i18n.tr("Groups") },
+                    { key: "muted", label: i18n.tr("Muted") }
+                ]
+                delegate: Rectangle {
+                    required property var modelData
+                    Layout.fillWidth: true
+                    height: 28
+                    radius: 6
+                    color: filterOptMouse.containsMouse ? theme.selection : "transparent"
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 8
+                        anchors.rightMargin: 8
+                        spacing: 6
+                        Text {
+                            text: backend.filterMode === modelData.key ? "✓" : " "
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.accent
+                            Layout.preferredWidth: 14
+                        }
+                        Text {
+                            text: modelData.label
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: backend.filterMode === modelData.key
+                            color: backend.filterMode === modelData.key ? theme.brightForeground : theme.foreground
+                            Layout.fillWidth: true
+                        }
+                    }
+
+                    MouseArea {
+                        id: filterOptMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: {
+                            backend.setFilterMode(modelData.key)
+                            filterMenuPopup.visible = false
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Unified Composer "+" Apps / Actions Popover Menu (macOS Messages-style)
+    Rectangle {
+        id: composerAppsMenu
+        objectName: "composerAppsMenu"
+        visible: false
+        z: 995
+        width: 224
+        height: composerAppsCol.implicitHeight + 14
+        radius: 12
+        color: theme.darkerBackground
+        border.color: theme.muted
+        border.width: 1
+        x: Math.max(12, leftSidebarPane.width + 12)
+        y: Math.max(12, root.height - height - 64)
+
+        ColumnLayout {
+            id: composerAppsCol
+            anchors.fill: parent
+            anchors.margins: 7
+            spacing: 2
+
+            // Paste Image from Clipboard
+            Rectangle {
+                Layout.fillWidth: true
+                height: 30
+                radius: 7
+                color: appPasteMouse.containsMouse ? theme.selection : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    text: "📋  " + i18n.tr("Paste Image (Ctrl+V)")
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.brightForeground
+                }
+                MouseArea {
+                    id: appPasteMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        composerAppsMenu.visible = false
+                        var pastedPath = backend.pasteClipboardImageToTempFile()
+                        if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
+                            root.stagedAttachmentPath = pastedPath
+                            root.stagedAttachmentName = pastedPath.split("/").pop()
+                            root.stagedAttachmentChatGuid = backend.selectedChatGuid
+                            root.stageAttachment(pastedPath, root.stagedAttachmentName, backend.selectedChatGuid)
+                            root.showToast("📎 " + i18n.tr("Image staged — press Enter or Send"))
+                        } else {
+                            root.showToast(i18n.tr("No image on clipboard (or drag & drop a file)"))
+                        }
+                    }
+                }
+            }
+
+            // iCloud Photos Hub
+            Rectangle {
+                id: icloudPhotosBtn
+                objectName: "icloudPhotosBtn"
+                visible: backend.icloudPhotosEnabled
+                Layout.fillWidth: true
+                height: 30
+                radius: 7
+                color: icloudPhotosBtnMouse.containsMouse ? theme.selection : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    text: "☁️  " + i18n.tr("iCloud & iMessage Photos")
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.brightForeground
+                }
+                MouseArea {
+                    id: icloudPhotosBtnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        composerAppsMenu.visible = false
+                        backend.fetchIcloudPhotos()
+                        icloudPhotosPopup.open()
+                    }
+                }
+            }
+
+            // Send with Effect
+            Rectangle {
+                id: effectBtn
+                objectName: "composerEffectBtn"
+                visible: root.editTargetGuid === ""
+                Layout.fillWidth: true
+                height: 30
+                radius: 7
+                color: effectBtnMouse.containsMouse ? theme.selection : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    text: "✨  " + i18n.tr("Send with Effect")
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.brightForeground
+                }
+                MouseArea {
+                    id: effectBtnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        composerAppsMenu.visible = false
+                        effectMenuPopup.visible = !effectMenuPopup.visible
+                        scheduleMenuPopup.visible = false
+                    }
+                }
+            }
+
+            // Send Later
+            Rectangle {
+                id: scheduleBtn
+                objectName: "composerScheduleBtn"
+                visible: root.editTargetGuid === ""
+                Layout.fillWidth: true
+                height: 30
+                radius: 7
+                color: scheduleBtnMouse.containsMouse ? theme.selection : "transparent"
+                Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    anchors.left: parent.left
+                    anchors.leftMargin: 8
+                    text: "🕒  " + i18n.tr("Send Later")
+                    font.pixelSize: theme.fontSize - 1
+                    color: theme.brightForeground
+                }
+                MouseArea {
+                    id: scheduleBtnMouse
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    cursorShape: Qt.PointingHandCursor
+                    onClicked: {
+                        composerAppsMenu.visible = false
+                        scheduleMenuPopup.visible = !scheduleMenuPopup.visible
+                        effectMenuPopup.visible = false
+                    }
+                }
+            }
         }
     }
 

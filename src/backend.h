@@ -148,7 +148,6 @@ class Backend : public QObject {
     Q_PROPERTY(int historySyncDays READ historySyncDays WRITE setHistorySyncDays NOTIFY historySyncDaysChanged)
     Q_PROPERTY(bool showTopBarStatusPill READ showTopBarStatusPill WRITE setShowTopBarStatusPill NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool showPinnedRow READ showPinnedRow WRITE setShowPinnedRow NOTIFY uiPreferencesChanged)
-    Q_PROPERTY(bool pinnedRowFillRecent READ pinnedRowFillRecent WRITE setPinnedRowFillRecent NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool hoverMessageActions READ hoverMessageActions WRITE setHoverMessageActions NOTIFY uiPreferencesChanged)
     Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
     Q_PROPERTY(bool syncingHistory READ syncingHistory NOTIFY syncingHistoryChanged)
@@ -241,8 +240,6 @@ public:
     void setShowTopBarStatusPill(bool enabled);
     bool showPinnedRow() const { return m_showPinnedRow; }
     void setShowPinnedRow(bool enabled);
-    bool pinnedRowFillRecent() const { return m_pinnedRowFillRecent; }
-    void setPinnedRowFillRecent(bool enabled);
     bool hoverMessageActions() const { return m_hoverMessageActions; }
     void setHoverMessageActions(bool enabled);
     QString themeMode() const { return m_themeMode; }
@@ -926,7 +923,6 @@ private:
     int m_historySyncDays = 60;
     bool m_showTopBarStatusPill = false;
     bool m_showPinnedRow = true;
-    bool m_pinnedRowFillRecent = false;
     bool m_hoverMessageActions = true;
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;

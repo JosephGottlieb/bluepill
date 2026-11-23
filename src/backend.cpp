@@ -560,7 +560,6 @@ void Backend::setStateFilePath(const QString &path) {
     m_historySyncDays = 60;
     m_showTopBarStatusPill = false;
     m_showPinnedRow = true;
-    m_pinnedRowFillRecent = false;
     m_hoverMessageActions = true;
     m_stayOnHomePage = false;
     m_mutedChats.clear();
@@ -645,9 +644,6 @@ void Backend::loadAppState() {
     }
     if (obj.contains(QStringLiteral("showPinnedRow"))) {
         m_showPinnedRow = obj.value(QStringLiteral("showPinnedRow")).toBool(true);
-    }
-    if (obj.contains(QStringLiteral("pinnedRowFillRecent"))) {
-        m_pinnedRowFillRecent = obj.value(QStringLiteral("pinnedRowFillRecent")).toBool(false);
     }
     if (obj.contains(QStringLiteral("hoverMessageActions"))) {
         m_hoverMessageActions = obj.value(QStringLiteral("hoverMessageActions")).toBool(true);
@@ -889,7 +885,6 @@ bool Backend::saveAppState() const {
     root.insert(QStringLiteral("historySyncDays"), m_historySyncDays);
     root.insert(QStringLiteral("showTopBarStatusPill"), m_showTopBarStatusPill);
     root.insert(QStringLiteral("showPinnedRow"), m_showPinnedRow);
-    root.insert(QStringLiteral("pinnedRowFillRecent"), m_pinnedRowFillRecent);
     root.insert(QStringLiteral("hoverMessageActions"), m_hoverMessageActions);
     root.insert(QStringLiteral("lastKnownServerStatus"), m_lastKnownServerStatus);
     QJsonArray pinnedArr;
@@ -1354,14 +1349,6 @@ void Backend::setShowTopBarStatusPill(bool enabled) {
 void Backend::setShowPinnedRow(bool enabled) {
     if (m_showPinnedRow == enabled) return;
     m_showPinnedRow = enabled;
-    saveAppState();
-    emit uiPreferencesChanged();
-    emit chatsChanged();
-}
-
-void Backend::setPinnedRowFillRecent(bool enabled) {
-    if (m_pinnedRowFillRecent == enabled) return;
-    m_pinnedRowFillRecent = enabled;
     saveAppState();
     emit uiPreferencesChanged();
     emit chatsChanged();
@@ -6906,14 +6893,6 @@ QVariantList Backend::pinnedChats() const {
             if (c.guid == pinGuid) {
                 appendEntry(c, true);
                 break;
-            }
-        }
-    }
-    if (m_pinnedRowFillRecent) {
-        for (const ChatEntry &c : m_chats) {
-            if (result.size() >= 4) break;
-            if (!seenGuids.contains(c.guid)) {
-                appendEntry(c, false);
             }
         }
     }
