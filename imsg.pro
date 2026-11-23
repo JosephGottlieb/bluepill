@@ -6,7 +6,7 @@ qtHaveModule(multimedia) {
 CONFIG += c++20
 
 TARGET = bluepill
-VERSION = 1.1.0
+VERSION = 1.2.12
 TEMPLATE = app
 
 DESTDIR = .

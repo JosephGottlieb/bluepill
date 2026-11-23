@@ -11754,8 +11754,8 @@ ApplicationWindow {
         Rectangle {
             id: cloudUpdateModalCard
             objectName: "cloudUpdateModalCard"
-            width: Math.min(540, root.width - 40)
-            height: cloudUpdateModalCol.implicitHeight + 40
+            width: Math.max(240, Math.min(540, root.width - 40))
+            height: Math.min(cloudUpdateModalCol.implicitHeight + 40, Math.max(200, root.height - 40))
             anchors.centerIn: parent
             radius: 12
             clip: true
@@ -11786,175 +11786,201 @@ ApplicationWindow {
                     font.pixelSize: theme.fontSize - 2
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap
+                    maximumLineCount: 3
+                    elide: Text.ElideRight
                 }
 
-                // Client App Update Section
-                Rectangle {
-                    id: clientUpdateCard
-                    objectName: "clientUpdateCard"
+                Flickable {
                     Layout.fillWidth: true
-                    implicitHeight: clientUpdRow.implicitHeight + 18
-                    radius: 8
+                    Layout.fillHeight: true
+                    Layout.minimumHeight: 0
+                    Layout.preferredHeight: cloudUpdateBodyCol.implicitHeight
+                    implicitHeight: cloudUpdateBodyCol.implicitHeight
                     clip: true
-                    color: theme.lighterBackground
-                    border.width: 1
-                    border.color: backend.clientUpdateAvailable ? theme.accent : theme.muted
+                    contentWidth: width
+                    contentHeight: cloudUpdateBodyCol.implicitHeight
+                    interactive: contentHeight > height
 
-                    RowLayout {
-                        id: clientUpdRow
-                        anchors.fill: parent
-                        anchors.margins: 9
-                        spacing: 10
-                        ColumnLayout {
+                    ColumnLayout {
+                        id: cloudUpdateBodyCol
+                        width: parent.width
+                        spacing: 12
+
+                        // Client App Update Section
+                        Rectangle {
+                            id: clientUpdateCard
+                            objectName: "clientUpdateCard"
                             Layout.fillWidth: true
-                            Layout.minimumWidth: 0
-                            spacing: 2
-                            Text {
-                                Layout.fillWidth: true
-                                text: backend.clientUpdateMethod.length > 0
-                                      ? i18n.tr("Client App Update (%1)").arg(backend.clientUpdateMethod)
-                                      : i18n.tr("Client App Update")
-                                font.pixelSize: theme.fontSize - 1
-                                font.bold: true
-                                color: theme.brightForeground
-                                elide: Text.ElideRight
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: backend.clientUpdateAvailable
-                                      ? ("v" + (Qt.application.version || "1.2.11") + " → v" + backend.clientLatestVersion)
-                                      : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.11")
-                                font.pixelSize: theme.fontSize - 2
-                                color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
-                                elide: Text.ElideRight
+                            implicitHeight: clientUpdRow.implicitHeight + 18
+                            radius: 8
+                            clip: true
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.clientUpdateAvailable ? theme.accent : theme.muted
+
+                            RowLayout {
+                                id: clientUpdRow
+                                anchors.fill: parent
+                                anchors.margins: 9
+                                spacing: 10
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: backend.clientUpdateMethod.length > 0
+                                              ? i18n.tr("Client App Update (%1)").arg(backend.clientUpdateMethod)
+                                              : i18n.tr("Client App Update")
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: backend.clientUpdateAvailable
+                                              ? ("v" + (Qt.application.version || "1.2.12") + " → v" + backend.clientLatestVersion)
+                                              : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.12")
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                Rectangle {
+                                    id: confirmClientUpdateBtn
+                                    objectName: "confirmClientUpdateBtn"
+                                    Layout.alignment: Qt.AlignVCenter
+                                    Layout.preferredHeight: 32
+                                    Layout.preferredWidth: Math.min(confirmClientTxt.implicitWidth + 24, Math.max(120, Math.floor(clientUpdRow.width * 0.45)))
+                                    Layout.minimumWidth: 96
+                                    height: 32
+                                    implicitWidth: confirmClientTxt.implicitWidth + 24
+                                    radius: 7
+                                    enabled: backend.cloudLoggedIn && backend.clientUpdateAvailable && !backend.updateApplying
+                                    opacity: enabled ? 1.0 : 0.45
+                                    color: theme.accent
+                                    Text {
+                                        id: confirmClientTxt
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                        elide: Text.ElideRight
+                                        text: backend.silentAutoUpdateSupported ? i18n.tr("Update & Restart") : i18n.tr("Update App")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.onAccent
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        enabled: parent.enabled
+                                        onClicked: backend.confirmClientUpdate()
+                                    }
+                                }
                             }
                         }
+
+                        // Mac Server Update Section
                         Rectangle {
-                            id: confirmClientUpdateBtn
-                            objectName: "confirmClientUpdateBtn"
-                            Layout.alignment: Qt.AlignVCenter
-                            Layout.preferredHeight: 32
-                            Layout.preferredWidth: Math.min(confirmClientTxt.implicitWidth + 24, Math.max(120, Math.floor(clientUpdRow.width * 0.45)))
-                            Layout.minimumWidth: 96
-                            height: 32
-                            implicitWidth: confirmClientTxt.implicitWidth + 24
-                            radius: 7
-                            enabled: backend.cloudLoggedIn && backend.clientUpdateAvailable && !backend.updateApplying
-                            opacity: enabled ? 1.0 : 0.45
-                            color: theme.accent
-                            Text {
-                                id: confirmClientTxt
+                            id: serverUpdateCard
+                            objectName: "serverUpdateCard"
+                            Layout.fillWidth: true
+                            implicitHeight: srvUpdRow.implicitHeight + 18
+                            radius: 8
+                            clip: true
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: backend.serverUpdateAvailable ? theme.accent : theme.muted
+
+                            RowLayout {
+                                id: srvUpdRow
                                 anchors.fill: parent
-                                anchors.leftMargin: 10
-                                anchors.rightMargin: 10
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                                elide: Text.ElideRight
-                                text: backend.silentAutoUpdateSupported ? i18n.tr("Update & Restart") : i18n.tr("Update App")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: true
-                                color: theme.onAccent
+                                anchors.margins: 9
+                                spacing: 10
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    Layout.minimumWidth: 0
+                                    spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: i18n.tr("Mac Server Update (%1)").arg(backend.serverUpdateMethod || "homebrew")
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: backend.serverUpdateAvailable
+                                              ? ("v" + (backend.serverCurrentVersion || "?") + " → v" + backend.serverLatestVersion)
+                                              : (backend.serverCurrentVersion.length > 0
+                                                 ? i18n.tr("Up to date (v%1)").arg(backend.serverCurrentVersion)
+                                                 : i18n.tr("Up to date"))
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: backend.serverUpdateAvailable ? theme.accent : theme.darkForeground
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                Rectangle {
+                                    id: confirmServerUpdateBtn
+                                    objectName: "confirmServerUpdateBtn"
+                                    Layout.alignment: Qt.AlignVCenter
+                                    Layout.preferredHeight: 32
+                                    Layout.preferredWidth: Math.min(confirmSrvTxt.implicitWidth + 24, Math.max(120, Math.floor(srvUpdRow.width * 0.45)))
+                                    Layout.minimumWidth: 96
+                                    height: 32
+                                    implicitWidth: confirmSrvTxt.implicitWidth + 24
+                                    radius: 7
+                                    enabled: backend.cloudLoggedIn && backend.serverUpdateAvailable && !backend.updateApplying
+                                    opacity: enabled ? 1.0 : 0.45
+                                    color: theme.green
+                                    Text {
+                                        id: confirmSrvTxt
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 10
+                                        anchors.rightMargin: 10
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                        elide: Text.ElideRight
+                                        text: i18n.tr("Update Server")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: "#ffffff"
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        enabled: parent.enabled
+                                        onClicked: backend.confirmServerUpdate(true)
+                                    }
+                                }
                             }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                enabled: parent.enabled
-                                onClicked: backend.confirmClientUpdate()
-                            }
+                        }
+
+                        Text {
+                            id: updateStatusLabel
+                            objectName: "updateStatusLabel"
+                            Layout.fillWidth: true
+                            visible: backend.updateStatusText.length > 0
+                            text: backend.updateStatusText
+                            font.pixelSize: theme.fontSize - 3
+                            color: theme.foreground
+                            wrapMode: Text.WordWrap
+                            maximumLineCount: 4
+                            elide: Text.ElideRight
                         }
                     }
-                }
-
-                // Mac Server Update Section
-                Rectangle {
-                    id: serverUpdateCard
-                    objectName: "serverUpdateCard"
-                    Layout.fillWidth: true
-                    implicitHeight: srvUpdRow.implicitHeight + 18
-                    radius: 8
-                    clip: true
-                    color: theme.lighterBackground
-                    border.width: 1
-                    border.color: backend.serverUpdateAvailable ? theme.accent : theme.muted
-
-                    RowLayout {
-                        id: srvUpdRow
-                        anchors.fill: parent
-                        anchors.margins: 9
-                        spacing: 10
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            Layout.minimumWidth: 0
-                            spacing: 2
-                            Text {
-                                Layout.fillWidth: true
-                                text: i18n.tr("Mac Server Update (%1)").arg(backend.serverUpdateMethod || "homebrew")
-                                font.pixelSize: theme.fontSize - 1
-                                font.bold: true
-                                color: theme.brightForeground
-                                elide: Text.ElideRight
-                            }
-                            Text {
-                                Layout.fillWidth: true
-                                text: backend.serverUpdateAvailable
-                                      ? ("v" + (backend.serverCurrentVersion || "?") + " → v" + backend.serverLatestVersion)
-                                      : (backend.serverCurrentVersion.length > 0
-                                         ? i18n.tr("Up to date (v%1)").arg(backend.serverCurrentVersion)
-                                         : i18n.tr("Up to date"))
-                                font.pixelSize: theme.fontSize - 2
-                                color: backend.serverUpdateAvailable ? theme.accent : theme.darkForeground
-                                elide: Text.ElideRight
-                            }
-                        }
-                        Rectangle {
-                            id: confirmServerUpdateBtn
-                            objectName: "confirmServerUpdateBtn"
-                            Layout.alignment: Qt.AlignVCenter
-                            Layout.preferredHeight: 32
-                            Layout.preferredWidth: Math.min(confirmSrvTxt.implicitWidth + 24, Math.max(120, Math.floor(srvUpdRow.width * 0.45)))
-                            Layout.minimumWidth: 96
-                            height: 32
-                            implicitWidth: confirmSrvTxt.implicitWidth + 24
-                            radius: 7
-                            enabled: backend.cloudLoggedIn && backend.serverUpdateAvailable && !backend.updateApplying
-                            opacity: enabled ? 1.0 : 0.45
-                            color: theme.green
-                            Text {
-                                id: confirmSrvTxt
-                                anchors.fill: parent
-                                anchors.leftMargin: 10
-                                anchors.rightMargin: 10
-                                horizontalAlignment: Text.AlignHCenter
-                                verticalAlignment: Text.AlignVCenter
-                                elide: Text.ElideRight
-                                text: i18n.tr("Update Server")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: true
-                                color: "#ffffff"
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                enabled: parent.enabled
-                                onClicked: backend.confirmServerUpdate(true)
-                            }
-                        }
-                    }
-                }
-
-                Text {
-                    Layout.fillWidth: true
-                    visible: backend.updateStatusText.length > 0
-                    text: backend.updateStatusText
-                    font.pixelSize: theme.fontSize - 3
-                    color: theme.foreground
-                    wrapMode: Text.WordWrap
                 }
 
                 RowLayout {
                     Layout.fillWidth: true
                     Item { Layout.fillWidth: true }
                     Rectangle {
+                        id: closeCloudUpdateModalBtn
+                        objectName: "closeCloudUpdateModalBtn"
                         height: 32
                         implicitWidth: 84
                         radius: 7

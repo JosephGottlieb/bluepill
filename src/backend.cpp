@@ -18,6 +18,14 @@
 #include <QBuffer>
 #include <QImageReader>
 #include <QImageWriter>
+#include <QScopeGuard>
+#include <QTemporaryDir>
+#ifndef Q_OS_WIN
+#include <cerrno>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #ifdef BLUEPILL_HAS_MULTIMEDIA
 #include <QAudioDevice>
 #include <QAudioOutput>
@@ -2018,14 +2026,19 @@ void Backend::signOutCloud() {
     m_cloudSignInPending = false;
     emit cloudSignInStateChanged();
 
+    const bool wasApplying = m_clientUpdateApplying || m_serverUpdateApplying;
+    m_clientUpdateApplying = false;
+    m_serverUpdateApplying = false;
+    ++m_clientUpdateGen;
+    ++m_serverUpdatePollGen;
+    m_serverUpdatePollTimer.stop();
+
     if (wasCloudConfigured) {
         m_pollTimer.stop();
         m_reconnectTimer.stop();
         m_socketReconnectTimer.stop();
         m_contactsRefreshTimer.stop();
         m_cloudUpdateTimer.stop();
-        m_serverUpdatePollTimer.stop();
-        ++m_serverUpdatePollGen;
         stopSocketIoClient();
 
         const QString cfgPath = configFilePath();
@@ -2066,6 +2079,8 @@ void Backend::signOutCloud() {
         emit configChanged();
         emit updateStateChanged();
         emit statusChanged();
+    } else if (wasApplying) {
+        emit updateStateChanged();
     }
     emit toastMessage(QStringLiteral("Signed out of BluePill Cloud"));
 }
@@ -2363,9 +2378,14 @@ void Backend::checkForCloudUpdates(bool manual) {
             const QJsonObject assets = obj.value(QStringLiteral("assets")).toObject();
             if (!latest.isEmpty()) {
                 m_clientLatestVersion = latest;
-                m_clientUpdateUrl = relUrl.isEmpty()
-                                        ? QStringLiteral("https://github.com/nertwork/bluepill/releases/tag/v%1").arg(latest)
-                                        : relUrl;
+                const QString fallbackRelUrl = QStringLiteral("https://github.com/nertwork/bluepill/releases/tag/v%1").arg(latest);
+                if (!relUrl.isEmpty() && isTrustedUpdateUrl(QUrl(relUrl), m_allowLocalhostUpdatesForTest)) {
+                    m_clientUpdateUrl = relUrl;
+                } else {
+                    m_clientUpdateUrl = isTrustedUpdateUrl(QUrl(fallbackRelUrl), m_allowLocalhostUpdatesForTest)
+                                            ? fallbackRelUrl
+                                            : QStringLiteral("https://github.com/nertwork/bluepill/releases");
+                }
                 m_clientWinInstallerUrl = assets.value(QStringLiteral("windows")).toString().trimmed();
                 m_clientDebUrl = assets.value(QStringLiteral("deb")).toString().trimmed();
                 m_clientRpmUrl = assets.value(QStringLiteral("rpm")).toString().trimmed();
@@ -2404,7 +2424,7 @@ void Backend::checkForCloudUpdates(bool manual) {
                 m_serverUpdateAvailable = data.value(QStringLiteral("update_available")).toBool(false);
                 m_serverUpdateMethod = data.value(QStringLiteral("method")).toString(QStringLiteral("homebrew"));
                 if (!m_serverUpdatePollTimer.isActive()) {
-                    m_updateApplying = data.value(QStringLiteral("applying")).toBool(false);
+                    m_serverUpdateApplying = data.value(QStringLiteral("applying")).toBool(false);
                 }
             }
             if (anyUpdateAvailable()) {
@@ -2637,23 +2657,51 @@ QString Backend::clientUpdateMethod() const {
     return detectClientUpdateStrategy(currentClientUpdateEnv()).methodLabel;
 }
 
-void Backend::downloadVerifiedClientPackage(const QString &assetUrl,
-                                            const QString &checksumsUrl,
-                                            bool requireChecksum,
-                                            const QString &fallbackFileName,
-                                            std::function<void(const QString &localFilePath)> onReady) {
+bool Backend::isTrustedUpdateUrl(const QUrl &url, bool allowLocalhostForTest) {
+    if (!url.isValid()) {
+        return false;
+    }
+    const QString scheme = url.scheme().trimmed().toLower();
+    const QString host = url.host().trimmed().toLower();
+    if (host.isEmpty()) {
+        return false;
+    }
+    if (allowLocalhostForTest &&
+        (scheme == QStringLiteral("http") || scheme == QStringLiteral("https")) &&
+        (host == QStringLiteral("127.0.0.1") || host == QStringLiteral("localhost"))) {
+        return true;
+    }
+    if (scheme != QStringLiteral("https")) {
+        return false;
+    }
+    if (host == QStringLiteral("github.com") ||
+        host == QStringLiteral("objects.githubusercontent.com") ||
+        host == QStringLiteral("release-assets.githubusercontent.com") ||
+        host == QStringLiteral("bluepill.nertwork.com")) {
+        return true;
+    }
+    static const QString kSuffix = QStringLiteral(".bluepill.nertwork.com");
+    return host.endsWith(kSuffix) && host.size() > kSuffix.size();
+}
+
+void Backend::downloadVerifiedClientPackage(
+    const QString &assetUrl,
+    const QString &checksumsUrl,
+    bool requireChecksum,
+    const QString &fallbackFileName,
+    bool allowAptRead,
+    std::function<void(const QString &localFilePath, const std::shared_ptr<QTemporaryDir> &tempDir)> onReady) {
     const QUrl u(assetUrl);
-    if (!u.isValid() || (u.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0 &&
-                         u.host() != QStringLiteral("127.0.0.1") &&
-                         u.host() != QStringLiteral("localhost"))) {
-        m_updateApplying = false;
+    if (!isTrustedUpdateUrl(u, m_allowLocalhostUpdatesForTest)) {
+        m_clientUpdateApplying = false;
         m_updateStatusText = QStringLiteral("Invalid or untrusted update package URL.");
         emit updateStateChanged();
         return;
     }
 
     QString fileName = QFileInfo(u.path()).fileName().trimmed();
-    if (fileName.isEmpty() || fileName == QStringLiteral(".") || fileName == QStringLiteral("..")) {
+    if (fileName.isEmpty() || fileName == QStringLiteral(".") || fileName == QStringLiteral("..") ||
+        fileName.contains(QLatin1Char('/')) || fileName.contains(QLatin1Char('\\'))) {
         fileName = fallbackFileName;
     }
 
@@ -2664,87 +2712,187 @@ void Backend::downloadVerifiedClientPackage(const QString &assetUrl,
         chkUrl = QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v%1/SHA256SUMS.txt").arg(m_clientLatestVersion);
     }
 
-    auto startAssetDownload = [this, u, fileName, requireChecksum, onReady](const QHash<QString, QString> &sums) {
+    const quint64 updGen = ++m_clientUpdateGen;
+    const quint64 epGen = m_serverEndpointGeneration;
+    m_clientUpdateApplying = true;
+
+    auto failDownload = [this, updGen](const QString &msg) {
+        if (updGen == m_clientUpdateGen) {
+            m_clientUpdateApplying = false;
+            m_updateStatusText = msg;
+        }
+        emit updateStateChanged();
+    };
+
+    auto startAssetDownload = [this, u, fileName, requireChecksum, allowAptRead, updGen, epGen, failDownload, onReady](const QHash<QString, QString> &sums) {
+        if (updGen != m_clientUpdateGen || epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
+            m_clientUpdateApplying = false;
+            emit updateStateChanged();
+            return;
+        }
         m_updateStatusText = QStringLiteral("Downloading %1...").arg(fileName);
         emit updateStateChanged();
 
         QNetworkRequest req{u};
         req.setTransferTimeout(120000);
-        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        req.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::UserVerifiedRedirectPolicy);
         if (u.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0) {
             QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
             ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
             req.setSslConfiguration(ssl);
         }
         QNetworkReply *reply = m_nam.get(req);
-        connect(reply, &QNetworkReply::finished, this, [this, reply, fileName, sums, requireChecksum, onReady]() {
+        auto redirectRejected = std::make_shared<bool>(false);
+        connect(reply, &QNetworkReply::redirected, this, [this, reply, redirectRejected](const QUrl &target) {
+            const bool isDowngrade = (reply->url().scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0 &&
+                                      target.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0);
+            if (isDowngrade || !isTrustedUpdateUrl(target, m_allowLocalhostUpdatesForTest)) {
+                *redirectRejected = true;
+                reply->abort();
+                return;
+            }
+            emit reply->redirectAllowed();
+        });
+        connect(reply, &QNetworkReply::finished, this,
+                [this, reply, redirectRejected, fileName, sums, requireChecksum, allowAptRead, updGen, epGen, failDownload, onReady]() {
             reply->deleteLater();
-            if (reply->error() != QNetworkReply::NoError) {
-                m_updateApplying = false;
-                m_updateStatusText = QStringLiteral("Download failed: %1").arg(reply->errorString());
+            if (updGen != m_clientUpdateGen || epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
+                m_clientUpdateApplying = false;
                 emit updateStateChanged();
+                return;
+            }
+            if (*redirectRejected || !isTrustedUpdateUrl(reply->url(), m_allowLocalhostUpdatesForTest)) {
+                failDownload(QStringLiteral("Update download redirected to an untrusted host."));
+                return;
+            }
+            if (reply->error() != QNetworkReply::NoError) {
+                failDownload(QStringLiteral("Download failed: %1").arg(reply->errorString()));
                 return;
             }
             const QByteArray bytes = reply->readAll();
             if (bytes.size() < 1024) {
-                m_updateApplying = false;
-                m_updateStatusText = QStringLiteral("Downloaded package %1 was invalid.").arg(fileName);
-                emit updateStateChanged();
+                failDownload(QStringLiteral("Downloaded package %1 was invalid.").arg(fileName));
                 return;
             }
             const QString expectedHash = sums.value(fileName);
             if (expectedHash.isEmpty()) {
                 if (requireChecksum) {
-                    m_updateApplying = false;
-                    m_updateStatusText = QStringLiteral("SHA256 checksum missing for %1.").arg(fileName);
-                    emit updateStateChanged();
+                    failDownload(QStringLiteral("SHA256 checksum missing for %1.").arg(fileName));
                     return;
                 }
             } else {
                 const QString actualHash = QString::fromLatin1(
                     QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex()).toLower();
                 if (actualHash != expectedHash) {
-                    m_updateApplying = false;
-                    m_updateStatusText = QStringLiteral("SHA256 verification failed for %1.").arg(fileName);
-                    emit updateStateChanged();
+                    failDownload(QStringLiteral("SHA256 verification failed for %1.").arg(fileName));
                     return;
                 }
             }
 
-            const QString outPath = QDir::temp().filePath(fileName);
+            auto tempDir = std::make_shared<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/bluepill-upd-XXXXXX"));
+            if (!tempDir->isValid()) {
+                failDownload(QStringLiteral("Failed to create secure temporary directory for %1.").arg(fileName));
+                return;
+            }
+#ifndef Q_OS_WIN
+            ::chmod(QFile::encodeName(tempDir->path()).constData(), allowAptRead ? 0755 : 0700);
+#endif
+            const QString outPath = tempDir->filePath(fileName);
+            bool writeOk = false;
+#ifndef Q_OS_WIN
+            const QByteArray nativePath = QFile::encodeName(outPath);
+            const mode_t fileMode = allowAptRead ? 0644 : 0600;
+            const int fd = ::open(nativePath.constData(), O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, fileMode);
+            if (fd >= 0) {
+                const char *ptr = bytes.constData();
+                qsizetype remaining = bytes.size();
+                writeOk = true;
+                while (remaining > 0) {
+                    const ssize_t n = ::write(fd, ptr, static_cast<size_t>(remaining));
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        writeOk = false;
+                        break;
+                    }
+                    ptr += n;
+                    remaining -= n;
+                }
+                if (::close(fd) != 0) {
+                    writeOk = false;
+                }
+            }
+#else
             QFile f(outPath);
-            if (!f.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-                m_updateApplying = false;
-                m_updateStatusText = QStringLiteral("Failed to write %1 to temp directory.").arg(fileName);
-                emit updateStateChanged();
-                return;
-            }
-            if (f.write(bytes) != bytes.size()) {
+            if (f.open(QIODevice::WriteOnly | QIODevice::NewOnly)) {
+                writeOk = (f.write(bytes) == bytes.size()) && f.flush();
                 f.close();
-                QFile::remove(outPath);
-                m_updateApplying = false;
-                m_updateStatusText = QStringLiteral("Failed to write complete package %1.").arg(fileName);
+            }
+#endif
+            if (!writeOk) {
+                tempDir->remove();
+                failDownload(QStringLiteral("Failed to write %1 to private temp directory.").arg(fileName));
+                return;
+            }
+
+            // Re-read written bytes from disk (without following symlinks) and verify SHA256
+            QCryptographicHash diskHash(QCryptographicHash::Sha256);
+            bool readBackOk = false;
+            qint64 readTotal = 0;
+#ifndef Q_OS_WIN
+            const int rfd = ::open(nativePath.constData(), O_RDONLY | O_NOFOLLOW);
+            if (rfd >= 0) {
+                char buf[65536];
+                readBackOk = true;
+                for (;;) {
+                    const ssize_t n = ::read(rfd, buf, sizeof(buf));
+                    if (n < 0) {
+                        if (errno == EINTR) continue;
+                        readBackOk = false;
+                        break;
+                    }
+                    if (n == 0) break;
+                    diskHash.addData(QByteArrayView(buf, n));
+                    readTotal += n;
+                }
+                ::close(rfd);
+            }
+#else
+            QFile rf(outPath);
+            if (rf.open(QIODevice::ReadOnly)) {
+                readBackOk = diskHash.addData(&rf);
+                readTotal = rf.size();
+                rf.close();
+            }
+#endif
+            if (!readBackOk || readTotal != bytes.size()) {
+                tempDir->remove();
+                failDownload(QStringLiteral("Failed to verify written bytes for %1.").arg(fileName));
+                return;
+            }
+            if (!expectedHash.isEmpty()) {
+                const QString diskSha = QString::fromLatin1(diskHash.result().toHex()).toLower();
+                if (diskSha != expectedHash) {
+                    tempDir->remove();
+                    failDownload(QStringLiteral("On-disk SHA256 verification failed for %1.").arg(fileName));
+                    return;
+                }
+            }
+
+            if (updGen != m_clientUpdateGen || epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
+                tempDir->remove();
+                m_clientUpdateApplying = false;
                 emit updateStateChanged();
                 return;
             }
-            f.close();
-            QFile::setPermissions(outPath,
-                                  QFileDevice::ReadOwner | QFileDevice::WriteOwner |
-                                  QFileDevice::ReadGroup | QFileDevice::ReadOther);
-            onReady(outPath);
+            onReady(outPath, tempDir);
         });
     };
 
-    m_updateApplying = true;
     if (!chkUrl.isEmpty()) {
         const QUrl cu(chkUrl);
-        if (!cu.isValid() || (cu.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0 &&
-                              cu.host() != QStringLiteral("127.0.0.1") &&
-                              cu.host() != QStringLiteral("localhost"))) {
+        if (!isTrustedUpdateUrl(cu, m_allowLocalhostUpdatesForTest)) {
             if (requireChecksum) {
-                m_updateApplying = false;
-                m_updateStatusText = QStringLiteral("Invalid checksums URL.");
-                emit updateStateChanged();
+                failDownload(QStringLiteral("Invalid or untrusted checksums URL."));
                 return;
             }
             startAssetDownload({});
@@ -2754,20 +2902,43 @@ void Backend::downloadVerifiedClientPackage(const QString &assetUrl,
         emit updateStateChanged();
         QNetworkRequest chkReq{cu};
         chkReq.setTransferTimeout(15000);
-        chkReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::NoLessSafeRedirectPolicy);
+        chkReq.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::UserVerifiedRedirectPolicy);
         if (cu.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0) {
             QSslConfiguration ssl = QSslConfiguration::defaultConfiguration();
             ssl.setPeerVerifyMode(QSslSocket::VerifyPeer);
             chkReq.setSslConfiguration(ssl);
         }
         QNetworkReply *chkReply = m_nam.get(chkReq);
-        connect(chkReply, &QNetworkReply::finished, this, [this, chkReply, requireChecksum, startAssetDownload]() {
+        auto chkRedirectRejected = std::make_shared<bool>(false);
+        connect(chkReply, &QNetworkReply::redirected, this, [this, chkReply, chkRedirectRejected](const QUrl &target) {
+            const bool isDowngrade = (chkReply->url().scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) == 0 &&
+                                      target.scheme().compare(QStringLiteral("https"), Qt::CaseInsensitive) != 0);
+            if (isDowngrade || !isTrustedUpdateUrl(target, m_allowLocalhostUpdatesForTest)) {
+                *chkRedirectRejected = true;
+                chkReply->abort();
+                return;
+            }
+            emit chkReply->redirectAllowed();
+        });
+        connect(chkReply, &QNetworkReply::finished, this,
+                [this, chkReply, chkRedirectRejected, requireChecksum, updGen, epGen, failDownload, startAssetDownload]() {
             chkReply->deleteLater();
+            if (updGen != m_clientUpdateGen || epGen != m_serverEndpointGeneration || !cloudLoggedIn()) {
+                m_clientUpdateApplying = false;
+                emit updateStateChanged();
+                return;
+            }
+            if (*chkRedirectRejected || !isTrustedUpdateUrl(chkReply->url(), m_allowLocalhostUpdatesForTest)) {
+                if (requireChecksum) {
+                    failDownload(QStringLiteral("Checksums URL redirected to an untrusted host."));
+                    return;
+                }
+                startAssetDownload({});
+                return;
+            }
             if (chkReply->error() != QNetworkReply::NoError) {
                 if (requireChecksum) {
-                    m_updateApplying = false;
-                    m_updateStatusText = QStringLiteral("Failed to fetch SHA256SUMS.txt: %1").arg(chkReply->errorString());
-                    emit updateStateChanged();
+                    failDownload(QStringLiteral("Failed to fetch SHA256SUMS.txt: %1").arg(chkReply->errorString()));
                     return;
                 }
                 startAssetDownload({});
@@ -2777,9 +2948,7 @@ void Backend::downloadVerifiedClientPackage(const QString &assetUrl,
         });
     } else {
         if (requireChecksum) {
-            m_updateApplying = false;
-            m_updateStatusText = QStringLiteral("No checksums_url available to verify %1.").arg(fileName);
-            emit updateStateChanged();
+            failDownload(QStringLiteral("No checksums_url available to verify %1.").arg(fileName));
             return;
         }
         startAssetDownload({});
@@ -2787,39 +2956,50 @@ void Backend::downloadVerifiedClientPackage(const QString &assetUrl,
 }
 
 void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
-                                           const QString &cleanupFilePath,
+                                           const std::shared_ptr<QTemporaryDir> &tempDir,
                                            const QString &statusDesc) {
+    auto cleanupTempDirs = [tempDir](const std::shared_ptr<QTemporaryDir> &doneDir) {
+        if (doneDir) doneDir->remove();
+        if (tempDir) tempDir->remove();
+    };
+
     const QString termPath = findLinuxTerminalExecutable();
     if (termPath.isEmpty()) {
-        m_updateApplying = false;
-        copyToClipboard(shellCmd, QStringLiteral("upgrade command"));
-        m_updateStatusText = QStringLiteral("No supported terminal found; copied upgrade command to clipboard.");
+        cleanupTempDirs(nullptr);
+        m_clientUpdateApplying = false;
+        m_updateStatusText = QStringLiteral("No supported terminal found to run update.");
         emit updateStateChanged();
         return;
     }
 
-    const QString doneFile = QDir::temp().filePath(
-        QStringLiteral("bluepill-upd-%1.rc").arg(QUuid::createUuid().toString(QUuid::Id128)));
+    auto doneDir = std::make_shared<QTemporaryDir>(QDir::tempPath() + QStringLiteral("/bluepill-done-XXXXXX"));
+    if (!doneDir->isValid()) {
+        cleanupTempDirs(doneDir);
+        m_clientUpdateApplying = false;
+        m_updateStatusText = QStringLiteral("Failed to create temporary directory for terminal update.");
+        emit updateStateChanged();
+        return;
+    }
+#ifndef Q_OS_WIN
+    ::chmod(QFile::encodeName(doneDir->path()).constData(), 0700);
+#endif
+    const QString doneFile = doneDir->filePath(QStringLiteral("rc"));
     QString script = QStringLiteral("%1; rc=$?; printf '%d\\n' \"$rc\" > %2")
                          .arg(shellCmd, shellSingleQuote(doneFile));
-    if (!cleanupFilePath.isEmpty()) {
-        script += QStringLiteral("; [ \"$rc\" -eq 0 ] && rm -f %1").arg(shellSingleQuote(cleanupFilePath));
-    }
     script += QStringLiteral("; if [ \"$rc\" -ne 0 ]; then echo ''; printf 'Update failed (exit %s). Press Enter to close... ' \"$rc\"; read -r _; fi");
 
     const QString termName = QFileInfo(termPath).fileName();
     QStringList args;
     if (termName == QStringLiteral("xdg-terminal-exec") ||
         termName == QStringLiteral("kitty") ||
-        termName == QStringLiteral("foot")) {
-        args = {QStringLiteral("sh"), QStringLiteral("-c"), script};
-    } else if (termName == QStringLiteral("gnome-terminal")) {
+        termName == QStringLiteral("foot") ||
+        termName == QStringLiteral("gnome-terminal")) {
         args = {QStringLiteral("--"), QStringLiteral("sh"), QStringLiteral("-c"), script};
     } else {
         args = {QStringLiteral("-e"), QStringLiteral("sh"), QStringLiteral("-c"), script};
     }
 
-    m_updateApplying = true;
+    m_clientUpdateApplying = true;
     m_updateStatusText = statusDesc;
     emit updateStateChanged();
 
@@ -2830,28 +3010,45 @@ void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
     auto finishedHandled = std::make_shared<bool>(false);
     auto ticks = std::make_shared<int>(0);
 
-    auto finishWithCode = [this, pollTimer, termProc, doneFile, finishedHandled](int rc) {
+    // Never deleteLater() a running QProcess; clean it up only once it finishes or fails to start.
+    connect(termProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
+            termProc, &QObject::deleteLater);
+    connect(termProc, &QProcess::errorOccurred, termProc, [termProc](QProcess::ProcessError err) {
+        if (err == QProcess::FailedToStart) {
+            termProc->deleteLater();
+        }
+    });
+
+    auto finishWithCode = [this, pollTimer, termProc, doneDir, finishedHandled, cleanupTempDirs](int rc) {
         if (*finishedHandled) return;
         *finishedHandled = true;
         pollTimer->stop();
         pollTimer->deleteLater();
-        QFile::remove(doneFile);
-        termProc->deleteLater();
-        m_updateApplying = false;
+        cleanupTempDirs(doneDir);
+        m_clientUpdateApplying = false;
         if (rc == 0) {
             m_clientUpdateAvailable = false;
-            m_updateStatusText = QStringLiteral("BluePill v%1 installed. Restarting...").arg(m_clientLatestVersion);
-            emit updateStateChanged();
-            QProcess::startDetached(QCoreApplication::applicationFilePath(), {});
-            QTimer::singleShot(300, qApp, &QCoreApplication::quit);
+            if (QProcess::startDetached(QCoreApplication::applicationFilePath(), {})) {
+                m_updateStatusText = QStringLiteral("BluePill v%1 installed. Restarting...").arg(m_clientLatestVersion);
+                emit updateStateChanged();
+                QTimer::singleShot(300, qApp, &QCoreApplication::quit);
+            } else {
+                m_updateStatusText = QStringLiteral("BluePill v%1 installed. Please restart the app manually.").arg(m_clientLatestVersion);
+                emit updateStateChanged();
+            }
         } else {
+            // Detach parent so closing BluePill does not kill the terminal while user reads the error
+            if (termProc && termProc->state() != QProcess::NotRunning) {
+                termProc->setParent(nullptr);
+            }
             m_updateStatusText = QStringLiteral("Update command exited with code %1.").arg(rc);
             emit updateStateChanged();
         }
     };
 
     pollTimer->setInterval(500);
-    connect(pollTimer, &QTimer::timeout, this, [this, pollTimer, termProc, doneFile, finishedHandled, ticks, finishWithCode]() {
+    connect(pollTimer, &QTimer::timeout, this,
+            [this, pollTimer, doneDir, doneFile, finishedHandled, ticks, finishWithCode, cleanupTempDirs]() {
         if (*finishedHandled) return;
         QFile f(doneFile);
         if (f.exists() && f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -2865,27 +3062,28 @@ void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
             *finishedHandled = true;
             pollTimer->stop();
             pollTimer->deleteLater();
-            termProc->deleteLater();
-            m_updateApplying = false;
+            cleanupTempDirs(doneDir);
+            m_clientUpdateApplying = false;
             m_updateStatusText = QStringLiteral("Timed out waiting for terminal update.");
             emit updateStateChanged();
         }
     });
 
     connect(termProc, &QProcess::errorOccurred, this,
-            [this, pollTimer, termProc, termName, finishedHandled](QProcess::ProcessError err) {
+            [this, pollTimer, doneDir, termName, finishedHandled, cleanupTempDirs](QProcess::ProcessError err) {
         if (err != QProcess::FailedToStart || *finishedHandled) return;
         *finishedHandled = true;
         pollTimer->stop();
         pollTimer->deleteLater();
-        termProc->deleteLater();
-        m_updateApplying = false;
+        cleanupTempDirs(doneDir);
+        m_clientUpdateApplying = false;
         m_updateStatusText = QStringLiteral("Failed to launch terminal (%1).").arg(termName);
         emit updateStateChanged();
     });
 
     connect(termProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, pollTimer, termProc, doneFile, startClock, finishedHandled, finishWithCode](int, QProcess::ExitStatus) {
+            [this, pollTimer, doneDir, doneFile, startClock, finishedHandled, finishWithCode, cleanupTempDirs](
+                int exitCode, QProcess::ExitStatus exitStatus) {
         if (*finishedHandled) return;
         QFile f(doneFile);
         if (f.exists() && f.open(QIODevice::ReadOnly | QIODevice::Text)) {
@@ -2895,12 +3093,22 @@ void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
             finishWithCode(ok ? rc : 1);
             return;
         }
+        if (exitStatus != QProcess::NormalExit || exitCode != 0) {
+            *finishedHandled = true;
+            pollTimer->stop();
+            pollTimer->deleteLater();
+            cleanupTempDirs(doneDir);
+            m_clientUpdateApplying = false;
+            m_updateStatusText = QStringLiteral("Update terminal failed (exit %1).").arg(exitCode);
+            emit updateStateChanged();
+            return;
+        }
         if (startClock->elapsed() > 2000) {
             *finishedHandled = true;
             pollTimer->stop();
             pollTimer->deleteLater();
-            termProc->deleteLater();
-            m_updateApplying = false;
+            cleanupTempDirs(doneDir);
+            m_clientUpdateApplying = false;
             m_updateStatusText = QStringLiteral("Update terminal closed before completion.");
             emit updateStateChanged();
         }
@@ -2911,27 +3119,29 @@ void Backend::launchLinuxCommandInTerminal(const QString &shellCmd,
 }
 
 void Backend::installLinuxPackageWithPkexecOrTerminal(const QString &tmpPath,
+                                                      const std::shared_ptr<QTemporaryDir> &tempDir,
                                                       const QStringList &pkexecArgs,
                                                       const QString &sudoFallbackCmd) {
+    Q_UNUSED(tmpPath);
     const QString pkexecPath = QStandardPaths::findExecutable(QStringLiteral("pkexec"));
     if (pkexecPath.isEmpty()) {
-        launchLinuxCommandInTerminal(sudoFallbackCmd, tmpPath,
+        launchLinuxCommandInTerminal(sudoFallbackCmd, tempDir,
                                      QStringLiteral("Installing BluePill v%1 in terminal...").arg(m_clientLatestVersion));
         return;
     }
 
-    m_updateApplying = true;
+    m_clientUpdateApplying = true;
     m_updateStatusText = QStringLiteral("Authenticating to install BluePill v%1...").arg(m_clientLatestVersion);
     emit updateStateChanged();
 
     auto *pkProc = new QProcess(this);
     auto handled = std::make_shared<bool>(false);
 
-    auto fallbackToTerminal = [this, pkProc, tmpPath, sudoFallbackCmd, handled]() {
+    auto fallbackToTerminal = [this, pkProc, tempDir, sudoFallbackCmd, handled]() {
         if (*handled) return;
         *handled = true;
         pkProc->deleteLater();
-        launchLinuxCommandInTerminal(sudoFallbackCmd, tmpPath,
+        launchLinuxCommandInTerminal(sudoFallbackCmd, tempDir,
                                      QStringLiteral("Continuing BluePill v%1 install in terminal...").arg(m_clientLatestVersion));
     };
 
@@ -2942,20 +3152,49 @@ void Backend::installLinuxPackageWithPkexecOrTerminal(const QString &tmpPath,
     });
 
     connect(pkProc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this,
-            [this, pkProc, tmpPath, handled, fallbackToTerminal](int exitCode, QProcess::ExitStatus exitStatus) {
+            [this, pkProc, tempDir, handled, fallbackToTerminal](int exitCode, QProcess::ExitStatus exitStatus) {
         if (*handled) return;
         if (exitStatus == QProcess::NormalExit && exitCode == 0) {
             *handled = true;
             pkProc->deleteLater();
-            QFile::remove(tmpPath);
+            if (tempDir) tempDir->remove();
             m_clientUpdateAvailable = false;
-            m_updateApplying = false;
-            m_updateStatusText = QStringLiteral("BluePill v%1 installed. Restarting...").arg(m_clientLatestVersion);
-            emit updateStateChanged();
-            QProcess::startDetached(QCoreApplication::applicationFilePath(), {});
-            QTimer::singleShot(300, qApp, &QCoreApplication::quit);
-        } else {
+            m_clientUpdateApplying = false;
+            if (QProcess::startDetached(QCoreApplication::applicationFilePath(), {})) {
+                m_updateStatusText = QStringLiteral("BluePill v%1 installed. Restarting...").arg(m_clientLatestVersion);
+                emit updateStateChanged();
+                QTimer::singleShot(300, qApp, &QCoreApplication::quit);
+            } else {
+                m_updateStatusText = QStringLiteral("BluePill v%1 installed. Please restart the app manually.").arg(m_clientLatestVersion);
+                emit updateStateChanged();
+            }
+        } else if (exitStatus == QProcess::NormalExit && exitCode == 127) {
+            // No polkit authentication agent available (pkexec exit 127) -> fall back to terminal
             fallbackToTerminal();
+        } else if (exitStatus == QProcess::NormalExit && exitCode == 126) {
+            // User dismissed/cancelled authentication dialog
+            *handled = true;
+            pkProc->deleteLater();
+            if (tempDir) tempDir->remove();
+            m_clientUpdateApplying = false;
+            m_updateStatusText = QStringLiteral("Update authentication cancelled.");
+            emit updateStateChanged();
+        } else {
+            *handled = true;
+            const QString stderrText = QString::fromUtf8(pkProc->readAllStandardError()).trimmed();
+            pkProc->deleteLater();
+            if (tempDir) tempDir->remove();
+            m_clientUpdateApplying = false;
+            QString detail;
+            if (!stderrText.isEmpty()) {
+                const QStringList lines = stderrText.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+                detail = lines.isEmpty() ? QString() : lines.last().trimmed();
+                if (detail.size() > 160) detail = detail.left(157) + QStringLiteral("...");
+            }
+            m_updateStatusText = detail.isEmpty()
+                                     ? QStringLiteral("Update install failed (exit %1).").arg(exitCode)
+                                     : QStringLiteral("Update install failed (exit %1): %2").arg(exitCode).arg(detail);
+            emit updateStateChanged();
         }
     });
 
@@ -2963,7 +3202,7 @@ void Backend::installLinuxPackageWithPkexecOrTerminal(const QString &tmpPath,
 }
 
 void Backend::confirmClientUpdate() {
-    if (!cloudLoggedIn() || !m_clientUpdateAvailable) {
+    if (!cloudLoggedIn() || !m_clientUpdateAvailable || updateApplying()) {
         return;
     }
     const ClientUpdateStrategy strategy = detectClientUpdateStrategy(currentClientUpdateEnv());
@@ -2977,26 +3216,41 @@ void Backend::confirmClientUpdate() {
         downloadVerifiedClientPackage(
             winUrl,
             m_clientChecksumsUrl,
-            false,
+            true,
             QStringLiteral("BluePill-Setup-%1-win64.exe").arg(m_clientLatestVersion),
-            [this, silent](const QString &outPath) {
-                m_updateApplying = false;
+            false,
+            [this, silent](const QString &outPath, const std::shared_ptr<QTemporaryDir> &tempDir) {
+                m_clientUpdateApplying = false;
+                if (!cloudLoggedIn()) {
+                    if (tempDir) tempDir->remove();
+                    emit updateStateChanged();
+                    return;
+                }
+                bool launched = false;
                 if (silent) {
-                    QProcess::startDetached(outPath, {
+                    launched = QProcess::startDetached(outPath, {
                         QStringLiteral("/VERYSILENT"),
                         QStringLiteral("/SUPPRESSMSGBOXES"),
                         QStringLiteral("/NORESTART"),
                         QStringLiteral("/CLOSEAPPLICATIONS"),
-                        QStringLiteral("/RESTARTAPPLICATIONS"),
+                        QStringLiteral("/NORESTARTAPPLICATIONS"),
                     });
-                    m_updateStatusText = QStringLiteral("Installing BluePill v%1 silently and restarting...").arg(m_clientLatestVersion);
                 } else {
-                    QProcess::startDetached(outPath, {
+                    launched = QProcess::startDetached(outPath, {
                         QStringLiteral("/CLOSEAPPLICATIONS"),
                         QStringLiteral("/RESTARTAPPLICATIONS"),
                     });
-                    m_updateStatusText = QStringLiteral("Launched BluePill v%1 installer...").arg(m_clientLatestVersion);
                 }
+                if (!launched) {
+                    if (tempDir) tempDir->remove();
+                    m_updateStatusText = QStringLiteral("Failed to launch BluePill v%1 installer.").arg(m_clientLatestVersion);
+                    emit updateStateChanged();
+                    return;
+                }
+                if (tempDir) tempDir->setAutoRemove(false);
+                m_updateStatusText = silent
+                                         ? QStringLiteral("Installing BluePill v%1 silently and restarting...").arg(m_clientLatestVersion)
+                                         : QStringLiteral("Launched BluePill v%1 installer...").arg(m_clientLatestVersion);
                 emit updateStateChanged();
                 QTimer::singleShot(400, qApp, &QCoreApplication::quit);
             });
@@ -3009,9 +3263,17 @@ void Backend::confirmClientUpdate() {
             m_clientChecksumsUrl,
             true,
             QStringLiteral("bluepill-%1-1-x86_64.pkg.tar.zst").arg(m_clientLatestVersion),
-            [this](const QString &tmpPath) {
+            false,
+            [this](const QString &tmpPath, const std::shared_ptr<QTemporaryDir> &tempDir) {
+                if (!cloudLoggedIn()) {
+                    if (tempDir) tempDir->remove();
+                    m_clientUpdateApplying = false;
+                    emit updateStateChanged();
+                    return;
+                }
                 installLinuxPackageWithPkexecOrTerminal(
                     tmpPath,
+                    tempDir,
                     {QStringLiteral("pacman"), QStringLiteral("-U"), QStringLiteral("--noconfirm"), tmpPath},
                     QStringLiteral("sudo pacman -U --noconfirm %1").arg(shellSingleQuote(tmpPath)));
             });
@@ -3022,7 +3284,7 @@ void Backend::confirmClientUpdate() {
         const QString cmd = QStringLiteral("%1 -S --noconfirm %2").arg(strategy.aurHelper, strategy.aurPackage);
         launchLinuxCommandInTerminal(
             cmd,
-            QString(),
+            nullptr,
             QStringLiteral("Updating %1 via %2 in terminal...").arg(strategy.aurPackage, strategy.aurHelper));
         return;
     }
@@ -3033,9 +3295,17 @@ void Backend::confirmClientUpdate() {
             m_clientChecksumsUrl,
             true,
             QStringLiteral("bluepill_%1_amd64.deb").arg(m_clientLatestVersion),
-            [this](const QString &tmpPath) {
+            true,
+            [this](const QString &tmpPath, const std::shared_ptr<QTemporaryDir> &tempDir) {
+                if (!cloudLoggedIn()) {
+                    if (tempDir) tempDir->remove();
+                    m_clientUpdateApplying = false;
+                    emit updateStateChanged();
+                    return;
+                }
                 installLinuxPackageWithPkexecOrTerminal(
                     tmpPath,
+                    tempDir,
                     {QStringLiteral("apt-get"), QStringLiteral("install"), QStringLiteral("-y"), tmpPath},
                     QStringLiteral("sudo apt-get install -y %1").arg(shellSingleQuote(tmpPath)));
             });
@@ -3048,9 +3318,17 @@ void Backend::confirmClientUpdate() {
             m_clientChecksumsUrl,
             true,
             QStringLiteral("bluepill-%1-1.x86_64.rpm").arg(m_clientLatestVersion),
-            [this](const QString &tmpPath) {
+            false,
+            [this](const QString &tmpPath, const std::shared_ptr<QTemporaryDir> &tempDir) {
+                if (!cloudLoggedIn()) {
+                    if (tempDir) tempDir->remove();
+                    m_clientUpdateApplying = false;
+                    emit updateStateChanged();
+                    return;
+                }
                 installLinuxPackageWithPkexecOrTerminal(
                     tmpPath,
+                    tempDir,
                     {QStringLiteral("dnf"), QStringLiteral("install"), QStringLiteral("-y"), tmpPath},
                     QStringLiteral("sudo dnf install -y %1").arg(shellSingleQuote(tmpPath)));
             });
@@ -3064,13 +3342,23 @@ void Backend::confirmClientUpdate() {
 #ifdef Q_OS_MACOS
     cmd = QStringLiteral("brew upgrade --cask bluepill");
 #else
-    if (QFileInfo::exists(QStringLiteral("/etc/debian_version")) && !m_clientDebUrl.isEmpty()) {
-        cmd = QStringLiteral("curl -fsSL %1 -o /tmp/bluepill.deb && sudo apt install -y /tmp/bluepill.deb").arg(m_clientDebUrl);
-    } else if (QFileInfo::exists(QStringLiteral("/etc/fedora-release")) && !m_clientRpmUrl.isEmpty()) {
-        cmd = QStringLiteral("sudo dnf install -y %1").arg(m_clientRpmUrl);
+    if (QFileInfo::exists(QStringLiteral("/etc/debian_version")) &&
+        !m_clientDebUrl.isEmpty() &&
+        isTrustedUpdateUrl(QUrl(m_clientDebUrl), m_allowLocalhostUpdatesForTest)) {
+        cmd = QStringLiteral("curl -fsSL %1 -o /tmp/bluepill.deb && sudo apt install -y /tmp/bluepill.deb")
+                  .arg(shellSingleQuote(m_clientDebUrl));
+    } else if (QFileInfo::exists(QStringLiteral("/etc/fedora-release")) &&
+               !m_clientRpmUrl.isEmpty() &&
+               isTrustedUpdateUrl(QUrl(m_clientRpmUrl), m_allowLocalhostUpdatesForTest)) {
+        cmd = QStringLiteral("sudo dnf install -y %1").arg(shellSingleQuote(m_clientRpmUrl));
     }
 #endif
     copyToClipboard(cmd, QStringLiteral("upgrade command"));
+    if (!isTrustedUpdateUrl(QUrl(targetUrl), m_allowLocalhostUpdatesForTest)) {
+        m_updateStatusText = QStringLiteral("Untrusted update release URL.");
+        emit updateStateChanged();
+        return;
+    }
     if (!m_suppressDesktopBrowserOpen) {
         QDesktopServices::openUrl(QUrl(targetUrl));
     }
@@ -3079,7 +3367,7 @@ void Backend::confirmClientUpdate() {
 }
 
 bool Backend::confirmServerUpdate(bool confirmed) {
-    if (!confirmed || !cloudLoggedIn()) {
+    if (!confirmed || !cloudLoggedIn() || updateApplying()) {
         return false;
     }
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/server/update/apply"));
@@ -3092,7 +3380,7 @@ bool Backend::confirmServerUpdate(bool confirmed) {
     m_serverUpdatePollAttempts = 0;
     m_serverUpdateTargetVersion = m_serverLatestVersion;
 
-    m_updateApplying = true;
+    m_serverUpdateApplying = true;
     m_updateStatusText = QStringLiteral("Updating Mac server via %1...").arg(m_serverUpdateMethod);
     emit updateStateChanged();
 
@@ -3106,7 +3394,7 @@ bool Backend::confirmServerUpdate(bool confirmed) {
         const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
         if (reply->error() != QNetworkReply::NoError) {
             const QString msg = root.value(QStringLiteral("message")).toString().trimmed();
-            m_updateApplying = false;
+            m_serverUpdateApplying = false;
             m_updateStatusText = QStringLiteral("Mac server update request failed: %1")
                                      .arg(msg.isEmpty() ? reply->errorString() : msg);
             emit updateStateChanged();
@@ -3117,7 +3405,7 @@ bool Backend::confirmServerUpdate(bool confirmed) {
         if (!targetFromSrv.isEmpty()) {
             m_serverUpdateTargetVersion = targetFromSrv;
         }
-        m_updateApplying = true;
+        m_serverUpdateApplying = true;
         m_updateStatusText = QStringLiteral("Mac server update in progress (%1)...").arg(m_serverUpdateMethod);
         emit updateStateChanged();
         m_serverUpdatePollTimer.start(m_serverUpdatePollIntervalMs);
@@ -3126,11 +3414,11 @@ bool Backend::confirmServerUpdate(bool confirmed) {
 }
 
 void Backend::pollServerUpdateStatus() {
-    if (!cloudLoggedIn() || !m_updateApplying) {
+    if (!cloudLoggedIn() || !m_serverUpdateApplying) {
         return;
     }
     if (m_serverUpdatePollAttempts >= 48) {
-        m_updateApplying = false;
+        m_serverUpdateApplying = false;
         m_updateStatusText = QStringLiteral("Mac server update timed out waiting for completion.");
         emit updateStateChanged();
         return;
@@ -3140,7 +3428,7 @@ void Backend::pollServerUpdateStatus() {
     const quint64 epGen = m_serverEndpointGeneration;
     QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/server/update/status"));
     if (!req.url().isValid()) {
-        m_updateApplying = false;
+        m_serverUpdateApplying = false;
         emit updateStateChanged();
         return;
     }
@@ -3156,7 +3444,7 @@ void Backend::pollServerUpdateStatus() {
                 emit updateStateChanged();
                 m_serverUpdatePollTimer.start(m_serverUpdatePollIntervalMs);
             } else {
-                m_updateApplying = false;
+                m_serverUpdateApplying = false;
                 m_updateStatusText = QStringLiteral("Mac server update timed out: %1").arg(reply->errorString());
                 emit updateStateChanged();
             }
@@ -3180,7 +3468,7 @@ void Backend::pollServerUpdateStatus() {
 
         if (reachedTarget) {
             m_serverUpdateAvailable = false;
-            m_updateApplying = false;
+            m_serverUpdateApplying = false;
             m_updateStatusText = QStringLiteral("Mac server updated to v%1.").arg(curVer);
             emit updateStateChanged();
             emit toastMessage(QStringLiteral("✓ Mac server updated to v%1").arg(curVer));
@@ -3188,7 +3476,7 @@ void Backend::pollServerUpdateStatus() {
         }
 
         if (!applying && !lastError.isEmpty()) {
-            m_updateApplying = false;
+            m_serverUpdateApplying = false;
             m_serverUpdateAvailable = true;
             m_updateStatusText = QStringLiteral("Mac server update failed: %1").arg(lastError);
             emit updateStateChanged();
@@ -3200,7 +3488,7 @@ void Backend::pollServerUpdateStatus() {
             emit updateStateChanged();
             m_serverUpdatePollTimer.start(m_serverUpdatePollIntervalMs);
         } else {
-            m_updateApplying = false;
+            m_serverUpdateApplying = false;
             m_updateStatusText = QStringLiteral("Mac server update timed out waiting for completion.");
             emit updateStateChanged();
         }
@@ -6536,6 +6824,15 @@ void Backend::bumpServerEndpointGeneration() {
     ++m_serverEndpointGeneration;
     m_supportsBatchMessageGuidInQuery = true;
     m_inFlightDeliveryCheckGuids.clear();
+    m_serverUpdatePollTimer.stop();
+    ++m_serverUpdatePollGen;
+    ++m_clientUpdateGen;
+    const bool wasApplying = m_clientUpdateApplying || m_serverUpdateApplying;
+    m_clientUpdateApplying = false;
+    m_serverUpdateApplying = false;
+    if (wasApplying) {
+        emit updateStateChanged();
+    }
 }
 
 static bool isTapbackOrAssociatedMessage(const QJsonObject &m) {

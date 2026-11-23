@@ -2,6 +2,17 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.12] - 2026-11-23
+
+### Security & Hardening
+- **Updater Origin Allowlist, Redirect Verification & Mandatory Checksums (`src/backend.{h,cpp}`, `server/bluepill_server.py`):** Enforced HTTPS host allowlists (`github.com`, `objects.githubusercontent.com`, `release-assets.githubusercontent.com`, `bluepill.nertwork.com`, `*.bluepill.nertwork.com`) and redirect validation (`UserVerifiedRedirectPolicy` in Qt6, `_SafeRedirectHandler` + post-redirect check in Python), required `SHA256SUMS.txt` verification on Windows as well as Linux, validated version strings (`^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$`), bounded feed/checksum/bottle/script downloads, and quoted clipboard upgrade URLs with `shellSingleQuote`.
+- **Private Per-Update Temp Directories & Non-Symlink File Creation (`src/backend.cpp`, `server/bluepill_server.py`):** Replaced predictable `/tmp` update paths with per-update `QTemporaryDir` (`0755` for `deb-apt`, `0700` otherwise) + `O_CREAT|O_EXCL|O_NOFOLLOW` writes and on-disk SHA256 re-verification; used `tempfile.NamedTemporaryFile` with exception cleanup on the server updater and atomic `0700` `.m4a`/`.wav` CAF transcoding cache writes.
+
+### Fixed
+- **Linux Terminal & `pkexec` Update Reliability (`src/backend.cpp`):** Added `--` before `sh -c` for `xdg-terminal-exec`, `kitty`, `foot`, and `gnome-terminal`; fixed `QProcess` lifetime so running terminals are never killed while displaying errors; handled `pkexec` exit `126` (cancelled) vs `127` (no agent fallback) vs real install stderr.
+- **Windows Silent Relaunch & Update State Races (`installer/bluepill.iss`, `src/backend.{h,cpp}`):** Checked `QProcess::startDetached` return before quitting, avoided silent double-launches (`/NORESTARTAPPLICATIONS` + dropped `postinstall` on `WizardSilent`), split `m_clientUpdateApplying`/`m_serverUpdateApplying` with re-entry guards, and reset state on sign-out/endpoint changes.
+- **Chat Query & Web UI Edge Cases (`server/bluepill_server.py`, `src/Main.qml`):** Chunked `query_chats()` `chat_ids` (`<=500`), handled `NULL` dates (`COALESCE`), excluded system/deleted messages in SQL, handled `audio/x-caf` MIME transcoding, guarded missing attachment GUIDs, added `rel="noopener noreferrer"`, cleared empty `localStorage` relay keys, and clamped `cloudUpdateModalCard` dimensions for short windows.
+
 ## [1.2.10] - 2026-11-22
 
 ### Added

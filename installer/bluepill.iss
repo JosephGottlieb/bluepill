@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.2.11"
+  #define AppVersion "1.2.12"
 #endif
 
 #ifndef DistDir
@@ -53,7 +53,7 @@ Name: "{autodesktop}\BluePill"; Filename: "{app}\bluepill.exe"; Tasks: desktopic
 
 [Run]
 Filename: "{app}\bluepill.exe"; Description: "{cm:LaunchProgram,BluePill}"; Flags: nowait postinstall skipifsilent
-Filename: "{app}\bluepill.exe"; Parameters: ""; Flags: nowait postinstall runasoriginaluser; Check: WizardSilent
+Filename: "{app}\bluepill.exe"; Parameters: ""; Flags: nowait runasoriginaluser; Check: WizardSilent
 
 [Code]
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);

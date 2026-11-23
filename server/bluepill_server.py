@@ -57,7 +57,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.11"
+VERSION = "1.2.12"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
@@ -2661,28 +2661,30 @@ class BluePillEngine:
             participants_by_chat: Dict[int, List[Dict[str, Any]]] = {}
 
             if (with_participants or any((str(r["guid"] or "").startswith(("RCS;+;", "SMS;+;"))) for r in rows)) and chat_ids:
-                placeholders = ",".join("?" for _ in chat_ids)
-                p_rows = conn.execute(
-                    f"""
-                    SELECT chj.chat_id, h.ROWID AS handle_rowid, h.id AS address,
-                           h.service AS service, h.country AS country
-                    FROM chat_handle_join chj
-                    JOIN handle h ON h.ROWID = chj.handle_id
-                    WHERE chj.chat_id IN ({placeholders})
-                    ORDER BY chj.chat_id, h.ROWID
-                    """,
-                    chat_ids,
-                ).fetchall()
-                for pr in p_rows:
-                    cid = int(pr["chat_id"])
-                    participants_by_chat.setdefault(cid, []).append(
-                        {
-                            "originalROWID": int(pr["handle_rowid"]),
-                            "address": pr["address"] or "",
-                            "service": pr["service"] or "iMessage",
-                            "country": pr["country"] or "us",
-                        }
-                    )
+                for batch_start in range(0, len(chat_ids), 500):
+                    batch_ids = chat_ids[batch_start : batch_start + 500]
+                    placeholders = ",".join("?" for _ in batch_ids)
+                    p_rows = conn.execute(
+                        f"""
+                        SELECT chj.chat_id, h.ROWID AS handle_rowid, h.id AS address,
+                               h.service AS service, h.country AS country
+                        FROM chat_handle_join chj
+                        JOIN handle h ON h.ROWID = chj.handle_id
+                        WHERE chj.chat_id IN ({placeholders})
+                        ORDER BY chj.chat_id, h.ROWID
+                        """,
+                        batch_ids,
+                    ).fetchall()
+                    for pr in p_rows:
+                        cid = int(pr["chat_id"])
+                        participants_by_chat.setdefault(cid, []).append(
+                            {
+                                "originalROWID": int(pr["handle_rowid"]),
+                                "address": pr["address"] or "",
+                                "service": pr["service"] or "iMessage",
+                                "country": pr["country"] or "us",
+                            }
+                        )
 
             pinned_guids = {p["guid"] for p in self.query_pinned_chats()}
 
@@ -2691,7 +2693,6 @@ class BluePillEngine:
                 try:
                     msg_cols = _sqlite_columns(conn, "message")
                     if {"ROWID", "guid", "date"}.issubset(msg_cols):
-                        placeholders = ",".join("?" for _ in chat_ids)
                         assoc_filter_m2 = (
                             "AND COALESCE(m2.associated_message_type, 0) < 2000"
                             if "associated_message_type" in msg_cols
@@ -2702,6 +2703,39 @@ class BluePillEngine:
                             if "associated_message_type" in msg_cols
                             else ""
                         )
+                        item_filter_m2 = (
+                            "AND COALESCE(m2.item_type, 0) = 0"
+                            if "item_type" in msg_cols
+                            else ""
+                        )
+                        item_filter_m3 = (
+                            "AND COALESCE(m3.item_type, 0) = 0"
+                            if "item_type" in msg_cols
+                            else ""
+                        )
+                        del_guids = sorted({g for g in self.deleted_message_guids if g})
+                        del_filter_m2 = ""
+                        del_filter_m3 = ""
+                        del_params: List[str] = []
+                        if del_guids:
+                            if len(del_guids) <= 200:
+                                del_ph = ",".join("?" for _ in del_guids)
+                                del_filter_m2 = f"AND COALESCE(m2.guid, '') NOT IN ({del_ph})"
+                                del_filter_m3 = f"AND COALESCE(m3.guid, '') NOT IN ({del_ph})"
+                                del_params = del_guids
+                            else:
+                                try:
+                                    conn.execute("CREATE TEMP TABLE IF NOT EXISTS _bp_del_guids (guid TEXT PRIMARY KEY)")
+                                    conn.execute("DELETE FROM _bp_del_guids")
+                                    conn.executemany(
+                                        "INSERT OR IGNORE INTO _bp_del_guids (guid) VALUES (?)",
+                                        [(g,) for g in del_guids],
+                                    )
+                                    del_filter_m2 = "AND COALESCE(m2.guid, '') NOT IN (SELECT guid FROM _bp_del_guids)"
+                                    del_filter_m3 = "AND COALESCE(m3.guid, '') NOT IN (SELECT guid FROM _bp_del_guids)"
+                                except sqlite3.Error:
+                                    del_filter_m2 = ""
+                                    del_filter_m3 = ""
                         text_expr = "m.text" if "text" in msg_cols else "'' AS text"
                         attr_expr = "m.attributedBody" if "attributedBody" in msg_cols else "NULL AS attributedBody"
                         from_me_expr = "m.is_from_me" if "is_from_me" in msg_cols else "0 AS is_from_me"
@@ -2710,50 +2744,54 @@ class BluePillEngine:
                             if "cache_has_attachments" in msg_cols
                             else "0 AS cache_has_attachments"
                         )
-                        lm_rows = conn.execute(
-                            f"""
-                            SELECT pick.chat_id, m.ROWID AS msg_rowid, m.guid, {text_expr}, {attr_expr},
-                                   m.date, {from_me_expr}, {att_expr}
-                            FROM (
-                                SELECT cmj2.chat_id, MAX(cmj2.message_id) AS max_mid
-                                FROM chat_message_join cmj2
-                                JOIN message m2 ON m2.ROWID = cmj2.message_id
-                                JOIN (
-                                    SELECT cmj3.chat_id, MAX(cmj3.message_date) AS max_dt
-                                    FROM chat_message_join cmj3
-                                    JOIN message m3 ON m3.ROWID = cmj3.message_id
-                                    WHERE cmj3.chat_id IN ({placeholders}) {assoc_filter_m3}
-                                    GROUP BY cmj3.chat_id
-                                ) latest ON latest.chat_id = cmj2.chat_id AND latest.max_dt = cmj2.message_date
-                                WHERE 1=1 {assoc_filter_m2}
-                                GROUP BY cmj2.chat_id
-                            ) pick
-                            JOIN message m ON m.ROWID = pick.max_mid
-                            """,
-                            chat_ids,
-                        ).fetchall()
-                        for lmr in lm_rows:
-                            cid_lm = int(lmr["chat_id"])
-                            m_guid = lmr["guid"] or ""
-                            norm_mg = m_guid.split("/", 1)[-1] if "/" in m_guid else m_guid
-                            if m_guid in self.deleted_message_guids or norm_mg in self.deleted_message_guids:
-                                continue
-                            raw_txt = lmr["text"]
-                            attr_b = lmr["attributedBody"]
-                            dec_attr = decode_attributed_body(attr_b) if attr_b else ""
-                            txt = (raw_txt if (raw_txt is not None and str(raw_txt).strip() != "") else dec_attr) or ""
-                            txt = txt.replace("\ufffc", "").strip()
-                            has_att = bool(lmr["cache_has_attachments"])
-                            if not txt and has_att:
-                                txt = "Attachment"
-                            last_message_by_chat[cid_lm] = {
-                                "originalROWID": int(lmr["msg_rowid"]),
-                                "guid": m_guid,
-                                "text": txt,
-                                "dateCreated": apple_ts_to_epoch_ms(lmr["date"]),
-                                "isFromMe": bool(lmr["is_from_me"]),
-                                "hasAttachments": has_att,
-                            }
+                        for batch_start in range(0, len(chat_ids), 500):
+                            batch_ids = chat_ids[batch_start : batch_start + 500]
+                            placeholders = ",".join("?" for _ in batch_ids)
+                            q_params: List[Any] = list(batch_ids) + del_params + del_params
+                            lm_rows = conn.execute(
+                                f"""
+                                SELECT pick.chat_id, m.ROWID AS msg_rowid, m.guid, {text_expr}, {attr_expr},
+                                       m.date, {from_me_expr}, {att_expr}
+                                FROM (
+                                    SELECT cmj2.chat_id, MAX(cmj2.message_id) AS max_mid
+                                    FROM chat_message_join cmj2
+                                    JOIN message m2 ON m2.ROWID = cmj2.message_id
+                                    JOIN (
+                                        SELECT cmj3.chat_id, MAX(COALESCE(cmj3.message_date, m3.date, 0)) AS max_dt
+                                        FROM chat_message_join cmj3
+                                        JOIN message m3 ON m3.ROWID = cmj3.message_id
+                                        WHERE cmj3.chat_id IN ({placeholders}) {assoc_filter_m3} {item_filter_m3} {del_filter_m3}
+                                        GROUP BY cmj3.chat_id
+                                    ) latest ON latest.chat_id = cmj2.chat_id AND latest.max_dt = COALESCE(cmj2.message_date, m2.date, 0)
+                                    WHERE 1=1 {assoc_filter_m2} {item_filter_m2} {del_filter_m2}
+                                    GROUP BY cmj2.chat_id
+                                ) pick
+                                JOIN message m ON m.ROWID = pick.max_mid
+                                """,
+                                q_params,
+                            ).fetchall()
+                            for lmr in lm_rows:
+                                cid_lm = int(lmr["chat_id"])
+                                m_guid = lmr["guid"] or ""
+                                norm_mg = m_guid.split("/", 1)[-1] if "/" in m_guid else m_guid
+                                if m_guid in self.deleted_message_guids or norm_mg in self.deleted_message_guids:
+                                    continue
+                                raw_txt = lmr["text"]
+                                attr_b = lmr["attributedBody"]
+                                dec_attr = decode_attributed_body(attr_b) if attr_b else ""
+                                txt = (raw_txt if (raw_txt is not None and str(raw_txt).strip() != "") else dec_attr) or ""
+                                txt = txt.replace("\ufffc", "").strip()
+                                has_att = bool(lmr["cache_has_attachments"])
+                                if not txt and has_att:
+                                    txt = "Attachment"
+                                last_message_by_chat[cid_lm] = {
+                                    "originalROWID": int(lmr["msg_rowid"]),
+                                    "guid": m_guid,
+                                    "text": txt,
+                                    "dateCreated": apple_ts_to_epoch_ms(lmr["date"]),
+                                    "isFromMe": bool(lmr["is_from_me"]),
+                                    "hasAttachments": has_att,
+                                }
                 except sqlite3.Error:
                     pass
 
@@ -3384,33 +3422,72 @@ class BluePillEngine:
 
     def _transcode_caf_if_needed(self, real_path: str) -> Optional[Tuple[str, str]]:
         cache_dir = os.path.expanduser("~/.cache/bluepill/attachments")
-        os.makedirs(cache_dir, exist_ok=True)
+        os.makedirs(cache_dir, mode=0o700, exist_ok=True)
+        os.chmod(cache_dir, 0o700)
         digest = hashlib.sha256(real_path.encode("utf-8")).hexdigest()[:24]
         if sys.platform == "darwin" and os.path.exists("/usr/bin/afconvert"):
             cached_m4a = os.path.join(cache_dir, f"{digest}.m4a")
             if not os.path.exists(cached_m4a):
-                subprocess.run(
-                    ["/usr/bin/afconvert", "-f", "m4af", "-d", "aac", real_path, cached_m4a],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=10.0,
-                    check=False,
-                )
+                tmp_m4a = ""
+                try:
+                    with tempfile.NamedTemporaryFile(
+                        dir=cache_dir,
+                        prefix=f".{digest}.",
+                        suffix=".m4a",
+                        delete=False,
+                    ) as tf:
+                        tmp_m4a = tf.name
+                    res = subprocess.run(
+                        ["/usr/bin/afconvert", "-f", "m4af", "-d", "aac", real_path, tmp_m4a],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=10.0,
+                        check=False,
+                    )
+                    if res.returncode == 0 and os.path.exists(tmp_m4a) and os.path.getsize(tmp_m4a) > 0:
+                        os.chmod(tmp_m4a, 0o600)
+                        os.replace(tmp_m4a, cached_m4a)
+                        tmp_m4a = ""
+                finally:
+                    if tmp_m4a and os.path.exists(tmp_m4a):
+                        try:
+                            os.unlink(tmp_m4a)
+                        except OSError:
+                            pass
             if os.path.exists(cached_m4a) and os.path.getsize(cached_m4a) > 0:
                 return cached_m4a, "audio/mp4"
         cached_wav = os.path.join(cache_dir, f"{digest}.wav")
         if not os.path.exists(cached_wav):
+            tmp_wav = ""
             try:
-                subprocess.run(
-                    ["ffmpeg", "-y", "-v", "error", "-i", real_path, "-ac", "1", "-ar", "22050", cached_wav],
+                with tempfile.NamedTemporaryFile(
+                    dir=cache_dir,
+                    prefix=f".{digest}.",
+                    suffix=".wav",
+                    delete=False,
+                ) as tf:
+                    tmp_wav = tf.name
+                res = subprocess.run(
+                    ["ffmpeg", "-y", "-v", "error", "-i", real_path, "-ac", "1", "-ar", "22050", tmp_wav],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     timeout=10.0,
                     check=False,
                 )
+                if res.returncode == 0 and os.path.exists(tmp_wav) and os.path.getsize(tmp_wav) > 0:
+                    os.chmod(tmp_wav, 0o600)
+                    os.replace(tmp_wav, cached_wav)
+                    tmp_wav = ""
             except Exception:
                 pass
+            finally:
+                if tmp_wav and os.path.exists(tmp_wav):
+                    try:
+                        os.unlink(tmp_wav)
+                    except OSError:
+                        pass
         if not os.path.exists(cached_wav) or os.path.getsize(cached_wav) == 0:
+            tmp_wav = ""
             try:
                 bars, dur = compute_audio_waveform(real_path, seed_key=real_path)
                 rate = 16000
@@ -3420,13 +3497,29 @@ class BluePillEngine:
                     bar_idx = min(len(bars) - 1, int((idx / float(total_samples)) * len(bars)))
                     amp = int(bars[bar_idx] * 12000 * math.sin(2.0 * math.pi * 320.0 * (idx / float(rate))))
                     pcm[idx * 2 : idx * 2 + 2] = int(amp).to_bytes(2, "little", signed=True)
-                with wave.open(cached_wav, "wb") as wf:
+                with tempfile.NamedTemporaryFile(
+                    dir=cache_dir,
+                    prefix=f".{digest}.",
+                    suffix=".wav",
+                    delete=False,
+                ) as tf:
+                    tmp_wav = tf.name
+                with wave.open(tmp_wav, "wb") as wf:
                     wf.setnchannels(1)
                     wf.setsampwidth(2)
                     wf.setframerate(rate)
                     wf.writeframes(bytes(pcm))
+                os.chmod(tmp_wav, 0o600)
+                os.replace(tmp_wav, cached_wav)
+                tmp_wav = ""
             except Exception:
                 return None
+            finally:
+                if tmp_wav and os.path.exists(tmp_wav):
+                    try:
+                        os.unlink(tmp_wav)
+                    except OSError:
+                        pass
         if os.path.exists(cached_wav) and os.path.getsize(cached_wav) > 0:
             return cached_wav, "audio/wav"
         return None
@@ -3473,7 +3566,7 @@ class BluePillEngine:
                 )
             if os.path.exists(cached_jpg) and os.path.getsize(cached_jpg) >= 64:
                 return cached_jpg, "image/jpeg"
-        if transcode_audio and lower_ext == ".caf":
+        if transcode_audio and (lower_ext == ".caf" or lower_mime == "audio/x-caf"):
             tc = self._transcode_caf_if_needed(real_path)
             if tc:
                 return tc
@@ -8089,6 +8182,61 @@ class BluePillEngine:
             "checked_at": str(snap.get("checked_at") or ""),
         }
 
+    _TRUSTED_UPDATE_HOSTS = frozenset({
+        "github.com",
+        "objects.githubusercontent.com",
+        "release-assets.githubusercontent.com",
+        "bluepill.nertwork.com",
+    })
+    _SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$")
+
+    @classmethod
+    def _validate_update_url(cls, url: str) -> str:
+        parsed = urllib.parse.urlparse(str(url or "").strip())
+        scheme = (parsed.scheme or "").strip().lower()
+        host = (parsed.hostname or "").strip().lower()
+        if scheme != "https" or not host:
+            raise ValueError(f"Untrusted update URL: {url!r}")
+        if host in cls._TRUSTED_UPDATE_HOSTS or (
+            host.endswith(".bluepill.nertwork.com") and len(host) > len(".bluepill.nertwork.com")
+        ):
+            return parsed.geturl()
+        raise ValueError(f"Untrusted update host: {host!r}")
+
+    @classmethod
+    def _validate_update_version(cls, version: str) -> str:
+        ver = str(version or "").strip().lstrip("vV")
+        if not cls._SEMVER_RE.fullmatch(ver):
+            raise ValueError(f"Invalid update version: {version!r}")
+        return ver
+
+    @staticmethod
+    def _read_bounded(stream: Any, max_bytes: int, label: str) -> bytes:
+        data = stream.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            raise RuntimeError(f"{label} exceeded maximum allowed size ({max_bytes} bytes)")
+        return data
+
+    @classmethod
+    def _open_trusted_update_url(cls, url: str, timeout: float = 15.0) -> Any:
+        safe_url = cls._validate_update_url(url)
+
+        class _SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+                abs_url = urllib.parse.urljoin(req.full_url, newurl)
+                cls._validate_update_url(abs_url)
+                return super().redirect_request(req, fp, code, msg, headers, abs_url)
+
+        opener = urllib.request.build_opener(_SafeRedirectHandler)
+        req = urllib.request.Request(safe_url, headers={"User-Agent": f"bluepill-server/{VERSION}", "Accept": "*/*"})
+        resp = opener.open(req, timeout=timeout)
+        try:
+            cls._validate_update_url(resp.geturl())
+        except Exception:
+            resp.close()
+            raise
+        return resp
+
     def check_for_updates(self) -> Dict[str, Any]:
         if not self._is_cloud_relay_logged_in():
             raise PermissionError("Cloud Managed Updates require BluePill Cloud login")
@@ -8098,10 +8246,14 @@ class BluePillEngine:
             method="GET",
         )
         with urllib.request.urlopen(req, timeout=8.0) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-        latest = str(payload.get("version") or VERSION).strip().lstrip("vV")
-        rel_url = str(payload.get("release_url") or f"https://github.com/nertwork/bluepill/releases/tag/v{latest}").strip()
-        chk_url = str(payload.get("checksums_url") or f"https://github.com/nertwork/bluepill/releases/download/v{latest}/SHA256SUMS.txt").strip()
+            payload = json.loads(self._read_bounded(resp, 1024 * 1024, "updates feed").decode("utf-8"))
+        latest = self._validate_update_version(str(payload.get("version") or VERSION))
+        rel_url = self._validate_update_url(
+            str(payload.get("release_url") or f"https://github.com/nertwork/bluepill/releases/tag/v{latest}").strip()
+        )
+        chk_url = self._validate_update_url(
+            str(payload.get("checksums_url") or f"https://github.com/nertwork/bluepill/releases/download/v{latest}/SHA256SUMS.txt").strip()
+        )
         avail = self._parse_semver(latest) > self._parse_semver(VERSION)
         method = self._detect_update_method()
         checked_at = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -8176,14 +8328,16 @@ class BluePillEngine:
         )
 
     def _apply_standalone_bottle_update(self, target_version: str, checksums_url: str) -> None:
-        ver = str(target_version or VERSION).lstrip("vV")
-        chk_url = checksums_url or f"https://github.com/nertwork/bluepill/releases/download/v{ver}/SHA256SUMS.txt"
+        ver = self._validate_update_version(target_version or VERSION)
+        chk_url = self._validate_update_url(
+            checksums_url or f"https://github.com/nertwork/bluepill/releases/download/v{ver}/SHA256SUMS.txt"
+        )
         bottle_candidates = [
             f"bluepill-{ver}.all.bottle.tar.gz",
             f"bluepill--{ver}.all.bottle.tar.gz",
         ]
-        with urllib.request.urlopen(urllib.request.Request(chk_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=15.0) as r:
-            sums_txt = r.read().decode("utf-8", errors="replace")
+        with self._open_trusted_update_url(chk_url, timeout=15.0) as r:
+            sums_txt = self._read_bounded(r, 256 * 1024, "SHA256SUMS.txt").decode("utf-8", errors="replace")
         expected_sha = ""
         bottle_name = bottle_candidates[0]
         for line in sums_txt.splitlines():
@@ -8194,9 +8348,11 @@ class BluePillEngine:
                 break
         if not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
             raise RuntimeError(f"Checksum for {bottle_candidates[0]} missing from SHA256SUMS.txt")
-        bottle_url = f"https://github.com/nertwork/bluepill/releases/download/v{ver}/{bottle_name}"
-        with urllib.request.urlopen(urllib.request.Request(bottle_url, headers={"User-Agent": f"bluepill-server/{VERSION}"}), timeout=60.0) as r:
-            bottle_bytes = r.read()
+        bottle_url = self._validate_update_url(
+            f"https://github.com/nertwork/bluepill/releases/download/v{ver}/{bottle_name}"
+        )
+        with self._open_trusted_update_url(bottle_url, timeout=60.0) as r:
+            bottle_bytes = self._read_bounded(r, 50 * 1024 * 1024, bottle_name)
         actual_sha = hashlib.sha256(bottle_bytes).hexdigest().lower()
         if actual_sha != expected_sha:
             raise RuntimeError(f"SHA256 mismatch for {bottle_name}: {actual_sha} != {expected_sha}")
@@ -8204,19 +8360,38 @@ class BluePillEngine:
         with tarfile.open(fileobj=io.BytesIO(bottle_bytes), mode="r:gz") as tf:
             for member in tf.getmembers():
                 if member.isfile() and member.name.endswith("/bin/bluepill-server"):
+                    if member.size > 10 * 1024 * 1024:
+                        raise RuntimeError("bluepill-server script exceeded maximum allowed size")
                     fobj = tf.extractfile(member)
                     if fobj is not None:
-                        extracted_src = fobj.read()
+                        extracted_src = self._read_bounded(fobj, 10 * 1024 * 1024, "bluepill-server")
                     break
         if not extracted_src:
             raise RuntimeError(f"bluepill-server missing from {bottle_name}")
         ast.parse(extracted_src.decode("utf-8"))
         target_path = os.path.realpath(__file__)
-        tmp_path = f"{target_path}.update.{os.getpid()}"
-        with open(tmp_path, "wb") as out_f:
-            out_f.write(extracted_src)
-        os.chmod(tmp_path, 0o755)
-        os.replace(tmp_path, target_path)
+        target_dir = os.path.dirname(target_path)
+        tmp_path = ""
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=target_dir,
+                prefix=f".{os.path.basename(target_path)}.update.",
+                delete=False,
+            ) as out_f:
+                tmp_path = out_f.name
+                out_f.write(extracted_src)
+                out_f.flush()
+                os.fsync(out_f.fileno())
+            os.chmod(tmp_path, 0o755)
+            os.replace(tmp_path, target_path)
+            tmp_path = ""
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
         self.logger.info("[updates] Replaced %s with verified v%s release bottle; restarting service...", target_path, ver)
         self._restart_macos_service()
 
@@ -8260,7 +8435,17 @@ class BluePillEngine:
                             detail = (p_upg.stderr or p_upg.stdout or "").strip().splitlines()
                             brew_err = f"brew upgrade failed (exit {p_upg.returncode})" + (f": {detail[-1]}" if detail else "")
                         else:
-                            installed_ver = self._extract_version_from_script(os.path.realpath(__file__))
+                            installed_ver = ""
+                            for cand in (
+                                "/opt/homebrew/opt/bluepill/bin/bluepill-server",
+                                "/usr/local/opt/bluepill/bin/bluepill-server",
+                                shutil.which("bluepill-server") or "",
+                                os.path.realpath(__file__),
+                            ):
+                                if cand and os.path.exists(cand):
+                                    installed_ver = self._extract_version_from_script(os.path.realpath(cand))
+                                    if installed_ver:
+                                        break
                             if not installed_ver or self._parse_semver(installed_ver) < self._parse_semver(target_version):
                                 brew_err = f"Homebrew tap still at v{installed_ver or VERSION} (< v{target_version})"
                             else:
@@ -8686,7 +8871,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.11</span>
+      <span class="pill pill-blue">v1.2.12</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -9051,6 +9236,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     async function connectRelay() {
       apiKey = document.getElementById('apiKeyInput').value.trim();
       if (apiKey) localStorage.setItem(KEY_STORAGE, apiKey);
+      else localStorage.removeItem(KEY_STORAGE);
       if (apiKey && !isTrustedPasswordTransport()) {
         stopChatSocketIo();
         if (typeof stopPhotosSocketIo === 'function') stopPhotosSocketIo();
@@ -9472,6 +9658,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       const hasAtt = m.attachments && m.attachments.length > 0;
       if (hasAtt) {
         m.attachments.forEach(a => {
+          if (!a || !a.guid) return;
           const tname = String(a.transferName || 'Attachment');
           const mime = String(a.mimeType || '').toLowerCase();
           if (a.hideAttachment || /\.pluginPayloadAttachment$/i.test(tname)) return;
@@ -9488,7 +9675,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
               const fallback = document.createElement('a');
               fallback.href = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download`);
               fallback.target = '_blank';
-              fallback.rel = 'noopener';
+              fallback.rel = 'noopener noreferrer';
               fallback.className = 'pill';
               fallback.style.marginTop = '6px';
               fallback.textContent = '📎 ' + tname;
@@ -9510,11 +9697,11 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
             vid.style.cssText = 'max-width:260px;border-radius:12px;margin-top:6px;display:block;';
             vid.src = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/live`);
             bubble.appendChild(vid);
-          } else if (a.guid) {
+          } else {
             const dl = document.createElement('a');
             dl.href = apiUrl(`/api/v1/attachment/${encodeURIComponent(a.guid)}/download`);
             dl.target = '_blank';
-            dl.rel = 'noopener';
+            dl.rel = 'noopener noreferrer';
             dl.className = 'pill';
             dl.style.marginTop = '6px';
             dl.textContent = '📎 ' + tname;
@@ -12525,6 +12712,13 @@ def run_selftest(engine: BluePillEngine) -> int:
             assert chats_with_lm[0]["lastMessage"]["text"] == "gamma", (
                 f"Unexpected lastMessage text: {chats_with_lm[0]['lastMessage']}"
             )
+            # Deleted newest message must fall back to prior non-deleted message
+            db_eng.deleted_message_guids.add("msg-batch-c")
+            chats_after_del = db_eng.query_chats(limit=10, with_participants=False)
+            assert chats_after_del and chats_after_del[0]["lastMessage"]["text"] == "beta", (
+                f"Expected fallback to 'beta' after deleting newest msg: {chats_after_del}"
+            )
+            db_eng.deleted_message_guids.discard("msg-batch-c")
             batched = db_eng.query_messages({
                 "limit": 10,
                 "where": [{"statement": "message.guid IN (:g0,:g1)", "args": {"g0": "msg-batch-a", "g1": "msg-batch-c"}}],
@@ -15540,6 +15734,24 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
     assert BluePillEngine._parse_semver("v1.2.7") > BluePillEngine._parse_semver("1.2.6")
     assert BluePillEngine._parse_semver("1.10.0") > BluePillEngine._parse_semver("1.2.6")
     assert BluePillEngine._parse_semver("1.2.6") == BluePillEngine._parse_semver("v1.2.6")
+    assert BluePillEngine._validate_update_version("v1.2.12") == "1.2.12"
+    assert BluePillEngine._validate_update_version("1.2.12-rc.1") == "1.2.12-rc.1"
+    for bad_ver in ("1.2.12/../../evil", "1.2", "", "1.2.12?x=1"):
+        try:
+            BluePillEngine._validate_update_version(bad_ver)
+            raise AssertionError(f"Expected ValueError for bad version {bad_ver!r}")
+        except ValueError:
+            pass
+    assert BluePillEngine._validate_update_url("https://github.com/nertwork/bluepill/releases/download/v1.2.12/SHA256SUMS.txt").startswith("https://")
+    assert BluePillEngine._validate_update_url("https://objects.githubusercontent.com/a").startswith("https://")
+    assert BluePillEngine._validate_update_url("https://release-assets.githubusercontent.com/a").startswith("https://")
+    assert BluePillEngine._validate_update_url("https://api.bluepill.nertwork.com/a").startswith("https://")
+    for bad_url in ("http://github.com/a", "file:///etc/passwd", "https://evil.com/a", "https://bluepill.nertwork.com.evil.com/a"):
+        try:
+            BluePillEngine._validate_update_url(bad_url)
+            raise AssertionError(f"Expected ValueError for untrusted URL {bad_url!r}")
+        except ValueError:
+            pass
     upd_tmp = tempfile.mkdtemp(prefix="bp_upd_selftest_")
     try:
         upd_relay_cfg = os.path.join(upd_tmp, "relay.json")

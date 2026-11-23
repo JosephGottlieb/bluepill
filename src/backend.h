@@ -1,5 +1,6 @@
 #include <atomic>
 #include <functional>
+#include <memory>
 #pragma once
 
 #include <QFileSystemWatcher>
@@ -19,6 +20,7 @@
 #include <QSystemTrayIcon>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
 #include <QTimer>
 #include <QVariantList>
 #include <QVariantMap>
@@ -454,20 +456,33 @@ public:
     QString serverLatestVersion() const { return m_serverLatestVersion; }
     QString serverUpdateMethod() const { return m_serverUpdateMethod; }
     bool updateChecking() const { return m_updateChecking; }
-    bool updateApplying() const { return m_updateApplying; }
+    bool updateApplying() const { return m_clientUpdateApplying || m_serverUpdateApplying; }
     QString updateStatusText() const { return m_updateStatusText; }
     bool anyUpdateAvailable() const { return clientUpdateAvailable() || serverUpdateAvailable(); }
     bool silentAutoUpdateSupported() const;
     QString clientUpdateMethod() const;
     static ClientUpdateStrategy detectClientUpdateStrategy(const ClientUpdateEnv &env);
     static QHash<QString, QString> parseSha256Sums(const QByteArray &content);
+    static bool isTrustedUpdateUrl(const QUrl &url, bool allowLocalhostForTest = false);
     Q_INVOKABLE static int compareSemver(const QString &a, const QString &b);
     Q_INVOKABLE void checkForUpdatesNow();
     Q_INVOKABLE void confirmClientUpdate();
     Q_INVOKABLE bool confirmServerUpdate(bool confirmed = false);
     void setUpdatesFeedUrlForTest(const QString &url) { m_updatesFeedUrlOverride = url; }
     void setAllowLocalhostCloudForTest(bool allow) { m_allowLocalhostCloudForTest = allow; }
+    void setAllowLocalhostUpdatesForTest(bool allow) { m_allowLocalhostUpdatesForTest = allow; }
     void setServerUpdatePollIntervalMsForTest(int ms) { m_serverUpdatePollIntervalMs = std::max(10, ms); }
+    bool clientUpdateApplyingForTest() const { return m_clientUpdateApplying; }
+    bool serverUpdateApplyingForTest() const { return m_serverUpdateApplying; }
+    void downloadVerifiedClientPackageForTest(
+        const QString &assetUrl,
+        const QString &checksumsUrl,
+        bool requireChecksum,
+        const QString &fallbackFileName,
+        bool allowAptRead,
+        std::function<void(const QString &localFilePath, const std::shared_ptr<QTemporaryDir> &tempDir)> onReady) {
+        downloadVerifiedClientPackage(assetUrl, checksumsUrl, requireChecksum, fallbackFileName, allowAptRead, std::move(onReady));
+    }
     void checkForCloudUpdates(bool manual = false);
     Q_INVOKABLE void registerWindow(QObject *window);
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -928,28 +943,33 @@ private:
     QString m_serverLatestVersion;
     QString m_serverUpdateMethod = QStringLiteral("homebrew");
     bool m_updateChecking = false;
-    bool m_updateApplying = false;
+    bool m_clientUpdateApplying = false;
+    bool m_serverUpdateApplying = false;
     bool m_initialCloudUpdateChecked = false;
     QString m_updateStatusText;
     QString m_updatesFeedUrlOverride;
     bool m_allowLocalhostCloudForTest = false;
+    bool m_allowLocalhostUpdatesForTest = false;
     QTimer m_cloudUpdateTimer;
     QTimer m_serverUpdatePollTimer;
     int m_serverUpdatePollAttempts = 0;
     int m_serverUpdatePollIntervalMs = 2500;
     QString m_serverUpdateTargetVersion;
     quint64 m_serverUpdatePollGen = 0;
+    quint64 m_clientUpdateGen = 0;
     ClientUpdateEnv currentClientUpdateEnv() const;
     void downloadVerifiedClientPackage(const QString &assetUrl,
                                        const QString &checksumsUrl,
                                        bool requireChecksum,
                                        const QString &fallbackFileName,
-                                       std::function<void(const QString &localFilePath)> onReady);
+                                       bool allowAptRead,
+                                       std::function<void(const QString &localFilePath, const std::shared_ptr<QTemporaryDir> &tempDir)> onReady);
     void installLinuxPackageWithPkexecOrTerminal(const QString &tmpPath,
+                                                 const std::shared_ptr<QTemporaryDir> &tempDir,
                                                  const QStringList &pkexecArgs,
                                                  const QString &sudoFallbackCmd);
     void launchLinuxCommandInTerminal(const QString &shellCmd,
-                                      const QString &cleanupFilePath,
+                                      const std::shared_ptr<QTemporaryDir> &tempDir,
                                       const QString &statusDesc);
     void pollServerUpdateStatus();
     bool m_cloudSignInPending = false;

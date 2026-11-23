@@ -11724,7 +11724,7 @@ private slots:
         });
 
         const QString prevAppVer = QCoreApplication::applicationVersion();
-        QCoreApplication::setApplicationVersion(QStringLiteral("1.2.11"));
+        QCoreApplication::setApplicationVersion(QStringLiteral("1.2.12"));
         auto restoreVer = qScopeGuard([&]() { QCoreApplication::setApplicationVersion(prevAppVer); });
 
         Backend b(false);
@@ -11794,7 +11794,230 @@ private slots:
             }
         };
         verifyBounds({QSize(960, 720), QSize(420, 620)});
+
+        auto *closeBtn = win->findChild<QQuickItem *>(QStringLiteral("closeCloudUpdateModalBtn"));
+        QVERIFY(closeBtn != nullptr);
+
+        // Trigger a long error status text and verify short-window modal height stays clamped & Close stays visible
+        b.downloadVerifiedClientPackageForTest(
+            QStringLiteral("https://evil.example.com/pkg.exe"),
+            QString(),
+            true,
+            QStringLiteral("pkg.exe"),
+            false,
+            [](const QString &, const std::shared_ptr<QTemporaryDir> &) {});
+        QVERIFY(!b.updateStatusText().isEmpty());
+        for (const QSize &shortSz : {QSize(280, 320), QSize(420, 280), QSize(260, 260)}) {
+            win->resize(shortSz);
+            QCoreApplication::processEvents();
+            QTest::qWait(50);
+            QVERIFY(card->width() >= 240 && card->width() <= win->width());
+            QVERIFY(card->height() <= std::max(200, win->height() - 40) + 0.5);
+            QVERIFY(card->height() <= win->height());
+            QVERIFY(clientCard->width() <= card->width());
+            QVERIFY(serverCard->width() <= card->width());
+            const QPointF closePos = closeBtn->mapToItem(card, QPointF(0, 0));
+            QVERIFY2(closePos.y() >= 0 && closePos.y() + closeBtn->height() <= card->height() + 0.5,
+                     qPrintable(QStringLiteral("closeBtn overflow at %1x%2: y=%3 h=%4 cardH=%5")
+                                    .arg(shortSz.width()).arg(shortSz.height())
+                                    .arg(closePos.y()).arg(closeBtn->height()).arg(card->height())));
+        }
+
         win->setProperty("showUpdateModal", false);
+    }
+
+    void testTrustedUpdateUrlAllowlistAndDownloadVerification() {
+        // 1. Allowlist checks
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v1.2.12/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://objects.githubusercontent.com/github-production-release-asset/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://release-assets.githubusercontent.com/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com/dl/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://api.bluepill.nertwork.com/dl/a.deb")), false));
+
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://github.com/nertwork/bluepill/a.deb")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://evil.com/a.deb")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com.evil.com/a.deb")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("file://localhost/etc/passwd")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("file://localhost/etc/passwd")), true));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://127.0.0.1:8080/a.deb")), false));
+        QVERIFY(!Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://localhost:8080/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://127.0.0.1:8080/a.deb")), true));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("http://localhost:8080/a.deb")), true));
+
+        // 2. Download verification scenarios (missing checksum, hash mismatch, untrusted redirect, valid write)
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        const QByteArray payloadBytes(2048, 'B');
+        const QString goodSha = QString::fromLatin1(
+            QCryptographicHash::hash(payloadBytes, QCryptographicHash::Sha256).toHex()).toLower();
+        const QString badSha = QString(64, QLatin1Char('0'));
+        QString servedSha = goodSha;
+        bool omitEntry = false;
+
+        QTcpServer mockPkgSrv;
+        QVERIFY(mockPkgSrv.listen(QHostAddress::LocalHost, 0));
+        QObject::connect(&mockPkgSrv, &QTcpServer::newConnection, &mockPkgSrv, [&]() {
+            while (mockPkgSrv.hasPendingConnections()) {
+                QTcpSocket *s = mockPkgSrv.nextPendingConnection();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [&, s]() {
+                    const QByteArray raw = s->readAll();
+                    const QByteArray firstLine = raw.left(raw.indexOf('\n')).trimmed();
+                    if (firstLine.contains("/redirect-evil")) {
+                        const QByteArray resp =
+                            "HTTP/1.1 302 Found\r\n"
+                            "Location: https://evil.example.com/bad.deb\r\n"
+                            "Content-Length: 0\r\nConnection: close\r\n\r\n";
+                        s->write(resp);
+                    } else if (firstLine.contains("/SHA256SUMS.txt")) {
+                        const QByteArray sumsBody = omitEntry
+                            ? QByteArray("# empty\n")
+                            : QStringLiteral("%1  bluepill_1.2.12_amd64.deb\n").arg(servedSha).toUtf8();
+                        const QByteArray resp =
+                            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
+                            QByteArray::number(sumsBody.size()) + "\r\nConnection: close\r\n\r\n" + sumsBody;
+                        s->write(resp);
+                    } else {
+                        const QByteArray resp =
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: " +
+                            QByteArray::number(payloadBytes.size()) + "\r\nConnection: close\r\n\r\n" + payloadBytes;
+                        s->write(resp);
+                    }
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_dl.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_dl.json")));
+        b.setAllowLocalhostCloudForTest(true);
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockPkgSrv.serverPort()), QString(), QStringLiteral("pw"));
+
+        const QString pkgUrl = QStringLiteral("http://127.0.0.1:%1/bluepill_1.2.12_amd64.deb").arg(mockPkgSrv.serverPort());
+        const QString chkUrl = QStringLiteral("http://127.0.0.1:%1/SHA256SUMS.txt").arg(mockPkgSrv.serverPort());
+
+        // 2a. Localhost update rejected when allowLocalhostUpdatesForTest == false
+        bool callbackCalled = false;
+        b.downloadVerifiedClientPackageForTest(
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
+        QCOMPARE(callbackCalled, false);
+        QCOMPARE(b.updateApplying(), false);
+        QVERIFY(b.updateStatusText().contains(QStringLiteral("untrusted"), Qt::CaseInsensitive));
+
+        b.setAllowLocalhostUpdatesForTest(true);
+
+        // 2b. Missing checksum URL with requireChecksum == true
+        b.downloadVerifiedClientPackageForTest(
+            pkgUrl, QString(), true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
+        QCOMPARE(callbackCalled, false);
+        QCOMPARE(b.updateApplying(), false);
+        QVERIFY(b.updateStatusText().contains(QStringLiteral("checksum"), Qt::CaseInsensitive));
+
+        // 2c. Missing entry in SHA256SUMS.txt
+        omitEntry = true;
+        b.downloadVerifiedClientPackageForTest(
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
+        QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("missing"), Qt::CaseInsensitive), 3000);
+        QCOMPARE(callbackCalled, false);
+        QCOMPARE(b.updateApplying(), false);
+
+        // 2d. Hash mismatch
+        omitEntry = false;
+        servedSha = badSha;
+        b.downloadVerifiedClientPackageForTest(
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
+        QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("SHA256 verification failed")), 3000);
+        QCOMPARE(callbackCalled, false);
+        QCOMPARE(b.updateApplying(), false);
+
+        // 2e. Redirect to untrusted host
+        servedSha = goodSha;
+        b.downloadVerifiedClientPackageForTest(
+            QStringLiteral("http://127.0.0.1:%1/redirect-evil").arg(mockPkgSrv.serverPort()),
+            chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
+        QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("untrusted"), Qt::CaseInsensitive), 3000);
+        QCOMPARE(callbackCalled, false);
+        QCOMPARE(b.updateApplying(), false);
+
+        // 2f. Valid SHA256 + private QTemporaryDir (0755 for deb-apt, 0700 otherwise)
+        QString capturedPath;
+        QString capturedDir;
+        b.downloadVerifiedClientPackageForTest(
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            [&](const QString &localPath, const std::shared_ptr<QTemporaryDir> &pkgDir) {
+                callbackCalled = true;
+                capturedPath = localPath;
+                capturedDir = pkgDir ? pkgDir->path() : QString();
+                QVERIFY(pkgDir != nullptr && pkgDir->isValid());
+                QVERIFY(QFileInfo::exists(localPath));
+                QVERIFY(!QFileInfo(localPath).isSymLink());
+#ifndef Q_OS_WIN
+                const QFileDevice::Permissions dPerms = QFileInfo(capturedDir).permissions();
+                QVERIFY(dPerms.testFlag(QFileDevice::ReadOther));
+                QVERIFY(dPerms.testFlag(QFileDevice::ExeOther));
+#endif
+                pkgDir->remove();
+            });
+        QTRY_COMPARE_WITH_TIMEOUT(callbackCalled, true, 3000);
+        QVERIFY(!QFileInfo::exists(capturedPath));
+        QVERIFY(!QFileInfo::exists(capturedDir));
+    }
+
+    void testUpdateApplyingResetAndReentrancy() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        QTcpServer mockSlowRelay;
+        QVERIFY(mockSlowRelay.listen(QHostAddress::LocalHost, 0));
+        QList<QTcpSocket *> heldSockets;
+        QObject::connect(&mockSlowRelay, &QTcpServer::newConnection, &mockSlowRelay, [&]() {
+            while (mockSlowRelay.hasPendingConnections()) {
+                QTcpSocket *s = mockSlowRelay.nextPendingConnection();
+                heldSockets.append(s);
+                QObject::connect(s, &QTcpSocket::destroyed, &mockSlowRelay, [&, s]() {
+                    heldSockets.removeAll(s);
+                });
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_rst.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_rst.json")));
+        b.setAllowLocalhostCloudForTest(true);
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockSlowRelay.serverPort()), QString(), QStringLiteral("pw"));
+
+        // Re-entrancy guard + signOutCloud reset
+        QCOMPARE(b.confirmServerUpdate(true), true);
+        QCOMPARE(b.updateApplying(), true);
+        QCOMPARE(b.serverUpdateApplyingForTest(), true);
+        QCOMPARE(b.confirmServerUpdate(true), false);
+
+        b.signOutCloud();
+        QCOMPARE(b.updateApplying(), false);
+        QCOMPARE(b.serverUpdateApplyingForTest(), false);
+        QCOMPARE(b.clientUpdateApplyingForTest(), false);
+
+        // Endpoint switch resets applying state
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockSlowRelay.serverPort()), QString(), QStringLiteral("pw"));
+        QCOMPARE(b.confirmServerUpdate(true), true);
+        QCOMPARE(b.updateApplying(), true);
+        b.saveServerConfig(QStringLiteral("https://api.bluepill.nertwork.com:443/t/other"), QString(), QStringLiteral("pw2"));
+        QCOMPARE(b.updateApplying(), false);
+        QCOMPARE(b.serverUpdateApplyingForTest(), false);
+
+        for (QTcpSocket *s : heldSockets) {
+            if (s) s->abort();
+        }
     }
 
     void testConfirmServerUpdatePolling() {
