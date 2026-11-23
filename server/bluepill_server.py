@@ -57,7 +57,7 @@ import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.12"
+VERSION = "1.2.13"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
@@ -569,12 +569,16 @@ class BluePillEngine:
         self._photos_high_cpu_last_obs_ts: float = 0.0
         self._photos_high_cpu_last_sync_ms: Optional[int] = None
         self._photos_watcher_state: Dict[str, Any] = {"last_sig": None, "last_health_ts": 0.0}
+        self._is_ephemeral: bool = is_ephemeral
+        self._pinning_plist_explicit: bool = bool(pinning_plist_path)
         self.deleted_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/deleted_state.json")
         )
         self.chat_state_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/chat_state.json")
         )
+        self.pin_overrides_path: str = os.path.join(self._config_dir, "pin_overrides.json")
+        self.local_contacts_path: str = os.path.join(self._config_dir, "contacts.json")
         self.scheduled_messages_path: Optional[str] = (
             None if is_ephemeral else os.path.expanduser("~/.config/bluepill/scheduled_messages.json")
         )
@@ -600,6 +604,7 @@ class BluePillEngine:
             "checked_at": "",
         }
         self.pinned_chat_guids: List[str] = []
+        self.unpinned_chat_guids: set[str] = set()
         self.muted_chat_guids: set[str] = set()
         self.archived_chat_guids: set[str] = set()
         self.chat_display_names_override: Dict[str, str] = {}
@@ -619,6 +624,7 @@ class BluePillEngine:
         self._tracked_outgoing: Dict[int, Tuple[int, bool, bool, int, float]] = {}
         self._load_deleted_state()
         self._load_chat_state()
+        self._load_pin_overrides()
         self._load_scheduled_messages()
         self.enable_background_daemons = enable_background_daemons
         self.logger, self.log_file_path = setup_logging(log_to_stderr=enable_background_daemons)
@@ -1457,6 +1463,9 @@ class BluePillEngine:
                 for pg in (data.get("pinnedChatGuids") or data.get("pinnedChats") or []):
                     if isinstance(pg, str) and pg.strip() and pg.strip() not in self.pinned_chat_guids:
                         self.pinned_chat_guids.append(pg.strip())
+                for ug in (data.get("unpinnedChatGuids") or data.get("unpinnedChats") or []):
+                    if isinstance(ug, str) and ug.strip():
+                        self.unpinned_chat_guids.add(ug.strip())
                 for mg in (data.get("mutedChatGuids") or data.get("mutedChats") or []):
                     if isinstance(mg, str) and mg.strip():
                         self.muted_chat_guids.add(mg.strip())
@@ -1497,6 +1506,7 @@ class BluePillEngine:
                 self.chat_state["customReactions"] = [dict(r) for r in self.custom_reactions]
                 payload = {
                     "pinnedChatGuids": list(self.pinned_chat_guids),
+                    "unpinnedChatGuids": sorted(self.unpinned_chat_guids),
                     "customReactions": [dict(r) for r in self.custom_reactions],
                     "mutedChatGuids": sorted(self.muted_chat_guids),
                     "archivedChatGuids": sorted(self.archived_chat_guids),
@@ -1512,6 +1522,53 @@ class BluePillEngine:
             except OSError as exc:
                 if hasattr(self, "logger") and self.logger:
                     self.logger.warning("[chat-state] failed to save %s: %s", self.chat_state_path, exc)
+                try:
+                    if os.path.exists(tmp_path):
+                        os.remove(tmp_path)
+                except OSError:
+                    pass
+
+    def _load_pin_overrides(self) -> None:
+        if not self.pin_overrides_path or not os.path.exists(self.pin_overrides_path):
+            return
+        try:
+            with open(self.pin_overrides_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                return
+            for pg in data.get("pinnedChatGuids") or []:
+                if isinstance(pg, str) and pg.strip() and pg.strip() not in self.pinned_chat_guids:
+                    self.pinned_chat_guids.append(pg.strip())
+            for ug in data.get("unpinnedChatGuids") or []:
+                if isinstance(ug, str) and ug.strip():
+                    self.unpinned_chat_guids.add(ug.strip())
+            # Ensure unpinned overrides win against stale pinned entries if both exist
+            if self.unpinned_chat_guids:
+                self.pinned_chat_guids = [
+                    x for x in self.pinned_chat_guids if x not in self.unpinned_chat_guids
+                ]
+        except Exception:
+            pass
+
+    def _save_pin_overrides(self) -> None:
+        if not self.pin_overrides_path:
+            return
+        with self._chat_state_lock:
+            tmp_path = f"{self.pin_overrides_path}.{uuid.uuid4().hex}.tmp"
+            try:
+                os.makedirs(os.path.dirname(self.pin_overrides_path), exist_ok=True)
+                payload = {
+                    "pinnedChatGuids": list(self.pinned_chat_guids),
+                    "unpinnedChatGuids": sorted(self.unpinned_chat_guids),
+                    "updatedAt": int(time.time() * 1000),
+                }
+                with open(tmp_path, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, indent=2)
+                os.chmod(tmp_path, 0o600)
+                os.replace(tmp_path, self.pin_overrides_path)
+            except OSError as exc:
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.warning("[pin-overrides] failed to save %s: %s", self.pin_overrides_path, exc)
                 try:
                     if os.path.exists(tmp_path):
                         os.remove(tmp_path)
@@ -2231,6 +2288,66 @@ class BluePillEngine:
             except Exception:
                 continue
 
+        # 3. Merge locally saved contacts (from POST /api/v1/contact)
+        local_contacts = self._load_local_contacts()
+        if local_contacts:
+            by_id: Dict[str, Dict[str, Any]] = {}
+            by_addr: Dict[str, Dict[str, Any]] = {}
+            for existing in contacts:
+                eid = str(existing.get("id") or "").strip()
+                if eid:
+                    by_id[eid] = existing
+                for p in existing.get("phoneNumbers") or []:
+                    k = self._norm_handle_key(str(p.get("address") or ""))
+                    if k:
+                        by_addr.setdefault(k, existing)
+                for e in existing.get("emails") or []:
+                    k = self._norm_handle_key(str(e.get("address") or ""))
+                    if k:
+                        by_addr.setdefault(k, existing)
+
+            for lc in local_contacts:
+                if not isinstance(lc, dict):
+                    continue
+                lc_id = str(lc.get("id") or "").strip()
+                lc_phones = [dict(p) for p in (lc.get("phoneNumbers") or []) if isinstance(p, dict) and str(p.get("address") or "").strip()]
+                lc_emails = [dict(e) for e in (lc.get("emails") or []) if isinstance(e, dict) and str(e.get("address") or "").strip()]
+                target = by_id.get(lc_id) if lc_id else None
+                if target is None:
+                    for item in lc_phones + lc_emails:
+                        k = self._norm_handle_key(str(item.get("address") or ""))
+                        if k and k in by_addr:
+                            target = by_addr[k]
+                            break
+                if target is not None:
+                    if lc.get("firstName"):
+                        target["firstName"] = lc["firstName"]
+                    if lc.get("lastName"):
+                        target["lastName"] = lc["lastName"]
+                    if lc.get("displayName"):
+                        target["displayName"] = lc["displayName"]
+                    existing_p = {self._norm_handle_key(str(x.get("address") or "")) for x in (target.get("phoneNumbers") or [])}
+                    for p in lc_phones:
+                        pk = self._norm_handle_key(str(p.get("address") or ""))
+                        if pk and pk not in existing_p:
+                            target.setdefault("phoneNumbers", []).append(p)
+                            existing_p.add(pk)
+                    existing_e = {self._norm_handle_key(str(x.get("address") or "")) for x in (target.get("emails") or [])}
+                    for e in lc_emails:
+                        ek = self._norm_handle_key(str(e.get("address") or ""))
+                        if ek and ek not in existing_e:
+                            target.setdefault("emails", []).append(e)
+                            existing_e.add(ek)
+                else:
+                    new_entry = dict(lc)
+                    contacts.append(new_entry)
+                    if lc_id:
+                        by_id[lc_id] = new_entry
+                    for item in lc_phones + lc_emails:
+                        k = self._norm_handle_key(str(item.get("address") or ""))
+                        if k:
+                            by_addr.setdefault(k, new_entry)
+
         with self._contacts_lock:
             self._contacts_cache = contacts
             self._contacts_cache_ts = now
@@ -2268,9 +2385,264 @@ class BluePillEngine:
                 return data, _image_mime(data)
         return None
 
+    _SAVE_CONTACT_APPLESCRIPT = """
+on run argv
+    set fn to item 1 of argv
+    set ln to item 2 of argv
+    set phoneVal to item 3 of argv
+    set emailVal to item 4 of argv
+    tell application "Contacts"
+        set matchedPerson to missing value
+        if phoneVal is not "" then
+            repeat with p in people
+                repeat with ph in phones of p
+                    if (value of ph as string) is phoneVal then
+                        set matchedPerson to p
+                        exit repeat
+                    end if
+                end repeat
+                if matchedPerson is not missing value then exit repeat
+            end repeat
+        end if
+        if matchedPerson is missing value and emailVal is not "" then
+            repeat with p in people
+                repeat with em in emails of p
+                    if (value of em as string) is emailVal then
+                        set matchedPerson to p
+                        exit repeat
+                    end if
+                end repeat
+                if matchedPerson is not missing value then exit repeat
+            end repeat
+        end if
+        if matchedPerson is missing value then
+            set matchedPerson to make new person with properties {first name:fn, last name:ln}
+        else
+            if fn is not "" then set first name of matchedPerson to fn
+            if ln is not "" then set last name of matchedPerson to ln
+        end if
+        if phoneVal is not "" then
+            set hasPhone to false
+            repeat with ph in phones of matchedPerson
+                if (value of ph as string) is phoneVal then set hasPhone to true
+            end repeat
+            if not hasPhone then
+                make new phone at end of phones of matchedPerson with properties {label:"mobile", value:phoneVal}
+            end if
+        end if
+        if emailVal is not "" then
+            set hasEmail to false
+            repeat with em in emails of matchedPerson
+                if (value of em as string) is emailVal then set hasEmail to true
+            end repeat
+            if not hasEmail then
+                make new email at end of emails of matchedPerson with properties {label:"home", value:emailVal}
+            end if
+        end if
+        save
+        return id of matchedPerson
+    end tell
+end run
+""".strip()
+
+    @staticmethod
+    def _clean_contact_field(value: Any, max_len: int = 200) -> str:
+        if value is None:
+            return ""
+        s = str(value)
+        s = re.sub(r"[\x00-\x1f\x7f]+", " ", s).strip()
+        if len(s) > max_len:
+            s = s[:max_len].strip()
+        return s
+
+    @classmethod
+    def _normalize_contact_entries(cls, raw_single: Any, raw_list: Any, default_label: str) -> List[Dict[str, str]]:
+        out: List[Dict[str, str]] = []
+        seen: set[str] = set()
+        candidates: List[Any] = []
+        if raw_single is not None and str(raw_single).strip():
+            candidates.append(raw_single)
+        if isinstance(raw_list, list):
+            candidates.extend(raw_list)
+        elif isinstance(raw_list, str) and raw_list.strip():
+            candidates.append(raw_list)
+        for item in candidates:
+            label = default_label
+            if isinstance(item, dict):
+                addr = cls._clean_contact_field(item.get("address") or item.get("value") or item.get("number") or "", max_len=160)
+                lbl = cls._clean_contact_field(item.get("label") or "", max_len=40)
+                if lbl:
+                    label = lbl
+            else:
+                addr = cls._clean_contact_field(item, max_len=160)
+            if not addr:
+                continue
+            key = addr.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"address": addr, "label": label})
+        return out
+
+    def _load_local_contacts(self) -> List[Dict[str, Any]]:
+        path = getattr(self, "local_contacts_path", "")
+        if not path or not os.path.exists(path):
+            return []
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return [dict(x) for x in data if isinstance(x, dict)] if isinstance(data, list) else []
+        except Exception:
+            return []
+
+    def _save_local_contacts(self, items: List[Dict[str, Any]]) -> None:
+        path = getattr(self, "local_contacts_path", "")
+        if not path:
+            return
+        tmp_path = f"{path}.{uuid.uuid4().hex}.tmp"
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(items, f, indent=2)
+                f.write("\n")
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, path)
+        except OSError as exc:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.warning("[contacts] failed to save local contacts %s: %s", path, exc)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+    def _save_single_contact(self, item: Dict[str, Any]) -> Dict[str, Any]:
+        if not isinstance(item, dict):
+            raise ValueError("Contact payload must be a JSON object")
+        fn = self._clean_contact_field(item.get("firstName"), max_len=200)
+        ln = self._clean_contact_field(item.get("lastName"), max_len=200)
+        disp = self._clean_contact_field(item.get("displayName"), max_len=400)
+        org = self._clean_contact_field(item.get("organization"), max_len=200)
+        phones = self._normalize_contact_entries(item.get("phone"), item.get("phoneNumbers"), "Mobile")
+        emails = self._normalize_contact_entries(item.get("email"), item.get("emails"), "Home")
+        if not any((fn, ln, disp, org, phones, emails)):
+            raise ValueError("Contact payload must include firstName, lastName, displayName, phone, or email")
+        if not disp:
+            disp = f"{fn} {ln}".strip() or org or (phones[0]["address"] if phones else "") or (emails[0]["address"] if emails else "")
+
+        primary_phone = phones[0]["address"] if phones else ""
+        primary_email = emails[0]["address"] if emails else ""
+        applescript_fn = fn or (disp if not ln else "")
+
+        contact_id = self._clean_contact_field(item.get("id"), max_len=128)
+        if sys.platform == "darwin" and not getattr(self, "_is_ephemeral", False):
+            try:
+                proc = subprocess.run(
+                    ["osascript", "-e", self._SAVE_CONTACT_APPLESCRIPT, applescript_fn, ln, primary_phone, primary_email],
+                    capture_output=True,
+                    text=True,
+                    timeout=10.0,
+                    check=False,
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    contact_id = proc.stdout.strip().splitlines()[-1].strip()
+                elif proc.returncode != 0 and hasattr(self, "logger") and self.logger:
+                    self.logger.warning(
+                        "[contacts] Contacts.app AppleScript returned rc=%d: %s",
+                        proc.returncode,
+                        (proc.stderr or "").strip(),
+                    )
+            except Exception as exc:
+                if hasattr(self, "logger") and self.logger:
+                    self.logger.warning("[contacts] Contacts.app update failed: %s", exc)
+
+        if not contact_id:
+            contact_id = f"local-{uuid.uuid4().hex[:12]}"
+
+        record: Dict[str, Any] = {
+            "id": contact_id,
+            "firstName": fn,
+            "lastName": ln,
+            "displayName": disp,
+            "nickname": "",
+            "organization": org,
+            "phoneNumbers": phones,
+            "emails": emails,
+            "birthday": "",
+            "avatar": "",
+        }
+
+        with self._contacts_lock:
+            existing_items = self._load_local_contacts()
+            new_addr_keys = {
+                self._norm_handle_key(entry["address"])
+                for entry in (phones + emails)
+                if self._norm_handle_key(entry["address"])
+            }
+            matched_idx: Optional[int] = None
+            for idx, ex in enumerate(existing_items):
+                if contact_id and str(ex.get("id") or "").strip() == contact_id:
+                    matched_idx = idx
+                    break
+                ex_keys = {
+                    self._norm_handle_key(str(entry.get("address") or ""))
+                    for entry in ((ex.get("phoneNumbers") or []) + (ex.get("emails") or []))
+                    if isinstance(entry, dict) and self._norm_handle_key(str(entry.get("address") or ""))
+                }
+                if new_addr_keys and (new_addr_keys & ex_keys):
+                    matched_idx = idx
+                    break
+                if not new_addr_keys and disp and str(ex.get("displayName") or "").strip().lower() == disp.lower():
+                    matched_idx = idx
+                    break
+
+            if matched_idx is not None:
+                prev = dict(existing_items[matched_idx])
+                if not item.get("id") and prev.get("id"):
+                    record["id"] = str(prev["id"])
+                merged_phones = list(prev.get("phoneNumbers") or [])
+                seen_p = {self._norm_handle_key(str(p.get("address") or "")) for p in merged_phones if isinstance(p, dict)}
+                for p in phones:
+                    pk = self._norm_handle_key(p["address"])
+                    if pk not in seen_p:
+                        merged_phones.append(p)
+                        seen_p.add(pk)
+                merged_emails = list(prev.get("emails") or [])
+                seen_e = {self._norm_handle_key(str(e.get("address") or "")) for e in merged_emails if isinstance(e, dict)}
+                for e in emails:
+                    ek = self._norm_handle_key(e["address"])
+                    if ek not in seen_e:
+                        merged_emails.append(e)
+                        seen_e.add(ek)
+                record["phoneNumbers"] = merged_phones
+                record["emails"] = merged_emails
+                existing_items[matched_idx] = record
+            else:
+                existing_items.append(record)
+            self._save_local_contacts(existing_items)
+            self._contacts_cache = None
+            self._contacts_cache_ts = 0.0
+
+        self.query_contacts(force_refresh=True)
+        return record
+
+    def save_contact(self, payload: Any) -> Any:
+        """Create or update contact(s) in macOS Contacts.app (on darwin) and local fallback cache."""
+        if isinstance(payload, list):
+            if not payload:
+                raise ValueError("Contact payload array must not be empty")
+            saved = [self._save_single_contact(item) for item in payload]
+            return saved[0] if len(saved) == 1 else saved
+        if isinstance(payload, dict):
+            return self._save_single_contact(payload)
+        raise ValueError("Contact payload must be a JSON object or array")
+
     def query_pinned_chats(self) -> List[Dict[str, Any]]:
         """Parse ~/Library/Preferences/com.apple.messages.pinning.plist and resolve against chat.db."""
-        raw_identifiers: List[str] = list(self.pinned_chat_guids)
+        unpinned = set(self.unpinned_chat_guids)
+        raw_identifiers: List[str] = [
+            x for x in self.pinned_chat_guids if x not in unpinned
+        ]
         if os.path.exists(self.pinning_plist_path):
             try:
                 with open(self.pinning_plist_path, "rb") as f:
@@ -2315,6 +2687,8 @@ class BluePillEngine:
             try:
                 conn = self._open_chat_db()
                 for ident in raw_identifiers:
+                    if ident in unpinned:
+                        continue
                     row = conn.execute(
                         """
                         SELECT ROWID, guid, chat_identifier, display_name, style, service_name
@@ -2326,7 +2700,7 @@ class BluePillEngine:
                     ).fetchone()
                     if row:
                         g = row["guid"]
-                        if g not in seen_guids:
+                        if g not in seen_guids and g not in unpinned:
                             seen_guids.add(g)
                             pins.append(
                                 {
@@ -2338,12 +2712,13 @@ class BluePillEngine:
                                 }
                             )
                     else:
-                        if ident not in seen_guids:
-                            seen_guids.add(ident)
+                        cand_guid = ident if ";" in ident else f"iMessage;-;{ident}"
+                        if cand_guid not in seen_guids and cand_guid not in unpinned:
+                            seen_guids.add(cand_guid)
                             pins.append(
                                 {
                                     "pinIndex": len(pins),
-                                    "guid": ident if ";" in ident else f"iMessage;-;{ident}",
+                                    "guid": cand_guid,
                                     "chatIdentifier": ident,
                                     "displayName": "",
                                     "style": 45,
@@ -2353,19 +2728,176 @@ class BluePillEngine:
             except Exception:
                 pass
         elif raw_identifiers:
-            for idx, ident in enumerate(raw_identifiers):
-                if ident not in seen_guids:
-                    seen_guids.add(ident)
+            for ident in raw_identifiers:
+                if ident in unpinned:
+                    continue
+                cand_guid = ident if ";" in ident else f"iMessage;-;{ident}"
+                if cand_guid not in seen_guids and cand_guid not in unpinned:
+                    seen_guids.add(cand_guid)
                     pins.append(
                         {
-                            "pinIndex": idx,
-                            "guid": ident if ";" in ident else f"iMessage;-;{ident}",
+                            "pinIndex": len(pins),
+                            "guid": cand_guid,
                             "chatIdentifier": ident,
                             "displayName": "",
                             "style": 45,
                         }
                     )
-        return [p for p in pins if p.get("guid") not in self.deleted_chat_guids]
+        filtered = [
+            p
+            for p in pins
+            if p.get("guid") not in self.deleted_chat_guids
+            and p.get("guid") not in unpinned
+            and p.get("chatIdentifier") not in unpinned
+        ]
+        for idx, p in enumerate(filtered):
+            p["pinIndex"] = idx
+        return filtered
+
+    def _update_pinning_plist(
+        self,
+        chat_guid: str,
+        chat_ident: str,
+        related_guids: set[str],
+        pinned: bool,
+    ) -> bool:
+        """Update macOS Messages pinning plist (or test pinning_plist_path) atomically."""
+        if not self.pinning_plist_path:
+            return False
+        if getattr(self, "_is_ephemeral", False) and not getattr(self, "_pinning_plist_explicit", False):
+            return False
+        match_tokens = {x for x in (related_guids | {chat_guid, chat_ident}) if x}
+        plist_data: Dict[str, Any] = {}
+        if os.path.exists(self.pinning_plist_path):
+            try:
+                with open(self.pinning_plist_path, "rb") as f:
+                    loaded = plistlib.load(f)
+                if isinstance(loaded, dict):
+                    plist_data = loaded
+            except Exception:
+                plist_data = {}
+
+        def _item_matches(item: Any) -> bool:
+            if isinstance(item, str):
+                return item.strip() in match_tokens
+            if isinstance(item, dict):
+                for k in ("chatIdentifier", "guid", "pI", "identifier", "groupID"):
+                    v = item.get(k)
+                    if isinstance(v, str) and v.strip() in match_tokens:
+                        return True
+            return False
+
+        pd = plist_data.get("pD")
+        if not isinstance(pd, dict):
+            pd = {}
+            plist_data["pD"] = pd
+        pp = pd.get("pP")
+        if pinned:
+            if isinstance(pp, dict):
+                if not any((k in match_tokens or (isinstance(v, str) and v in match_tokens)) for k, v in pp.items()):
+                    pp[chat_guid] = chat_guid
+            else:
+                pp_list = list(pp) if isinstance(pp, list) else []
+                if not any(_item_matches(x) for x in pp_list):
+                    pp_list.append(chat_guid)
+                pd["pP"] = pp_list
+        else:
+            if isinstance(pp, dict):
+                pd["pP"] = {
+                    k: v
+                    for k, v in pp.items()
+                    if k not in match_tokens and not (isinstance(v, str) and v in match_tokens)
+                }
+            elif isinstance(pp, list):
+                pd["pP"] = [x for x in pp if not _item_matches(x)]
+            for top_key in ("pinnedChatIdentifiers", "pins", "pinnedChats"):
+                top_val = plist_data.get(top_key)
+                if isinstance(top_val, list):
+                    plist_data[top_key] = [x for x in top_val if not _item_matches(x)]
+
+        tmp_path = f"{self.pinning_plist_path}.{uuid.uuid4().hex}.tmp"
+        try:
+            plist_dir = os.path.dirname(self.pinning_plist_path)
+            if plist_dir:
+                os.makedirs(plist_dir, exist_ok=True)
+            with open(tmp_path, "wb") as f:
+                plistlib.dump(plist_data, f, fmt=plistlib.FMT_BINARY)
+            os.replace(tmp_path, self.pinning_plist_path)
+            return True
+        except OSError as exc:
+            if hasattr(self, "logger") and self.logger:
+                self.logger.warning("[pinning] failed to update %s: %s", self.pinning_plist_path, exc)
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+            return False
+
+    def set_chat_pinned(self, chat_guid: str, pinned: bool) -> Dict[str, Any]:
+        """Pin or unpin a conversation across local overrides, pinning.plist, IMCore helper, and Socket.IO."""
+        cg = (chat_guid or "").strip()
+        if not cg:
+            raise ValueError("chatGuid is required")
+        is_pinned = bool(pinned)
+
+        related_guids: set[str] = {cg}
+        chat_ident = cg.split(";")[-1].strip() if ";" in cg else cg
+        if os.path.exists(self.db_path):
+            try:
+                conn = self._open_chat_db()
+                try:
+                    expanded = self._expand_chat_guids_for_query(conn, cg)
+                    if expanded:
+                        related_guids.update(expanded)
+                    row = conn.execute(
+                        "SELECT chat_identifier FROM chat WHERE guid = ? LIMIT 1",
+                        (cg,),
+                    ).fetchone()
+                    if row and row["chat_identifier"]:
+                        chat_ident = str(row["chat_identifier"]).strip() or chat_ident
+                finally:
+                    conn.close()
+            except Exception:
+                pass
+
+        with self._chat_state_lock:
+            if is_pinned:
+                self.unpinned_chat_guids.difference_update(related_guids)
+                if chat_ident:
+                    self.unpinned_chat_guids.discard(chat_ident)
+                if cg not in self.pinned_chat_guids:
+                    self.pinned_chat_guids.append(cg)
+            else:
+                self.pinned_chat_guids = [
+                    x
+                    for x in self.pinned_chat_guids
+                    if x not in related_guids and x != chat_ident
+                ]
+                self.unpinned_chat_guids.update(related_guids)
+                if chat_ident and ";" not in cg:
+                    self.unpinned_chat_guids.add(chat_ident)
+
+        self._save_chat_state()
+        self._save_pin_overrides()
+        plist_updated = self._update_pinning_plist(cg, chat_ident, related_guids, is_pinned)
+
+        if sys.platform == "darwin" and not getattr(self, "_is_ephemeral", False):
+            self._send_helper_payload(
+                "pin-chat" if is_pinned else "unpin-chat",
+                {"chatGuid": cg, "pinned": is_pinned},
+            )
+
+        res = {
+            "guid": cg,
+            "chatGuid": cg,
+            "isPinned": is_pinned,
+            "pinned": is_pinned,
+            "plistUpdated": plist_updated,
+            "pinnedChatGuids": list(self.pinned_chat_guids),
+        }
+        self.broadcast_socketio("chat-updated", res)
+        return res
 
     @staticmethod
     def _chat_table_cols(conn: sqlite3.Connection) -> set[str]:
@@ -2818,6 +3350,7 @@ class BluePillEngine:
                         "guid": guid,
                         "style": int(r["style"] or 45),
                         "chatIdentifier": r["chat_identifier"] or "",
+                        "serviceName": str(r["service_name"] or ""),
                         "isArchived": bool(r["is_archived"]) or (guid in self.archived_chat_guids),
                         "isPinned": guid in pinned_guids,
                         "isMuted": guid in self.muted_chat_guids,
@@ -2889,6 +3422,13 @@ class BluePillEngine:
                 )
                 if newest_lm_item is not None:
                     best["lastMessage"] = newest_lm_item["lastMessage"]
+                if not str(best.get("serviceName") or "").strip():
+                    for c in ranked:
+                        sn = str(c.get("serviceName") or "").strip()
+                        if sn:
+                            best["serviceName"] = sn
+                            break
+                best["serviceName"] = str(best.get("serviceName") or "")
                 if not str(best.get("displayName") or "").strip():
                     for c in ranked:
                         dn = str(c.get("displayName") or "").strip()
@@ -5589,6 +6129,7 @@ class BluePillEngine:
             self.pinned_chat_guids = [
                 str(x).strip() for x in body["pinnedChatGuids"] if str(x).strip()
             ]
+            self.unpinned_chat_guids.difference_update(self.pinned_chat_guids)
         if isinstance(body.get("mutedChatGuids"), list):
             self.muted_chat_guids = {
                 str(x).strip() for x in body["mutedChatGuids"] if str(x).strip()
@@ -5606,10 +6147,12 @@ class BluePillEngine:
         if cg:
             if "pin" in body:
                 if bool(body["pin"]):
+                    self.unpinned_chat_guids.discard(cg)
                     if cg not in self.pinned_chat_guids:
                         self.pinned_chat_guids.append(cg)
                 else:
                     self.pinned_chat_guids = [x for x in self.pinned_chat_guids if x != cg]
+                    self.unpinned_chat_guids.add(cg)
             if "mute" in body:
                 if bool(body["mute"]):
                     self.muted_chat_guids.add(cg)
@@ -5623,6 +6166,7 @@ class BluePillEngine:
             if "displayName" in body and isinstance(body["displayName"], str):
                 self.chat_display_names_override[cg] = body["displayName"].strip()
         self._save_chat_state()
+        self._save_pin_overrides()
         state = self.get_chat_state()
         self.broadcast_socketio("chat-state-updated", state)
         return state
@@ -8019,6 +8563,12 @@ class BluePillEngine:
             return self.query_pinned_chats()
         if method in ("contact.list", "api.contact"):
             return self.query_contacts()
+        if method in ("contact.save", "api.contact.save", "contact.create", "api.contact.create"):
+            return self.save_contact(params)
+        if method in ("chat.pin", "api.chat.pin"):
+            return self.set_chat_pinned(str(params.get("chatGuid") or params.get("guid") or ""), bool(params.get("pinned", True)))
+        if method in ("chat.unpin", "api.chat.unpin"):
+            return self.set_chat_pinned(str(params.get("chatGuid") or params.get("guid") or ""), False)
         if method in ("chat.query", "api.chat.query"):
             return self.query_chats(
                 limit=int(params.get("limit", 250) or 250),
@@ -8871,7 +9421,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.12</span>
+      <span class="pill pill-blue">v1.2.13</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -10941,6 +11491,139 @@ def save_server_password(password: str, path: Optional[str] = None) -> str:
     return cfg_path
 
 
+def _load_server_config(path: Optional[str] = None) -> Dict[str, Any]:
+    cfg_path = os.path.expanduser(path or os.environ.get("BLUEPILL_SERVER_CONFIG") or "~/.config/bluepill/server.json")
+    if not os.path.exists(cfg_path):
+        return {}
+    try:
+        with open(cfg_path, "r", encoding="utf-8") as f:
+            loaded = json.load(f)
+        return loaded if isinstance(loaded, dict) else {}
+    except Exception:
+        return {}
+
+
+def _parse_valid_port(raw_val: Any) -> Optional[int]:
+    if raw_val is None or isinstance(raw_val, bool):
+        return None
+    s = str(raw_val).strip()
+    if not s:
+        return None
+    try:
+        port_num = int(s)
+    except (TypeError, ValueError):
+        return None
+    return port_num if 1 <= port_num <= 65535 else None
+
+
+def _resolve_listen_host_port(
+    cli_host: Optional[str] = None,
+    cli_port: Optional[int] = None,
+    *,
+    config_path: Optional[str] = None,
+    environ: Optional[Dict[str, str]] = None,
+) -> Tuple[str, int]:
+    """Resolve listen host/port: CLI flags > BLUEPILL_HOST/BLUEPILL_PORT > server.json > 127.0.0.1/1235."""
+    env = os.environ if environ is None else environ
+    cfg = _load_server_config(config_path)
+
+    host = ""
+    if cli_host is not None and str(cli_host).strip():
+        host = str(cli_host).strip()
+    elif str(env.get("BLUEPILL_HOST") or "").strip():
+        host = str(env.get("BLUEPILL_HOST") or "").strip()
+    elif str(cfg.get("host") or "").strip():
+        host = str(cfg.get("host") or "").strip()
+    else:
+        host = "127.0.0.1"
+
+    port = _parse_valid_port(cli_port)
+    if port is None:
+        port = _parse_valid_port(env.get("BLUEPILL_PORT"))
+    if port is None:
+        port = _parse_valid_port(cfg.get("port"))
+    if port is None:
+        port = 1235
+    return host, port
+
+
+def _check_fda_and_prompt(
+    open_settings: bool = False,
+    *,
+    db_path: Optional[str] = None,
+    platform_name: Optional[str] = None,
+    logger: Optional[logging.Logger] = None,
+    runner: Optional[Any] = None,
+    announce: bool = True,
+) -> Dict[str, Any]:
+    """Check ~/Library/Messages/chat.db readability on macOS and optionally open Full Disk Access settings."""
+    target_db = os.path.expanduser(db_path or "~/Library/Messages/chat.db")
+    plat = platform_name if platform_name is not None else sys.platform
+    if plat != "darwin":
+        return {
+            "platform": plat,
+            "checked": False,
+            "readable": True,
+            "openedSettings": False,
+            "dbPath": target_db,
+            "message": "",
+        }
+
+    readable = False
+    reason = ""
+    try:
+        with open(target_db, "rb") as f:
+            f.read(16)
+        readable = True
+    except PermissionError as exc:
+        reason = str(exc) or "Operation not permitted"
+    except OSError as exc:
+        reason = str(exc) or exc.__class__.__name__
+
+    if readable:
+        return {
+            "platform": plat,
+            "checked": True,
+            "readable": True,
+            "openedSettings": False,
+            "dbPath": target_db,
+            "message": "",
+        }
+
+    msg = (
+        f"Full Disk Access (FDA) required: cannot read {target_db} ({reason}). "
+        "Open System Settings -> Privacy & Security -> Full Disk Access and enable access "
+        "for Terminal / Python / bluepill-server, then restart bluepill-server."
+    )
+    if logger is not None:
+        logger.warning("[fda] %s", msg)
+    if announce:
+        print(f"[!] {msg}", file=sys.stderr)
+
+    opened_settings = False
+    if open_settings:
+        run_fn = runner or subprocess.run
+        try:
+            run_fn(
+                ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"],
+                check=False,
+                timeout=5,
+            )
+            opened_settings = True
+        except Exception as exc:
+            if logger is not None:
+                logger.warning("[fda] Failed to open System Settings Full Disk Access pane: %s", exc)
+
+    return {
+        "platform": plat,
+        "checked": True,
+        "readable": False,
+        "openedSettings": opened_settings,
+        "dbPath": target_db,
+        "message": msg,
+    }
+
+
 def encode_ws_frame(payload: bytes, opcode: int = WS_OPCODE_TEXT, mask: bool = True) -> bytes:
     """Encode a single RFC 6455 WebSocket frame (masked when client->server)."""
     first_byte = 0x80 | (opcode & 0x0F)
@@ -12066,7 +12749,35 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         raw_body = self._read_json_body()
         body = raw_body if isinstance(raw_body, dict) else {}
 
-        if path in ("/api/v1/contact/query", "/api/v1/contact"):
+        if path == "/api/v1/contact/query":
+            self._send_json(200, self.engine.query_contacts())
+            return
+
+        if path in ("/api/v1/contact", "/api/v1/contact/create"):
+            write_keys = {
+                "firstName",
+                "lastName",
+                "phone",
+                "email",
+                "phoneNumbers",
+                "emails",
+                "displayName",
+            }
+            is_write = (path == "/api/v1/contact/create") or (
+                isinstance(raw_body, list)
+                and any(isinstance(item, dict) and (set(item.keys()) & write_keys) for item in raw_body)
+            ) or (
+                isinstance(raw_body, dict)
+                and bool(set(raw_body.keys()) & write_keys)
+            )
+            if is_write:
+                try:
+                    self._send_json(200, self.engine.save_contact(raw_body))
+                except ValueError as exc:
+                    self._send_json(400, None, str(exc))
+                except RuntimeError as exc:
+                    self._send_json(500, None, str(exc))
+                return
             self._send_json(200, self.engine.query_contacts())
             return
 
@@ -12140,6 +12851,30 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             chat_guid = urllib.parse.unquote(m_read.group(1))
             is_read = m_read.group(2) == "read"
             self._send_json(200, self.engine.mark_chat_read(chat_guid, is_read))
+            return
+
+        if path == "/api/v1/chat/pin":
+            chat_guid = str(body.get("chatGuid") or body.get("guid") or "").strip()
+            if not chat_guid:
+                self._send_json(400, None, "Missing chatGuid")
+                return
+            if "pinned" in body:
+                pinned = bool(body.get("pinned"))
+            elif "pin" in body:
+                pinned = bool(body.get("pin"))
+            else:
+                pinned = True
+            self._send_json(200, self.engine.set_chat_pinned(chat_guid, pinned))
+            return
+
+        m_pin = re.match(r"^/api/v1/chat/([^/]+)/(pin|unpin)$", path)
+        if m_pin:
+            chat_guid = urllib.parse.unquote(m_pin.group(1))
+            pinned = m_pin.group(2) == "pin"
+            try:
+                self._send_json(200, self.engine.set_chat_pinned(chat_guid, pinned))
+            except ValueError as exc:
+                self._send_json(400, None, str(exc))
             return
 
         if path == "/api/v1/message/search":
@@ -15803,6 +16538,217 @@ const collectText = (el) => [el.textContent || '', ...(el.children || []).map(co
     finally:
         shutil.rmtree(upd_tmp, ignore_errors=True)
 
+    # --- Selftest: #31 server.json host/port precedence (CLI > ENV > server.json > fallback) ---
+    with tempfile.TemporaryDirectory() as cfg_dir:
+        cfg_file = os.path.join(cfg_dir, "server.json")
+        with open(cfg_file, "w", encoding="utf-8") as cf:
+            json.dump({"host": "10.0.0.5", "port": 2235, "password": "p"}, cf)
+        assert _resolve_listen_host_port(None, None, config_path=cfg_file, environ={}) == ("10.0.0.5", 2235)
+        assert _resolve_listen_host_port(
+            None, None, config_path=cfg_file, environ={"BLUEPILL_HOST": "10.0.0.9", "BLUEPILL_PORT": "3235"}
+        ) == ("10.0.0.9", 3235)
+        assert _resolve_listen_host_port(
+            "0.0.0.0", 4235, config_path=cfg_file, environ={"BLUEPILL_HOST": "10.0.0.9", "BLUEPILL_PORT": "3235"}
+        ) == ("0.0.0.0", 4235)
+        assert _resolve_listen_host_port(
+            None, None, config_path=os.path.join(cfg_dir, "missing.json"), environ={}
+        ) == ("127.0.0.1", 1235)
+        with open(cfg_file, "w", encoding="utf-8") as cf:
+            json.dump({"host": "10.0.0.5", "port": True}, cf)
+        assert _resolve_listen_host_port(None, None, config_path=cfg_file, environ={}) == ("10.0.0.5", 1235)
+
+    # --- Selftest: #34 _check_fda_and_prompt ---
+    with tempfile.TemporaryDirectory() as fda_dir:
+        readable_db = os.path.join(fda_dir, "chat.db")
+        with open(readable_db, "wb") as rf:
+            rf.write(b"SQLite format 3\x00")
+        unreadable_db = os.path.join(fda_dir, "missing_chat.db")
+        calls_fda: List[Tuple[Any, Dict[str, Any]]] = []
+
+        def _fake_open_run(cmd: Any, **kwargs: Any) -> None:
+            calls_fda.append((cmd, kwargs))
+
+        res_linux = _check_fda_and_prompt(
+            open_settings=True, db_path=unreadable_db, platform_name="linux", runner=_fake_open_run, announce=False
+        )
+        assert res_linux["checked"] is False and res_linux["openedSettings"] is False and not calls_fda, res_linux
+
+        res_ok = _check_fda_and_prompt(
+            open_settings=True, db_path=readable_db, platform_name="darwin", runner=_fake_open_run, announce=False
+        )
+        assert res_ok["checked"] is True and res_ok["readable"] is True and not calls_fda, res_ok
+
+        res_headless = _check_fda_and_prompt(
+            open_settings=False, db_path=unreadable_db, platform_name="darwin", runner=_fake_open_run, announce=False
+        )
+        assert res_headless["readable"] is False and res_headless["openedSettings"] is False and not calls_fda, res_headless
+        assert "Full Disk Access" in res_headless["message"], res_headless
+
+        res_prompt = _check_fda_and_prompt(
+            open_settings=True, db_path=unreadable_db, platform_name="darwin", runner=_fake_open_run, announce=False
+        )
+        assert res_prompt["readable"] is False and res_prompt["openedSettings"] is True and len(calls_fda) == 1, res_prompt
+        assert calls_fda[0][0] == ["open", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"], calls_fda[0]
+        assert calls_fda[0][1] == {"check": False, "timeout": 5}, calls_fda[0]
+
+    # --- Selftest: #33 serviceName, #46 POST /api/v1/contact, #48 pin/unpin ---
+    with tempfile.TemporaryDirectory() as feat_dir:
+        feat_db = os.path.join(feat_dir, "chat.db")
+        feat_plist = os.path.join(feat_dir, "com.apple.messages.pinning.plist")
+        fconn = sqlite3.connect(feat_db)
+        fconn.executescript(
+            """
+            CREATE TABLE chat (ROWID INTEGER PRIMARY KEY, guid TEXT, chat_identifier TEXT, service_name TEXT, display_name TEXT, style INTEGER, is_archived INTEGER DEFAULT 0, group_id TEXT, original_group_id TEXT, last_read_message_timestamp INTEGER DEFAULT 0);
+            CREATE TABLE handle (ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT, country TEXT);
+            CREATE TABLE chat_handle_join (chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE message (ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB, date INTEGER, is_from_me INTEGER, cache_has_attachments INTEGER DEFAULT 0, associated_message_type INTEGER DEFAULT 0, item_type INTEGER DEFAULT 0);
+            CREATE TABLE chat_message_join (chat_id INTEGER, message_id INTEGER, message_date INTEGER);
+            INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, group_id, original_group_id)
+                VALUES (1, 'iMessage;-;+14155550199', '+14155550199', 'iMessage', '', 45, '', '');
+            INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, group_id, original_group_id)
+                VALUES (2, 'SMS;-;+14155550188', '+14155550188', 'SMS', '', 45, '', '');
+            INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, group_id, original_group_id)
+                VALUES (3, 'SMS;+;grp_old', 'grp_old', 'SMS', 'Team Unified', 43, 'g1', 'OG_UNI_1');
+            INSERT INTO chat (ROWID, guid, chat_identifier, service_name, display_name, style, group_id, original_group_id)
+                VALUES (4, 'RCS;+;grp_new', 'grp_new', 'RCS', 'Team Unified', 43, 'g2', 'OG_UNI_1');
+            INSERT INTO message (ROWID, guid, text, date, is_from_me) VALUES (10, 'm-1', 'hi imsg', 750000000000000000, 0);
+            INSERT INTO message (ROWID, guid, text, date, is_from_me) VALUES (11, 'm-2', 'hi sms', 750000001000000000, 0);
+            INSERT INTO message (ROWID, guid, text, date, is_from_me) VALUES (12, 'm-3', 'hi rcs', 750000002000000000, 0);
+            INSERT INTO chat_message_join VALUES (1, 10, 750000000000000000);
+            INSERT INTO chat_message_join VALUES (2, 11, 750000001000000000);
+            INSERT INTO chat_message_join VALUES (4, 12, 750000002000000000);
+            """
+        )
+        fconn.commit()
+        fconn.close()
+
+        feat_eng = BluePillEngine(
+            db_path=feat_db,
+            addressbook_glob=os.path.join(feat_dir, "none_*.abcddb"),
+            pinning_plist_path=feat_plist,
+            bb_config_db_path=os.path.join(feat_dir, "none_bb.db"),
+            password="feat-secret",
+            enable_background_daemons=False,
+        )
+        feat_eng._is_ephemeral = True
+        feat_eng._config_dir = feat_dir
+        feat_eng.chat_state_path = os.path.join(feat_dir, "chat_state.json")
+        feat_eng.pin_overrides_path = os.path.join(feat_dir, "pin_overrides.json")
+        feat_eng.local_contacts_path = os.path.join(feat_dir, "contacts.json")
+
+        # #33 serviceName in query_chats (single + unified)
+        fchats = feat_eng.query_chats(limit=20)
+        by_guid = {c["guid"]: c for c in fchats}
+        assert by_guid["iMessage;-;+14155550199"]["serviceName"] == "iMessage", by_guid
+        assert by_guid["SMS;-;+14155550188"]["serviceName"] == "SMS", by_guid
+        assert by_guid["RCS;+;grp_new"]["serviceName"] == "RCS", by_guid
+
+        feat_events: List[Tuple[str, Any]] = []
+        feat_eng.broadcast_socketio = lambda ev, payload: feat_events.append((ev, payload))
+        BluePillHTTPHandler.engine = feat_eng
+        feat_srv = FastThreadingHTTPServer(("127.0.0.1", 0), BluePillHTTPHandler)
+        feat_port = feat_srv.server_address[1]
+        threading.Thread(target=feat_srv.serve_forever, daemon=True).start()
+        try:
+            def _post_json(ep: str, payload: Any) -> Tuple[int, Dict[str, Any]]:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{feat_port}{ep}?password=feat-secret",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    with urllib.request.urlopen(req, timeout=5.0) as resp:
+                        return resp.status, json.loads(resp.read().decode("utf-8"))
+                except urllib.error.HTTPError as err:
+                    return err.code, json.loads(err.read().decode("utf-8"))
+
+            def _get_json(ep: str) -> Tuple[int, Dict[str, Any]]:
+                req = urllib.request.Request(
+                    f"http://127.0.0.1:{feat_port}{ep}?password=feat-secret",
+                    method="GET",
+                )
+                with urllib.request.urlopen(req, timeout=5.0) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+
+            # #46 backward-compatible contact queries vs writes
+            st_q1, body_q1 = _post_json("/api/v1/contact", {})
+            assert st_q1 == 200 and isinstance(body_q1.get("data"), list) and len(body_q1["data"]) == 0, body_q1
+            st_q2, body_q2 = _post_json("/api/v1/contact", {"addresses": ["+14155550199"], "limit": 10})
+            assert st_q2 == 200 and isinstance(body_q2.get("data"), list), body_q2
+
+            # #46 src/backend.cpp QJsonArray payload + dict payload + /contact/create + injection guard
+            st_c1, body_c1 = _post_json(
+                "/api/v1/contact",
+                [{
+                    "firstName": "Ada",
+                    "lastName": "Lovelace",
+                    "displayName": "Ada Lovelace",
+                    "phoneNumbers": ["+14155550199"],
+                    "emails": ["ada@example.com"],
+                }],
+            )
+            assert st_c1 == 200 and body_c1["data"]["firstName"] == "Ada" and body_c1["data"]["lastName"] == "Lovelace", body_c1
+            st_c2, body_c2 = _post_json(
+                "/api/v1/contact/create",
+                {"firstName": "Grace", "lastName": "Hopper", "phone": "+14155550188", "email": "grace@example.com"},
+            )
+            assert st_c2 == 200 and body_c2["data"]["displayName"] == "Grace Hopper", body_c2
+            st_c3, body_c3 = _post_json(
+                "/api/v1/contact",
+                {"firstName": 'Evil"; do shell script "id" --', "phone": "+14155550177"},
+            )
+            assert st_c3 == 200 and "on run argv" in BluePillEngine._SAVE_CONTACT_APPLESCRIPT, body_c3
+            st_bad, _ = _post_json("/api/v1/contact/create", {})
+            assert st_bad == 400, f"Expected 400 on empty contact create, got {st_bad}"
+            st_list, body_list = _get_json("/api/v1/contact")
+            assert st_list == 200 and len(body_list["data"]) == 3, body_list
+
+            # #48 pin / unpin endpoints, plist persistence, query_chats isPinned, Socket.IO chat-updated
+            enc_guid = urllib.parse.quote("iMessage;-;+14155550199", safe="")
+            st_p1, body_p1 = _post_json(f"/api/v1/chat/{enc_guid}/pin", {})
+            assert st_p1 == 200 and body_p1["data"]["isPinned"] is True and body_p1["data"]["plistUpdated"] is True, body_p1
+            with open(feat_plist, "rb") as pf:
+                pl_data = plistlib.load(pf)
+            assert "iMessage;-;+14155550199" in (pl_data.get("pD", {}).get("pP") or []), pl_data
+            assert any(p["guid"] == "iMessage;-;+14155550199" for p in feat_eng.query_pinned_chats())
+            chats_pinned = {c["guid"]: c for c in feat_eng.query_chats(limit=20)}
+            assert chats_pinned["iMessage;-;+14155550199"]["isPinned"] is True, chats_pinned
+            assert any(ev == "chat-updated" and pl.get("isPinned") is True for ev, pl in feat_events), feat_events
+
+            st_u1, body_u1 = _post_json(f"/api/v1/chat/{enc_guid}/unpin", {})
+            assert st_u1 == 200 and body_u1["data"]["isPinned"] is False, body_u1
+            with open(feat_plist, "rb") as pf:
+                pl_data_after = plistlib.load(pf)
+            assert "iMessage;-;+14155550199" not in (pl_data_after.get("pD", {}).get("pP") or []), pl_data_after
+            assert not any(p["guid"] == "iMessage;-;+14155550199" for p in feat_eng.query_pinned_chats())
+            chats_unpinned = {c["guid"]: c for c in feat_eng.query_chats(limit=20)}
+            assert chats_unpinned["iMessage;-;+14155550199"]["isPinned"] is False, chats_unpinned
+            assert any(ev == "chat-updated" and pl.get("isPinned") is False for ev, pl in feat_events), feat_events
+
+            st_p2, body_p2 = _post_json("/api/v1/chat/pin", {"chatGuid": "SMS;-;+14155550188", "pinned": True})
+            assert st_p2 == 200 and body_p2["data"]["isPinned"] is True, body_p2
+
+            # Verify pin state persists across engine reload
+            feat_eng2 = BluePillEngine(
+                db_path=feat_db,
+                pinning_plist_path=feat_plist,
+                password="feat-secret",
+                enable_background_daemons=False,
+            )
+            feat_eng2._config_dir = feat_dir
+            feat_eng2.chat_state_path = os.path.join(feat_dir, "chat_state.json")
+            feat_eng2.pin_overrides_path = os.path.join(feat_dir, "pin_overrides.json")
+            feat_eng2.pinned_chat_guids = []
+            feat_eng2.unpinned_chat_guids = set()
+            feat_eng2._load_chat_state()
+            feat_eng2._load_pin_overrides()
+            reloaded_pins = {p["guid"] for p in feat_eng2.query_pinned_chats()}
+            assert "SMS;-;+14155550188" in reloaded_pins and "iMessage;-;+14155550199" not in reloaded_pins, reloaded_pins
+        finally:
+            feat_srv.shutdown()
+            feat_srv.server_close()
+
     info = engine.get_server_info()
     print(
         json.dumps(
@@ -16225,6 +17171,43 @@ def run_update_apply_cli(args: argparse.Namespace, engine: BluePillEngine) -> in
     return 0
 
 
+def run_init_cli(args: argparse.Namespace, engine: BluePillEngine) -> int:
+    cfg_path = os.path.expanduser(os.environ.get("BLUEPILL_SERVER_CONFIG") or "~/.config/bluepill/server.json")
+    cfg = _load_server_config(cfg_path)
+    created_password = False
+    if not str(cfg.get("password") or "").strip():
+        pw = str(getattr(args, "password", "") or "").strip() or secrets.token_urlsafe(24)
+        save_server_password(pw, path=cfg_path)
+        engine.password = pw
+        created_password = True
+    should_open_fda = bool(
+        getattr(args, "open_fda", False) or (sys.stdin.isatty() and not getattr(args, "json", False))
+    )
+    fda = _check_fda_and_prompt(
+        open_settings=should_open_fda,
+        db_path=engine.db_path,
+        logger=engine.logger,
+        announce=not getattr(args, "json", False),
+    )
+    preflight = engine.run_preflight(fix=(sys.platform == "darwin" and not getattr(args, "no_fix", False)))
+    payload = {
+        "status": "ok" if fda.get("readable", True) else "fda_required",
+        "config_path": cfg_path,
+        "password_initialized": created_password,
+        "fda": fda,
+        "preflight": preflight,
+    }
+    if getattr(args, "json", False):
+        print(json.dumps(payload, indent=2))
+    else:
+        print(f"BluePill Server Init (v{VERSION})")
+        print(f"  Config file: {cfg_path} ({'initialized' if created_password else 'existing'})")
+        print(f"  chat.db FDA: {'OK' if fda.get('readable', True) else 'REQUIRED'} ({engine.db_path})")
+        if not fda.get("readable", True):
+            print("  Action: Grant Full Disk Access in System Settings -> Privacy & Security -> Full Disk Access.")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(
         prog="bluepill-server",
@@ -16234,12 +17217,13 @@ def main() -> int:
         "command",
         nargs="?",
         default="serve",
-        help="serve | login | relay-setup | relay-status | update-status | update | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
+        help="serve | init | login | relay-setup | relay-status | update-status | update | status | doctor | preflight | logs | stdio | selftest | sync-icloud-photos",
     )
-    parser.add_argument("--host", default=os.environ.get("BLUEPILL_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=int(os.environ.get("BLUEPILL_PORT", "1235")))
+    parser.add_argument("--host", default=None, help="Listen host (CLI > BLUEPILL_HOST > server.json > 127.0.0.1)")
+    parser.add_argument("--port", type=int, default=None, help="Listen port (CLI > BLUEPILL_PORT > server.json > 1235)")
     parser.add_argument("--password", default=os.environ.get("BLUEPILL_PASSWORD", ""))
     parser.add_argument("--db-path", default=os.environ.get("BLUEPILL_DB_PATH", ""))
+    parser.add_argument("--open-fda", action="store_true", help="Open macOS System Settings Full Disk Access pane if chat.db is unreadable")
     parser.add_argument("--tls-cert", default=os.environ.get("BLUEPILL_TLS_CERT", ""), help="Optional TLS certificate path for HTTPS listener")
     parser.add_argument("--tls-key", default=os.environ.get("BLUEPILL_TLS_KEY", ""), help="Optional TLS private key path for HTTPS listener")
     parser.add_argument("--token", default="", help="Cloud Relay tunnel token for 'relay-setup'")
@@ -16271,6 +17255,7 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Format status/doctor/preflight/logs/relay output as JSON")
     parser.add_argument("--version", action="store_true", help="Print version and exit")
     args = parser.parse_args()
+    args.host, args.port = _resolve_listen_host_port(args.host, args.port)
 
     if args.version or args.command == "version":
         print(f"bluepill-server {VERSION}")
@@ -16283,6 +17268,7 @@ def main() -> int:
         or args.sync_icloud_photos
         or args.command
         in (
+            "init",
             "selftest",
             "status",
             "doctor",
@@ -16357,6 +17343,9 @@ def main() -> int:
     if args.selftest or args.command == "selftest":
         return run_selftest(engine)
 
+    if args.command == "init":
+        return run_init_cli(args, engine)
+
     if args.command in ("login", "relay-setup"):
         return run_relay_setup_cli(args, engine)
 
@@ -16380,6 +17369,13 @@ def main() -> int:
 
     if args.stdio or args.command == "stdio":
         return run_stdio_loop(engine)
+
+    _check_fda_and_prompt(
+        open_settings=bool(getattr(args, "open_fda", False)),
+        db_path=engine.db_path,
+        logger=engine.logger,
+        announce=False,
+    )
 
     BluePillHTTPHandler.engine = engine
     httpd = FastThreadingHTTPServer((args.host, args.port), BluePillHTTPHandler)

@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "1.2.12"
+  #define AppVersion "1.2.13"
 #endif
 
 #ifndef DistDir

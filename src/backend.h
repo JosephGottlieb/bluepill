@@ -3,6 +3,7 @@
 #include <memory>
 #pragma once
 
+#include <QAbstractListModel>
 #include <QFileSystemWatcher>
 #include <QHash>
 #include <QHostAddress>
@@ -108,6 +109,124 @@ struct ClientUpdateStrategy {
     QString aurPackage;
 };
 
+class VariantMapListModel : public QAbstractListModel {
+    Q_OBJECT
+    Q_PROPERTY(int count READ rowCount NOTIFY countChanged)
+public:
+    enum BaseRoles {
+        ModelDataRole = Qt::UserRole + 1
+    };
+
+    explicit VariantMapListModel(QObject *parent = nullptr);
+
+    int rowCount(const QModelIndex &parent = QModelIndex()) const override;
+    QVariant data(const QModelIndex &index, int role = Qt::DisplayRole) const override;
+    Q_INVOKABLE QVariantMap get(int row) const;
+    void syncFromList(const QVariantList &next);
+
+signals:
+    void countChanged();
+
+protected:
+    virtual QString itemKey(const QVariantMap &item) const = 0;
+
+private:
+    QList<QVariantMap> m_items;
+    QStringList m_keys;
+};
+
+class ChatListModel : public VariantMapListModel {
+    Q_OBJECT
+public:
+    enum Roles {
+        GuidRole = ModelDataRole + 1,
+        TitleRole,
+        SubtitleRole,
+        ServiceRole,
+        AvatarUrlRole,
+        InitialsRole,
+        AvatarColorRole,
+        LastMessagePreviewRole,
+        RelativeTimeRole,
+        UnreadCountRole,
+        AddressRole,
+        IsGroupRole,
+        MutedRole,
+        IsMutedRole,
+        PinnedRole,
+        IsPinnedRole
+    };
+
+    explicit ChatListModel(QObject *parent = nullptr);
+    QHash<int, QByteArray> roleNames() const override;
+
+protected:
+    QString itemKey(const QVariantMap &item) const override;
+};
+
+class MessageListModel : public VariantMapListModel {
+    Q_OBJECT
+public:
+    enum Roles {
+        GuidRole = ModelDataRole + 1,
+        TempGuidRole,
+        ChatGuidRole,
+        TextRole,
+        FormattedTextRole,
+        IsFromMeRole,
+        FromMeRole,
+        IsIMessageRole,
+        IsGreenBubbleRole,
+        ServiceRole,
+        SenderNameRole,
+        SenderColorRole,
+        DateCreatedRole,
+        TimeTextRole,
+        ShowDateHeaderRole,
+        DateHeaderTextRole,
+        ReceiptTextRole,
+        MetaBadgeTextRole,
+        IsFailedRole,
+        IsEditedRole,
+        ErrorCodeRole,
+        ReactionsRole,
+        AttachmentsRole,
+        ImageAttachmentsRole,
+        FileAttachmentsRole,
+        HasImageAttachmentRole,
+        HasFileAttachmentRole,
+        ImageAttachmentCountRole,
+        AttachmentGuidRole,
+        AttachmentNameRole,
+        AttachmentLocalUrlRole,
+        IsAudioRole,
+        IsImageRole,
+        DurationSecondsRole,
+        WaveformBarsRole,
+        MimeTypeRole,
+        LocalUrlRole,
+        SourceUrlRole,
+        HasLinkPreviewRole,
+        LinkPreviewRole,
+        LinkUrlRole,
+        ReplyToGuidRole,
+        ReplyToSenderRole,
+        ReplyToTextRole,
+        ReplyCountRole,
+        ExpressiveEffectRole,
+        ExpressiveSendStyleIdRole,
+        SendEffectLabelRole,
+        VerificationCodeRole,
+        OtpCodeRole
+    };
+
+    explicit MessageListModel(QObject *parent = nullptr);
+    QHash<int, QByteArray> roleNames() const override;
+
+protected:
+    QString itemKey(const QVariantMap &item) const override;
+};
+
 class Backend : public QObject {
     Q_OBJECT
     Q_PROPERTY(bool connected READ connected NOTIFY statusChanged)
@@ -170,6 +289,8 @@ class Backend : public QObject {
     Q_PROPERTY(QVariantList chats READ chats NOTIFY chatsChanged)
     Q_PROPERTY(QVariantList pinnedChats READ pinnedChats NOTIFY chatsChanged)
     Q_PROPERTY(QVariantList messages READ messages NOTIFY messagesChanged)
+    Q_PROPERTY(QAbstractListModel *chatListModel READ chatListModel CONSTANT)
+    Q_PROPERTY(QAbstractListModel *messageListModel READ messageListModel CONSTANT)
     Q_PROPERTY(int totalUnread READ totalUnread NOTIFY chatsChanged)
     // Number of conversations, ignoring the filter and search (shown as "All (N)")
     Q_PROPERTY(int totalChatCount READ totalChatCount NOTIFY chatsChanged)
@@ -261,6 +382,8 @@ public:
     QVariantList chats() const;
     QVariantList pinnedChats() const;
     QVariantList messages() const { return m_messages; }
+    QAbstractListModel *chatListModel() { return &m_chatListModel; }
+    QAbstractListModel *messageListModel() { return &m_messageListModel; }
     int totalUnread() const;
     int totalChatCount() const { return static_cast<int>(m_chats.size()); }
     bool windowActive() const { return m_windowActive; }
@@ -1094,6 +1217,8 @@ private:
 
     QList<ChatEntry> m_chats;
     QVariantList m_messages;
+    ChatListModel m_chatListModel;
+    MessageListModel m_messageListModel;
     QHash<QString, QVariantList> m_demoChatMessages;
     qint64 m_lastMessageTimestamp = 0;
     qint64 m_lastNotifiedTimestamp = 0;

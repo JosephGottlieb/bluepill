@@ -11724,7 +11724,7 @@ private slots:
         });
 
         const QString prevAppVer = QCoreApplication::applicationVersion();
-        QCoreApplication::setApplicationVersion(QStringLiteral("1.2.12"));
+        QCoreApplication::setApplicationVersion(QStringLiteral("1.2.13"));
         auto restoreVer = qScopeGuard([&]() { QCoreApplication::setApplicationVersion(prevAppVer); });
 
         Backend b(false);
@@ -11828,7 +11828,7 @@ private slots:
 
     void testTrustedUpdateUrlAllowlistAndDownloadVerification() {
         // 1. Allowlist checks
-        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v1.2.12/a.deb")), false));
+        QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://github.com/nertwork/bluepill/releases/download/v1.2.13/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://objects.githubusercontent.com/github-production-release-asset/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://release-assets.githubusercontent.com/a.deb")), false));
         QVERIFY(Backend::isTrustedUpdateUrl(QUrl(QStringLiteral("https://bluepill.nertwork.com/dl/a.deb")), false));
@@ -11873,7 +11873,7 @@ private slots:
                     } else if (firstLine.contains("/SHA256SUMS.txt")) {
                         const QByteArray sumsBody = omitEntry
                             ? QByteArray("# empty\n")
-                            : QStringLiteral("%1  bluepill_1.2.12_amd64.deb\n").arg(servedSha).toUtf8();
+                            : QStringLiteral("%1  bluepill_1.2.13_amd64.deb\n").arg(servedSha).toUtf8();
                         const QByteArray resp =
                             "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " +
                             QByteArray::number(sumsBody.size()) + "\r\nConnection: close\r\n\r\n" + sumsBody;
@@ -11897,13 +11897,13 @@ private slots:
         b.setAllowLocalhostCloudForTest(true);
         b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockPkgSrv.serverPort()), QString(), QStringLiteral("pw"));
 
-        const QString pkgUrl = QStringLiteral("http://127.0.0.1:%1/bluepill_1.2.12_amd64.deb").arg(mockPkgSrv.serverPort());
+        const QString pkgUrl = QStringLiteral("http://127.0.0.1:%1/bluepill_1.2.13_amd64.deb").arg(mockPkgSrv.serverPort());
         const QString chkUrl = QStringLiteral("http://127.0.0.1:%1/SHA256SUMS.txt").arg(mockPkgSrv.serverPort());
 
         // 2a. Localhost update rejected when allowLocalhostUpdatesForTest == false
         bool callbackCalled = false;
         b.downloadVerifiedClientPackageForTest(
-            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.13_amd64.deb"), true,
             [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
         QCOMPARE(callbackCalled, false);
         QCOMPARE(b.updateApplying(), false);
@@ -11913,7 +11913,7 @@ private slots:
 
         // 2b. Missing checksum URL with requireChecksum == true
         b.downloadVerifiedClientPackageForTest(
-            pkgUrl, QString(), true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            pkgUrl, QString(), true, QStringLiteral("bluepill_1.2.13_amd64.deb"), true,
             [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
         QCOMPARE(callbackCalled, false);
         QCOMPARE(b.updateApplying(), false);
@@ -11922,7 +11922,7 @@ private slots:
         // 2c. Missing entry in SHA256SUMS.txt
         omitEntry = true;
         b.downloadVerifiedClientPackageForTest(
-            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.13_amd64.deb"), true,
             [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
         QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("missing"), Qt::CaseInsensitive), 3000);
         QCOMPARE(callbackCalled, false);
@@ -11932,7 +11932,7 @@ private slots:
         omitEntry = false;
         servedSha = badSha;
         b.downloadVerifiedClientPackageForTest(
-            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.13_amd64.deb"), true,
             [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
         QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("SHA256 verification failed")), 3000);
         QCOMPARE(callbackCalled, false);
@@ -11942,7 +11942,7 @@ private slots:
         servedSha = goodSha;
         b.downloadVerifiedClientPackageForTest(
             QStringLiteral("http://127.0.0.1:%1/redirect-evil").arg(mockPkgSrv.serverPort()),
-            chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            chkUrl, true, QStringLiteral("bluepill_1.2.13_amd64.deb"), true,
             [&](const QString &, const std::shared_ptr<QTemporaryDir> &) { callbackCalled = true; });
         QTRY_VERIFY_WITH_TIMEOUT(b.updateStatusText().contains(QStringLiteral("untrusted"), Qt::CaseInsensitive), 3000);
         QCOMPARE(callbackCalled, false);
@@ -11952,7 +11952,7 @@ private slots:
         QString capturedPath;
         QString capturedDir;
         b.downloadVerifiedClientPackageForTest(
-            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.12_amd64.deb"), true,
+            pkgUrl, chkUrl, true, QStringLiteral("bluepill_1.2.13_amd64.deb"), true,
             [&](const QString &localPath, const std::shared_ptr<QTemporaryDir> &pkgDir) {
                 callbackCalled = true;
                 capturedPath = localPath;
@@ -12045,7 +12045,7 @@ private slots:
                             {QStringLiteral("status"), 200},
                             {QStringLiteral("data"), QJsonObject{
                                 {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
-                                {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                {QStringLiteral("latest_version"), QStringLiteral("1.2.13")},
                                 {QStringLiteral("update_available"), true},
                                 {QStringLiteral("method"), QStringLiteral("homebrew")},
                                 {QStringLiteral("applying"), false}
@@ -12057,7 +12057,7 @@ private slots:
                             {QStringLiteral("status"), 200},
                             {QStringLiteral("data"), QJsonObject{
                                 {QStringLiteral("started"), true},
-                                {QStringLiteral("target_version"), QStringLiteral("1.2.12")}
+                                {QStringLiteral("target_version"), QStringLiteral("1.2.13")}
                             }}
                         }).toJson(QJsonDocument::Compact);
                     } else if (firstLine.contains("/api/v1/server/update/status")) {
@@ -12067,7 +12067,7 @@ private slots:
                                 {QStringLiteral("status"), 200},
                                 {QStringLiteral("data"), QJsonObject{
                                     {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
-                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.13")},
                                     {QStringLiteral("update_available"), true},
                                     {QStringLiteral("method"), QStringLiteral("homebrew")},
                                     {QStringLiteral("applying"), false},
@@ -12079,7 +12079,7 @@ private slots:
                                 {QStringLiteral("status"), 200},
                                 {QStringLiteral("data"), QJsonObject{
                                     {QStringLiteral("current_version"), QStringLiteral("1.2.10")},
-                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.13")},
                                     {QStringLiteral("update_available"), true},
                                     {QStringLiteral("method"), QStringLiteral("homebrew")},
                                     {QStringLiteral("applying"), true},
@@ -12093,8 +12093,8 @@ private slots:
                             jsonBody = QJsonDocument(QJsonObject{
                                 {QStringLiteral("status"), 200},
                                 {QStringLiteral("data"), QJsonObject{
-                                    {QStringLiteral("current_version"), QStringLiteral("1.2.12")},
-                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.12")},
+                                    {QStringLiteral("current_version"), QStringLiteral("1.2.13")},
+                                    {QStringLiteral("latest_version"), QStringLiteral("1.2.13")},
                                     {QStringLiteral("update_available"), false},
                                     {QStringLiteral("method"), QStringLiteral("homebrew")},
                                     {QStringLiteral("applying"), false},
@@ -12135,7 +12135,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(b.updateApplying(), false, 3000);
         QVERIFY(statusStep >= 3);
         QCOMPARE(b.serverUpdateAvailable(), false);
-        QCOMPARE(b.serverCurrentVersion(), QStringLiteral("1.2.12"));
+        QCOMPARE(b.serverCurrentVersion(), QStringLiteral("1.2.13"));
         QVERIFY(toastSpy.count() >= 1);
 
         // Scenario B: Failure surfaces real error and keeps serverUpdateAvailable == true
@@ -12147,6 +12147,354 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(b.updateApplying(), false, 3000);
         QCOMPARE(b.serverUpdateAvailable(), true);
         QVERIFY(b.updateStatusText().contains(QStringLiteral("brew upgrade failed (exit 1)")));
+    }
+
+    void testChatListModelAndMessageListModelIncrementalSync() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_listmodels.json")));
+
+        QAbstractListModel *chatModel = b.chatListModel();
+        QAbstractListModel *msgModel = b.messageListModel();
+        QVERIFY(chatModel != nullptr);
+        QVERIFY(msgModel != nullptr);
+
+        // Verify roleNames include modelData and direct delegate roles
+        const QHash<int, QByteArray> chatRoles = chatModel->roleNames();
+        QVERIFY(chatRoles.values().contains("modelData"));
+        QVERIFY(chatRoles.values().contains("guid"));
+        QVERIFY(chatRoles.values().contains("title"));
+        QVERIFY(chatRoles.values().contains("lastMessagePreview"));
+        QVERIFY(chatRoles.values().contains("unreadCount"));
+        QVERIFY(chatRoles.values().contains("pinned"));
+
+        const QHash<int, QByteArray> msgRoles = msgModel->roleNames();
+        QVERIFY(msgRoles.values().contains("modelData"));
+        QVERIFY(msgRoles.values().contains("guid"));
+        QVERIFY(msgRoles.values().contains("text"));
+        QVERIFY(msgRoles.values().contains("isFromMe"));
+        QVERIFY(msgRoles.values().contains("reactions"));
+        QVERIFY(msgRoles.values().contains("attachments"));
+
+        QSignalSpy chatResetSpy(chatModel, &QAbstractItemModel::modelReset);
+        QSignalSpy chatInsertSpy(chatModel, &QAbstractItemModel::rowsInserted);
+        QSignalSpy chatChangeSpy(chatModel, &QAbstractItemModel::dataChanged);
+        QSignalSpy chatRemoveSpy(chatModel, &QAbstractItemModel::rowsRemoved);
+        QSignalSpy chatMoveSpy(chatModel, &QAbstractItemModel::rowsMoved);
+
+        // 1. Initial chat list sync (rowsInserted, 0 resets)
+        auto *typedChatModel = qobject_cast<ChatListModel *>(chatModel);
+        QVERIFY(typedChatModel != nullptr);
+        const QVariantMap c1{
+            {QStringLiteral("guid"), QStringLiteral("iMessage;-;+15550001")},
+            {QStringLiteral("title"), QStringLiteral("Alice")},
+            {QStringLiteral("lastMessagePreview"), QStringLiteral("Hi")},
+            {QStringLiteral("unreadCount"), 0},
+            {QStringLiteral("pinned"), false}
+        };
+        const QVariantMap c2{
+            {QStringLiteral("guid"), QStringLiteral("iMessage;-;+15550002")},
+            {QStringLiteral("title"), QStringLiteral("Bob")},
+            {QStringLiteral("lastMessagePreview"), QStringLiteral("Yo")},
+            {QStringLiteral("unreadCount"), 1},
+            {QStringLiteral("pinned"), false}
+        };
+        typedChatModel->syncFromList(QVariantList{c1, c2});
+        QCOMPARE(chatModel->rowCount(), 2);
+        QCOMPARE(chatInsertSpy.count(), 1);
+        QCOMPARE(chatResetSpy.count(), 0);
+        QCOMPARE(chatModel->data(chatModel->index(0, 0), ChatListModel::TitleRole).toString(), QStringLiteral("Alice"));
+        QCOMPARE(chatModel->data(chatModel->index(1, 0), ChatListModel::ModelDataRole).toMap().value(QStringLiteral("title")).toString(), QStringLiteral("Bob"));
+
+        // 2. Steady-state poll with identical list emits ZERO signals
+        typedChatModel->syncFromList(QVariantList{c1, c2});
+        QCOMPARE(chatInsertSpy.count(), 1);
+        QCOMPARE(chatChangeSpy.count(), 0);
+        QCOMPARE(chatRemoveSpy.count(), 0);
+        QCOMPARE(chatMoveSpy.count(), 0);
+        QCOMPARE(chatResetSpy.count(), 0);
+
+        // 3. In-place update + move (Bob gets new message and moves to top)
+        QVariantMap c2Updated = c2;
+        c2Updated.insert(QStringLiteral("lastMessagePreview"), QStringLiteral("New msg"));
+        c2Updated.insert(QStringLiteral("unreadCount"), 2);
+        typedChatModel->syncFromList(QVariantList{c2Updated, c1});
+        QCOMPARE(chatMoveSpy.count(), 1);
+        QCOMPARE(chatChangeSpy.count(), 1);
+        QCOMPARE(chatResetSpy.count(), 0);
+        QCOMPARE(chatModel->data(chatModel->index(0, 0), ChatListModel::TitleRole).toString(), QStringLiteral("Bob"));
+        QCOMPARE(chatModel->data(chatModel->index(0, 0), ChatListModel::UnreadCountRole).toInt(), 2);
+
+        // 4. Removal of one chat emits rowsRemoved (0 resets)
+        typedChatModel->syncFromList(QVariantList{c2Updated});
+        QCOMPARE(chatModel->rowCount(), 1);
+        QCOMPARE(chatRemoveSpy.count(), 1);
+        QCOMPARE(chatResetSpy.count(), 0);
+
+        // 5. MessageListModel incremental updates via Backend::setMessagesForTest
+        QSignalSpy msgResetSpy(msgModel, &QAbstractItemModel::modelReset);
+        QSignalSpy msgInsertSpy(msgModel, &QAbstractItemModel::rowsInserted);
+        QSignalSpy msgChangeSpy(msgModel, &QAbstractItemModel::dataChanged);
+        QSignalSpy msgRemoveSpy(msgModel, &QAbstractItemModel::rowsRemoved);
+
+        const QVariantMap m1{
+            {QStringLiteral("guid"), QStringLiteral("msg-1")},
+            {QStringLiteral("text"), QStringLiteral("Hello")},
+            {QStringLiteral("isFromMe"), false},
+            {QStringLiteral("reactions"), QVariantList{}}
+        };
+        const QVariantMap m2{
+            {QStringLiteral("guid"), QStringLiteral("msg-2")},
+            {QStringLiteral("text"), QStringLiteral("World")},
+            {QStringLiteral("isFromMe"), true},
+            {QStringLiteral("reactions"), QVariantList{}}
+        };
+        b.setMessagesForTest(QVariantList{m1, m2});
+        QCOMPARE(msgModel->rowCount(), 2);
+        QCOMPARE(msgInsertSpy.count(), 1);
+        QCOMPARE(msgResetSpy.count(), 0);
+        QCOMPARE(msgModel->data(msgModel->index(1, 0), MessageListModel::TextRole).toString(), QStringLiteral("World"));
+
+        // Steady-state sync emits 0 signals
+        b.setMessagesForTest(QVariantList{m1, m2});
+        QCOMPARE(msgInsertSpy.count(), 1);
+        QCOMPARE(msgChangeSpy.count(), 0);
+        QCOMPARE(msgRemoveSpy.count(), 0);
+        QCOMPARE(msgResetSpy.count(), 0);
+
+        // In-place update (reaction added to m1) + append m3
+        QVariantMap m1Reacted = m1;
+        m1Reacted.insert(QStringLiteral("reactions"), QVariantList{QVariantMap{{QStringLiteral("emoji"), QStringLiteral("❤️")}}});
+        const QVariantMap m3{
+            {QStringLiteral("tempGuid"), QStringLiteral("temp-3")},
+            {QStringLiteral("text"), QStringLiteral("Optimistic")},
+            {QStringLiteral("isFromMe"), true}
+        };
+        b.setMessagesForTest(QVariantList{m1Reacted, m2, m3});
+        QCOMPARE(msgModel->rowCount(), 3);
+        QCOMPARE(msgChangeSpy.count(), 1);
+        QCOMPARE(msgInsertSpy.count(), 2);
+        QCOMPARE(msgResetSpy.count(), 0);
+
+        // Remove m2
+        b.setMessagesForTest(QVariantList{m1Reacted, m3});
+        QCOMPARE(msgModel->rowCount(), 2);
+        QCOMPARE(msgRemoveSpy.count(), 1);
+        QCOMPARE(msgResetSpy.count(), 0);
+    }
+
+    void testSaveContactPostsJsonObjectAndHandlesStatus() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        QTcpServer mockServer;
+        QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
+
+        QList<QPair<QString, QByteArray>> postContactReqs;
+        int getContactCount = 0;
+        bool simulateError = false;
+
+        QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
+            while (QTcpSocket *s = mockServer.nextPendingConnection()) {
+                QObject::connect(s, &QTcpSocket::readyRead, s, [s, &postContactReqs, &getContactCount, &simulateError]() {
+                    const QByteArray raw = s->readAll();
+                    const int hdrEnd = raw.indexOf("\r\n\r\n");
+                    const QByteArray headerPart = (hdrEnd >= 0) ? raw.left(hdrEnd) : raw;
+                    const QByteArray bodyPart = (hdrEnd >= 0) ? raw.mid(hdrEnd + 4) : QByteArray();
+                    const QList<QByteArray> lines = headerPart.split('\n');
+                    const QByteArray firstLine = lines.isEmpty() ? QByteArray() : lines.first().trimmed();
+                    const QList<QByteArray> parts = firstLine.split(' ');
+                    const QString method = (parts.size() >= 1) ? QString::fromUtf8(parts[0]) : QString();
+                    const QString fullPath = (parts.size() >= 2) ? QString::fromUtf8(parts[1]) : QString();
+                    const QString path = fullPath.section(QLatin1Char('?'), 0, 0);
+
+                    QByteArray statusLine = "HTTP/1.1 200 OK\r\n";
+                    QByteArray jsonBody = R"({"status":200,"data":[]})";
+
+                    if (method == QStringLiteral("POST") && path == QStringLiteral("/api/v1/contact")) {
+                        postContactReqs.append({path, bodyPart});
+                        if (simulateError) {
+                            statusLine = "HTTP/1.1 500 Internal Server Error\r\n";
+                            jsonBody = R"({"status":500,"message":"Contacts write failed"})";
+                        } else {
+                            jsonBody = R"({"status":200,"data":{"firstName":"Jordan","lastName":"Taylor"}})";
+                        }
+                    } else if (method == QStringLiteral("GET") && path == QStringLiteral("/api/v1/contact")) {
+                        ++getContactCount;
+                        jsonBody = R"({"status":200,"data":[{"firstName":"Jordan","lastName":"Taylor","phoneNumbers":[{"address":"+15551234567"}],"emails":[{"address":"jordan@example.com"}]}]})";
+                    } else if (path == QStringLiteral("/api/v1/ping")) {
+                        jsonBody = R"({"status":200,"message":"pong"})";
+                    }
+
+                    const QByteArray resp =
+                        statusLine + "Content-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(jsonBody.size()) + "\r\nConnection: close\r\n\r\n" + jsonBody;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_contact.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_contact.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockServer.serverPort()), QString(), QStringLiteral("pw"));
+        QTest::qWait(100);
+        const int baselineGetContacts = getContactCount;
+
+        // 1. Success path: posts JSON object {firstName, lastName, phone, email} and refreshes contacts
+        b.saveContact(QStringLiteral("Jordan"), QStringLiteral("Taylor"), QStringLiteral("+15551234567"), QStringLiteral("jordan@example.com"));
+        QTRY_COMPARE_WITH_TIMEOUT(postContactReqs.size(), 1, 3000);
+        const QJsonDocument doc = QJsonDocument::fromJson(postContactReqs.first().second);
+        QVERIFY(doc.isObject());
+        const QJsonObject obj = doc.object();
+        QCOMPARE(obj.value(QStringLiteral("firstName")).toString(), QStringLiteral("Jordan"));
+        QCOMPARE(obj.value(QStringLiteral("lastName")).toString(), QStringLiteral("Taylor"));
+        QCOMPARE(obj.value(QStringLiteral("phone")).toString(), QStringLiteral("+15551234567"));
+        QCOMPARE(obj.value(QStringLiteral("email")).toString(), QStringLiteral("jordan@example.com"));
+        QTRY_VERIFY_WITH_TIMEOUT(getContactCount > baselineGetContacts, 3000);
+
+        // 2. Error path: HTTP 500 emits error toast and does NOT trigger extra GET /api/v1/contact
+        simulateError = true;
+        const int getsBeforeErr = getContactCount;
+        QSignalSpy toastSpy(&b, &Backend::toastMessage);
+        b.saveContact(QStringLiteral("Casey"), QStringLiteral("Morgan"), QStringLiteral("+15559990000"), QStringLiteral("casey@example.com"));
+        QTRY_COMPARE_WITH_TIMEOUT(postContactReqs.size(), 2, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(toastSpy.count() >= 2, 3000);
+        bool sawErrorToast = false;
+        for (const QList<QVariant> &args : toastSpy) {
+            if (args.first().toString().contains(QStringLiteral("Failed to sync contact"))) {
+                sawErrorToast = true;
+                break;
+            }
+        }
+        QVERIFY(sawErrorToast);
+        QCOMPARE(getContactCount, getsBeforeErr);
+    }
+
+    void testTogglePinChatPostsToServerAndRollsBackOnError() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+
+        QTcpServer mockServer;
+        QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
+
+        QStringList pinRequests;
+        int pinnedRefreshCount = 0;
+        bool simulateError = false;
+        QStringList serverPins;
+
+        QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
+            while (QTcpSocket *s = mockServer.nextPendingConnection()) {
+                QObject::connect(s, &QTcpSocket::readyRead, s, [s, &pinRequests, &pinnedRefreshCount, &simulateError, &serverPins]() {
+                    const QByteArray raw = s->readAll();
+                    const int hdrEnd = raw.indexOf("\r\n\r\n");
+                    const QByteArray headerPart = (hdrEnd >= 0) ? raw.left(hdrEnd) : raw;
+                    const QList<QByteArray> lines = headerPart.split('\n');
+                    const QByteArray firstLine = lines.isEmpty() ? QByteArray() : lines.first().trimmed();
+                    const QList<QByteArray> parts = firstLine.split(' ');
+                    const QString method = (parts.size() >= 1) ? QString::fromUtf8(parts[0]) : QString();
+                    const QString fullPath = (parts.size() >= 2) ? QString::fromUtf8(parts[1]) : QString();
+                    const QString path = fullPath.section(QLatin1Char('?'), 0, 0);
+
+                    QByteArray statusLine = "HTTP/1.1 200 OK\r\n";
+                    QByteArray jsonBody = R"({"status":200,"data":[]})";
+
+                    if (method == QStringLiteral("POST") && (path.endsWith(QStringLiteral("/pin")) || path.endsWith(QStringLiteral("/unpin")))) {
+                        pinRequests.append(path);
+                        if (simulateError) {
+                            statusLine = "HTTP/1.1 500 Internal Server Error\r\n";
+                            jsonBody = R"({"status":500,"message":"Pin failed"})";
+                        } else {
+                            const bool isPin = path.endsWith(QStringLiteral("/pin"));
+                            const QString encoded = path.section(QLatin1Char('/'), 4, 4);
+                            const QString decoded = QUrl::fromPercentEncoding(encoded.toUtf8());
+                            if (isPin) {
+                                if (!serverPins.contains(decoded)) serverPins.append(decoded);
+                            } else {
+                                serverPins.removeAll(decoded);
+                            }
+                            jsonBody = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{{QStringLiteral("guid"), decoded}, {QStringLiteral("pinned"), isPin}}}
+                            }).toJson(QJsonDocument::Compact);
+                        }
+                    } else if (method == QStringLiteral("GET") && path == QStringLiteral("/api/v1/pinned")) {
+                        ++pinnedRefreshCount;
+                        QJsonArray arr;
+                        for (const QString &g : serverPins) {
+                            arr.append(QJsonObject{{QStringLiteral("guid"), g}});
+                        }
+                        jsonBody = QJsonDocument(QJsonObject{
+                            {QStringLiteral("status"), 200},
+                            {QStringLiteral("data"), arr}
+                        }).toJson(QJsonDocument::Compact);
+                    } else if (path == QStringLiteral("/api/v1/ping")) {
+                        jsonBody = R"({"status":200,"message":"pong"})";
+                    }
+
+                    const QByteArray resp =
+                        statusLine + "Content-Type: application/json\r\nContent-Length: " +
+                        QByteArray::number(jsonBody.size()) + "\r\nConnection: close\r\n\r\n" + jsonBody;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_pin_srv.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_pin_srv.json")));
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockServer.serverPort()), QString(), QStringLiteral("pw"));
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15551112222");
+        b.ingestChatsMetadataForTest(QJsonArray{
+            QJsonObject{
+                {QStringLiteral("guid"), chatGuid},
+                {QStringLiteral("chatIdentifier"), QStringLiteral("+15551112222")},
+                {QStringLiteral("displayName"), QStringLiteral("Taylor")}
+            }
+        });
+        QTest::qWait(100);
+        const int baselinePinnedRefreshes = pinnedRefreshCount;
+
+        // 1. Pin chat: optimistic update + POST /api/v1/chat/<encoded>/pin + refresh /api/v1/pinned
+        b.togglePinChat(chatGuid);
+        QCOMPARE(b.isChatPinned(chatGuid), true);
+        const QString expectedEncoded = QString::fromUtf8(QUrl::toPercentEncoding(chatGuid));
+        QTRY_COMPARE_WITH_TIMEOUT(pinRequests.size(), 1, 3000);
+        QCOMPARE(pinRequests.at(0), QStringLiteral("/api/v1/chat/%1/pin").arg(expectedEncoded));
+        QTRY_VERIFY_WITH_TIMEOUT(pinnedRefreshCount > baselinePinnedRefreshes, 3000);
+        QCOMPARE(b.isChatPinned(chatGuid), true);
+
+        // 2. Unpin chat: optimistic update + POST /api/v1/chat/<encoded>/unpin
+        b.togglePinChat(chatGuid);
+        QCOMPARE(b.isChatPinned(chatGuid), false);
+        QTRY_COMPARE_WITH_TIMEOUT(pinRequests.size(), 2, 3000);
+        QCOMPARE(pinRequests.at(1), QStringLiteral("/api/v1/chat/%1/unpin").arg(expectedEncoded));
+        QTest::qWait(80);
+        QCOMPARE(b.isChatPinned(chatGuid), false);
+
+        // 3. Server error on pin: optimistic state rolls back to false + error toast
+        simulateError = true;
+        QSignalSpy toastSpy(&b, &Backend::toastMessage);
+        b.togglePinChat(chatGuid);
+        QCOMPARE(b.isChatPinned(chatGuid), true); // optimistic
+        QTRY_COMPARE_WITH_TIMEOUT(pinRequests.size(), 3, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.isChatPinned(chatGuid), false, 3000); // rolled back!
+        bool sawErrToast = false;
+        for (const QList<QVariant> &args : toastSpy) {
+            if (args.first().toString().contains(QStringLiteral("Failed to pin conversation"))) {
+                sawErrToast = true;
+                break;
+            }
+        }
+        QVERIFY(sawErrToast);
     }
 
 };

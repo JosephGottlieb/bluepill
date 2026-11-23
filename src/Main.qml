@@ -2533,7 +2533,7 @@ ApplicationWindow {
                         Layout.fillWidth: true
                         Layout.fillHeight: true
                         clip: true
-                        model: backend.chats
+                        model: backend.chatListModel
                         spacing: 2
                         cacheBuffer: 400
 
@@ -3457,7 +3457,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     clip: true
-                    model: backend.messages
+                    model: backend.messageListModel
                     spacing: 8
                     topMargin: 42
                     bottomMargin: 46
@@ -11840,8 +11840,8 @@ ApplicationWindow {
                                     Text {
                                         Layout.fillWidth: true
                                         text: backend.clientUpdateAvailable
-                                              ? ("v" + (Qt.application.version || "1.2.12") + " → v" + backend.clientLatestVersion)
-                                              : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.12")
+                                              ? ("v" + (Qt.application.version || "1.2.13") + " → v" + backend.clientLatestVersion)
+                                              : i18n.tr("Up to date (v%1)").arg(Qt.application.version || "1.2.13")
                                         font.pixelSize: theme.fontSize - 2
                                         color: backend.clientUpdateAvailable ? theme.accent : theme.darkForeground
                                         elide: Text.ElideRight

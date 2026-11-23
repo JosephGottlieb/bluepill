@@ -2,6 +2,18 @@
 
 All notable changes to **BluePill** (`bluepill` / `imsg`) are documented in this file.
 
+## [1.2.13] - 2026-11-23
+
+### Added
+- **macOS Full Disk Access Check & `init` Command (`#34`, `server/bluepill_server.py`):** Added `_check_fda_and_prompt(open_settings=False)` to check `~/Library/Messages/chat.db` readability on macOS, introduced `bluepill-server init` and `--open-fda` (opening System Settings Full Disk Access pane in interactive `init` or when `--open-fda` is passed), and logged actionable FDA warnings without blocking or popping UI in headless LaunchAgent `serve` mode.
+- **Contact Create/Update API (`#46`, `server/bluepill_server.py`, `src/backend.cpp`):** Added `POST /api/v1/contact` and `POST /api/v1/contact/create` write support via `engine.save_contact()` (handling both `QJsonArray` and JSON object payloads while keeping query payloads backward-compatible), using `osascript` `on run argv` (zero string interpolation) on macOS plus a local fallback cache and cache invalidation.
+- **Mac-Synced Pin / Unpin Endpoints (`#48`, `server/bluepill_server.py`, `src/backend.cpp`):** Added `POST /api/v1/chat/<guid>/pin`, `POST /api/v1/chat/<guid>/unpin`, and `POST /api/v1/chat/pin` backed by `engine.set_chat_pinned()`, updating `com.apple.messages.pinning.plist`, local pin-override persistence, `query_chats()` `isPinned` state, Socket.IO `chat-updated` events, and optimistic client rollback on error.
+- **Chat Service Name Field (`#33`, `server/bluepill_server.py`):** Included `"serviceName"` in every chat returned by `query_chats()`, preserved across unified sibling group chats.
+- **Incremental `QAbstractListModel` Chat & Message Models (`#43`, `src/backend.{h,cpp}`, `src/Main.qml`):** Replaced full `QVariantList` view rebuilds with `ChatListModel` and `MessageListModel` performing key-based incremental diffing (`rowsInserted`/`rowsRemoved`/`rowsMoved`/`dataChanged`) without model resets on steady-state polls.
+
+### Changed
+- **`server.json` Listen Host & Port Precedence (`#31`, `server/bluepill_server.py`):** Loaded `~/.config/bluepill/server.json` `"host"` and `"port"` before resolving defaults (`--host`/`--port` > `BLUEPILL_HOST`/`BLUEPILL_PORT` > `server.json` > `127.0.0.1:1235`).
+
 ## [1.2.12] - 2026-11-23
 
 ### Security & Hardening

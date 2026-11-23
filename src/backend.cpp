@@ -343,7 +343,247 @@ bool Backend::writeConfigAtomicallyForTest(const QString &targetPath, const QJso
     return writeConfigAtomicallyImpl(targetPath, obj, simulatePrePermFail, simulatePostPermFail);
 }
 
+VariantMapListModel::VariantMapListModel(QObject *parent)
+    : QAbstractListModel(parent) {}
+
+int VariantMapListModel::rowCount(const QModelIndex &parent) const {
+    if (parent.isValid()) return 0;
+    return m_items.size();
+}
+
+QVariant VariantMapListModel::data(const QModelIndex &index, int role) const {
+    if (!index.isValid() || index.row() < 0 || index.row() >= m_items.size()) {
+        return QVariant();
+    }
+    const QVariantMap &item = m_items.at(index.row());
+    if (role == ModelDataRole) {
+        return item;
+    }
+    const QHash<int, QByteArray> roles = roleNames();
+    const auto it = roles.constFind(role);
+    if (it == roles.constEnd()) {
+        return QVariant();
+    }
+    return item.value(QString::fromUtf8(it.value()));
+}
+
+QVariantMap VariantMapListModel::get(int row) const {
+    if (row < 0 || row >= m_items.size()) return QVariantMap();
+    return m_items.at(row);
+}
+
+void VariantMapListModel::syncFromList(const QVariantList &next) {
+    QList<QVariantMap> nextMaps;
+    nextMaps.reserve(next.size());
+    QStringList nextKeys;
+    nextKeys.reserve(next.size());
+    QHash<QString, int> seenKeyCounts;
+    seenKeyCounts.reserve(next.size());
+
+    for (int i = 0; i < next.size(); ++i) {
+        const QVariantMap m = next.at(i).toMap();
+        QString key = itemKey(m).trimmed();
+        if (key.isEmpty()) {
+            key = QStringLiteral("__row_%1").arg(i);
+        }
+        const int dupCount = seenKeyCounts.value(key, 0);
+        seenKeyCounts.insert(key, dupCount + 1);
+        if (dupCount > 0) {
+            key = QStringLiteral("%1#%2").arg(key).arg(dupCount);
+        }
+        nextMaps.append(m);
+        nextKeys.append(key);
+    }
+
+    if (nextMaps == m_items && nextKeys == m_keys) {
+        return;
+    }
+
+    const int oldCount = m_items.size();
+    const QSet<QString> nextKeySet(nextKeys.cbegin(), nextKeys.cend());
+    QSet<QString> currentKeySet(m_keys.cbegin(), m_keys.cend());
+
+    // 1. Remove rows whose keys are no longer present (batched contiguous runs from the back)
+    int idx = m_keys.size() - 1;
+    while (idx >= 0) {
+        if (!nextKeySet.contains(m_keys.at(idx))) {
+            const int runEnd = idx;
+            while (idx > 0 && !nextKeySet.contains(m_keys.at(idx - 1))) {
+                --idx;
+            }
+            const int runStart = idx;
+            beginRemoveRows(QModelIndex(), runStart, runEnd);
+            for (int r = runEnd; r >= runStart; --r) {
+                currentKeySet.remove(m_keys.at(r));
+                m_keys.removeAt(r);
+                m_items.removeAt(r);
+            }
+            endRemoveRows();
+        }
+        --idx;
+    }
+
+    // 2. Reorder existing rows, update changed rows in place, and batch-insert new rows
+    const QHash<int, QByteArray> roles = roleNames();
+    for (int targetIdx = 0; targetIdx < nextMaps.size(); ++targetIdx) {
+        const QString &key = nextKeys.at(targetIdx);
+        if (currentKeySet.contains(key)) {
+            int curIdx = -1;
+            for (int s = targetIdx; s < m_keys.size(); ++s) {
+                if (m_keys.at(s) == key) {
+                    curIdx = s;
+                    break;
+                }
+            }
+            if (curIdx > targetIdx) {
+                beginMoveRows(QModelIndex(), curIdx, curIdx, QModelIndex(), targetIdx);
+                m_items.move(curIdx, targetIdx);
+                m_keys.move(curIdx, targetIdx);
+                endMoveRows();
+            }
+            if (m_items.at(targetIdx) != nextMaps.at(targetIdx)) {
+                QList<int> changedRoles;
+                changedRoles.append(ModelDataRole);
+                const QVariantMap &oldItem = m_items.at(targetIdx);
+                const QVariantMap &newItem = nextMaps.at(targetIdx);
+                for (auto it = roles.constBegin(); it != roles.constEnd(); ++it) {
+                    if (it.key() == ModelDataRole) continue;
+                    const QString roleKey = QString::fromUtf8(it.value());
+                    if (oldItem.value(roleKey) != newItem.value(roleKey)) {
+                        changedRoles.append(it.key());
+                    }
+                }
+                m_items[targetIdx] = newItem;
+                const QModelIndex modelIdx = index(targetIdx, 0);
+                emit dataChanged(modelIdx, modelIdx, changedRoles);
+            }
+        } else {
+            int runEnd = targetIdx;
+            while (runEnd + 1 < nextMaps.size() && !currentKeySet.contains(nextKeys.at(runEnd + 1))) {
+                ++runEnd;
+            }
+            beginInsertRows(QModelIndex(), targetIdx, runEnd);
+            for (int ins = targetIdx; ins <= runEnd; ++ins) {
+                m_items.insert(ins, nextMaps.at(ins));
+                m_keys.insert(ins, nextKeys.at(ins));
+                currentKeySet.insert(nextKeys.at(ins));
+            }
+            endInsertRows();
+            targetIdx = runEnd;
+        }
+    }
+
+    if (m_items.size() != oldCount) {
+        emit countChanged();
+    }
+}
+
+ChatListModel::ChatListModel(QObject *parent)
+    : VariantMapListModel(parent) {}
+
+QHash<int, QByteArray> ChatListModel::roleNames() const {
+    static const QHash<int, QByteArray> roles = {
+        {ModelDataRole, QByteArrayLiteral("modelData")},
+        {GuidRole, QByteArrayLiteral("guid")},
+        {TitleRole, QByteArrayLiteral("title")},
+        {SubtitleRole, QByteArrayLiteral("subtitle")},
+        {ServiceRole, QByteArrayLiteral("service")},
+        {AvatarUrlRole, QByteArrayLiteral("avatarUrl")},
+        {InitialsRole, QByteArrayLiteral("initials")},
+        {AvatarColorRole, QByteArrayLiteral("avatarColor")},
+        {LastMessagePreviewRole, QByteArrayLiteral("lastMessagePreview")},
+        {RelativeTimeRole, QByteArrayLiteral("relativeTime")},
+        {UnreadCountRole, QByteArrayLiteral("unreadCount")},
+        {AddressRole, QByteArrayLiteral("address")},
+        {IsGroupRole, QByteArrayLiteral("isGroup")},
+        {MutedRole, QByteArrayLiteral("muted")},
+        {IsMutedRole, QByteArrayLiteral("isMuted")},
+        {PinnedRole, QByteArrayLiteral("pinned")},
+        {IsPinnedRole, QByteArrayLiteral("isPinned")}
+    };
+    return roles;
+}
+
+QString ChatListModel::itemKey(const QVariantMap &item) const {
+    return item.value(QStringLiteral("guid")).toString();
+}
+
+MessageListModel::MessageListModel(QObject *parent)
+    : VariantMapListModel(parent) {}
+
+QHash<int, QByteArray> MessageListModel::roleNames() const {
+    static const QHash<int, QByteArray> roles = {
+        {ModelDataRole, QByteArrayLiteral("modelData")},
+        {GuidRole, QByteArrayLiteral("guid")},
+        {TempGuidRole, QByteArrayLiteral("tempGuid")},
+        {ChatGuidRole, QByteArrayLiteral("chatGuid")},
+        {TextRole, QByteArrayLiteral("text")},
+        {FormattedTextRole, QByteArrayLiteral("formattedText")},
+        {IsFromMeRole, QByteArrayLiteral("isFromMe")},
+        {FromMeRole, QByteArrayLiteral("fromMe")},
+        {IsIMessageRole, QByteArrayLiteral("isIMessage")},
+        {IsGreenBubbleRole, QByteArrayLiteral("isGreenBubble")},
+        {ServiceRole, QByteArrayLiteral("service")},
+        {SenderNameRole, QByteArrayLiteral("senderName")},
+        {SenderColorRole, QByteArrayLiteral("senderColor")},
+        {DateCreatedRole, QByteArrayLiteral("dateCreated")},
+        {TimeTextRole, QByteArrayLiteral("timeText")},
+        {ShowDateHeaderRole, QByteArrayLiteral("showDateHeader")},
+        {DateHeaderTextRole, QByteArrayLiteral("dateHeaderText")},
+        {ReceiptTextRole, QByteArrayLiteral("receiptText")},
+        {MetaBadgeTextRole, QByteArrayLiteral("metaBadgeText")},
+        {IsFailedRole, QByteArrayLiteral("isFailed")},
+        {IsEditedRole, QByteArrayLiteral("isEdited")},
+        {ErrorCodeRole, QByteArrayLiteral("errorCode")},
+        {ReactionsRole, QByteArrayLiteral("reactions")},
+        {AttachmentsRole, QByteArrayLiteral("attachments")},
+        {ImageAttachmentsRole, QByteArrayLiteral("imageAttachments")},
+        {FileAttachmentsRole, QByteArrayLiteral("fileAttachments")},
+        {HasImageAttachmentRole, QByteArrayLiteral("hasImageAttachment")},
+        {HasFileAttachmentRole, QByteArrayLiteral("hasFileAttachment")},
+        {ImageAttachmentCountRole, QByteArrayLiteral("imageAttachmentCount")},
+        {AttachmentGuidRole, QByteArrayLiteral("attachmentGuid")},
+        {AttachmentNameRole, QByteArrayLiteral("attachmentName")},
+        {AttachmentLocalUrlRole, QByteArrayLiteral("attachmentLocalUrl")},
+        {IsAudioRole, QByteArrayLiteral("isAudio")},
+        {IsImageRole, QByteArrayLiteral("isImage")},
+        {DurationSecondsRole, QByteArrayLiteral("durationSeconds")},
+        {WaveformBarsRole, QByteArrayLiteral("waveformBars")},
+        {MimeTypeRole, QByteArrayLiteral("mimeType")},
+        {LocalUrlRole, QByteArrayLiteral("localUrl")},
+        {SourceUrlRole, QByteArrayLiteral("sourceUrl")},
+        {HasLinkPreviewRole, QByteArrayLiteral("hasLinkPreview")},
+        {LinkPreviewRole, QByteArrayLiteral("linkPreview")},
+        {LinkUrlRole, QByteArrayLiteral("linkUrl")},
+        {ReplyToGuidRole, QByteArrayLiteral("replyToGuid")},
+        {ReplyToSenderRole, QByteArrayLiteral("replyToSender")},
+        {ReplyToTextRole, QByteArrayLiteral("replyToText")},
+        {ReplyCountRole, QByteArrayLiteral("replyCount")},
+        {ExpressiveEffectRole, QByteArrayLiteral("expressiveEffect")},
+        {ExpressiveSendStyleIdRole, QByteArrayLiteral("expressiveSendStyleId")},
+        {SendEffectLabelRole, QByteArrayLiteral("sendEffectLabel")},
+        {VerificationCodeRole, QByteArrayLiteral("verificationCode")},
+        {OtpCodeRole, QByteArrayLiteral("otpCode")}
+    };
+    return roles;
+}
+
+QString MessageListModel::itemKey(const QVariantMap &item) const {
+    const QString g = item.value(QStringLiteral("guid")).toString().trimmed();
+    if (!g.isEmpty()) return g;
+    return item.value(QStringLiteral("tempGuid")).toString().trimmed();
+}
+
 Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart(autoStart) {
+    connect(this, &Backend::chatsChanged, this, [this]() {
+        m_chatListModel.syncFromList(chats());
+    });
+    connect(this, &Backend::filterChanged, this, [this]() {
+        m_chatListModel.syncFromList(chats());
+    });
+    connect(this, &Backend::messagesChanged, this, [this]() {
+        m_messageListModel.syncFromList(m_messages);
+    });
     m_startupTimestamp = QDateTime::currentMSecsSinceEpoch();
     // Contacts and chats arrive in either order; queue photos once both are here
     connect(this, &Backend::chatsChanged, this, [this]() {
@@ -1514,8 +1754,15 @@ void Backend::togglePinChat(const QString &chatGuid) {
     const QString target = chatGuid.isEmpty() ? m_selectedChatGuid : chatGuid;
     if (target.isEmpty()) return;
     const bool fromMac = macPinnedChatGuids().contains(target);
-    if (isChatPinned(target)) {
-        // A Mac pin is hidden here (the Mac keeps it); a local pin is removed.
+    const bool wasPinned = isChatPinned(target);
+    const bool wantPinned = !wasPinned;
+
+    const QStringList prevPinnedChats = m_pinnedChats;
+    const QSet<QString> prevUnpinnedMacChats = m_unpinnedMacChats;
+    const QList<QVariantMap> prevMacPins = m_macPins;
+
+    if (wasPinned) {
+        // A Mac pin is hidden here while the server unpin completes; a local pin is removed.
         m_pinnedChats.removeAll(target);
         if (fromMac) m_unpinnedMacChats.insert(target);
         emit toastMessage(QStringLiteral("📌 Conversation unpinned"));
@@ -1535,6 +1782,40 @@ void Backend::togglePinChat(const QString &chatGuid) {
     }
     saveAppState();
     emit chatsChanged();
+
+    if (!m_demoMode && !m_serverUrl.isEmpty() && !m_password.isEmpty()) {
+        const QString sendGuid = resolveActiveSendChatGuid(target);
+        const QString effectiveGuid = sendGuid.isEmpty() ? target : sendGuid;
+        const QString encodedGuid = QString::fromUtf8(QUrl::toPercentEncoding(effectiveGuid));
+        const QString path = QStringLiteral("/api/v1/chat/%1/%2")
+                                 .arg(encodedGuid, wantPinned ? QStringLiteral("pin") : QStringLiteral("unpin"));
+        QJsonObject payload;
+        payload.insert(QStringLiteral("chatGuid"), effectiveGuid);
+        payload.insert(QStringLiteral("pinned"), wantPinned);
+        QNetworkRequest req = makeRequest(path);
+        if (!req.url().isValid()) return;
+        req.setPriority(QNetworkRequest::HighPriority);
+        QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
+        connect(reply, &QNetworkReply::finished, this, [this, reply, wantPinned, prevPinnedChats, prevUnpinnedMacChats, prevMacPins]() {
+            reply->deleteLater();
+            const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const bool ok = (reply->error() == QNetworkReply::NoError) && (httpStatus == 0 || (httpStatus >= 200 && httpStatus < 300));
+            if (!ok) {
+                m_pinnedChats = prevPinnedChats;
+                m_unpinnedMacChats = prevUnpinnedMacChats;
+                m_macPins = prevMacPins;
+                saveAppState();
+                emit chatsChanged();
+                const QString errText = reply->errorString().isEmpty()
+                                            ? QStringLiteral("HTTP %1").arg(httpStatus)
+                                            : reply->errorString();
+                emit toastMessage(QStringLiteral("Failed to %1 conversation: %2")
+                                      .arg(wantPinned ? QStringLiteral("pin") : QStringLiteral("unpin"), errText));
+                return;
+            }
+            fetchMacPins();
+        });
+    }
 }
 
 bool Backend::isChatPinned(const QString &chatGuid) const {
@@ -7789,6 +8070,8 @@ void Backend::sortChats() {
 QVariantList Backend::chats() const {
     QVariantList result;
     const QString q = m_searchQuery.trimmed().toLower();
+    const QStringList effPins = effectivePinnedChatGuids();
+    const QSet<QString> pinnedSet(effPins.cbegin(), effPins.cend());
 
     for (const ChatEntry &c : m_chats) {
         if (m_filterMode == QStringLiteral("unread") && c.unreadCount <= 0) continue;
@@ -7831,7 +8114,9 @@ QVariantList Backend::chats() const {
         map.insert(QStringLiteral("isGroup"), c.isGroup);
         map.insert(QStringLiteral("muted"), m_mutedChats.contains(c.guid));
         map.insert(QStringLiteral("isMuted"), m_mutedChats.contains(c.guid));
-        map.insert(QStringLiteral("pinned"), m_pinnedChats.contains(c.guid));
+        const bool isPinned = pinnedSet.contains(c.guid);
+        map.insert(QStringLiteral("pinned"), isPinned);
+        map.insert(QStringLiteral("isPinned"), isPinned);
         result.append(map);
     }
     return result;
@@ -8156,6 +8441,8 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
     contactObj.insert(QStringLiteral("firstName"), fn);
     contactObj.insert(QStringLiteral("lastName"), ln);
     contactObj.insert(QStringLiteral("displayName"), display);
+    contactObj.insert(QStringLiteral("phone"), ph);
+    contactObj.insert(QStringLiteral("email"), em);
     QJsonArray phonesArr;
     if (!ph.isEmpty()) phonesArr.append(ph);
     contactObj.insert(QStringLiteral("phoneNumbers"), phonesArr);
@@ -8195,15 +8482,23 @@ void Backend::saveContact(const QString &firstName, const QString &lastName, con
 
     emit toastMessage(QStringLiteral("✓ Contact saved: %1").arg(display));
 
-    // Post to BlueBubbles server API
+    // Post to BluePill / BlueBubbles server API
     if (!m_demoMode && !m_serverUrl.isEmpty() && !m_password.isEmpty()) {
-        QJsonArray payloadArray;
-        payloadArray.append(contactObj);
         QNetworkRequest req = makeRequest(QStringLiteral("/api/v1/contact"));
+        if (!req.url().isValid()) return;
         req.setPriority(QNetworkRequest::HighPriority);
-        QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(payloadArray).toJson(QJsonDocument::Compact));
+        QNetworkReply *reply = m_sendNam.post(req, QJsonDocument(contactObj).toJson(QJsonDocument::Compact));
         connect(reply, &QNetworkReply::finished, this, [this, reply]() {
             reply->deleteLater();
+            const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+            const bool ok = (reply->error() == QNetworkReply::NoError) && (httpStatus == 0 || (httpStatus >= 200 && httpStatus < 300));
+            if (!ok) {
+                const QString errText = reply->errorString().isEmpty()
+                                            ? QStringLiteral("HTTP %1").arg(httpStatus)
+                                            : reply->errorString();
+                emit toastMessage(QStringLiteral("Failed to sync contact to Mac: %1").arg(errText));
+                return;
+            }
             fetchContactsRemote();
         });
     }
