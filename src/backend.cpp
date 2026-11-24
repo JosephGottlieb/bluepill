@@ -5324,6 +5324,32 @@ void Backend::handleNetworkFailure(const QString &context) {
     }
 }
 
+static QString fullDiskAccessStatusNote() {
+    return QStringLiteral("Mac can't read Messages: give bluepill-server's Python Full Disk Access, then restart it");
+}
+
+void Backend::setMacNeedsFullDiskAccess(bool needed) {
+    if (needed == m_macNeedsFullDiskAccess) return;
+    m_macNeedsFullDiskAccess = needed;
+    const QString base = m_lastKnownServerStatus.isEmpty() ? QStringLiteral("Connected") : m_lastKnownServerStatus;
+    m_serverStatus = needed ? (base + QStringLiteral(" · ") + fullDiskAccessStatusNote()) : base;
+    if (needed) {
+        emit toastMessage(QStringLiteral("⚠ ") + fullDiskAccessStatusNote());
+    }
+    emit statusChanged();
+}
+
+bool Backend::handleChatDbUnreadableReply(QNetworkReply *reply) {
+    if (!reply) return false;
+    if (reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt() != 503) return false;
+    const QJsonObject root = QJsonDocument::fromJson(reply->readAll()).object();
+    if (root.value(QStringLiteral("error")).toString() != QStringLiteral("chat_db_unreadable")) return false;
+    // The relay answered, so it isn't a network failure; it just can't read chat.db.
+    handleNetworkSuccess();
+    setMacNeedsFullDiskAccess(true);
+    return true;
+}
+
 void Backend::handleNetworkSuccess() {
     const bool wasReconnecting = (m_consecutiveFailures >= 4);
     const bool wasDisconnected = !m_connected;
@@ -5695,6 +5721,18 @@ void Backend::fetchServerInfo() {
                                   privApi ? QStringLiteral(" · Private API") : QString());
         m_lastKnownServerStatus = m_serverStatus;
         saveAppState();
+        const QJsonValue readable = data.value(QStringLiteral("chat_db_readable"));
+        if (readable.isBool()) {
+            // setMacNeedsFullDiskAccess() only notifies on a change; refresh the note either way
+            const bool needed = !readable.toBool();
+            if (needed != m_macNeedsFullDiskAccess) {
+                setMacNeedsFullDiskAccess(needed);
+            } else if (needed) {
+                m_serverStatus += QStringLiteral(" · ") + fullDiskAccessStatusNote();
+            }
+        } else if (m_macNeedsFullDiskAccess) {
+            m_serverStatus += QStringLiteral(" · ") + fullDiskAccessStatusNote();
+        }
         emit statusChanged();
     });
 }
@@ -5778,10 +5816,12 @@ void Backend::fetchChatsMetadata() {
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         reply->deleteLater();
         if (reply->error() != QNetworkReply::NoError) {
+            handleChatDbUnreadableReply(reply);
             fetchMissingGroupParticipants();
             return;
         }
         handleNetworkSuccess();
+        setMacNeedsFullDiskAccess(false);
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
         processChatsMetadata(arr);
         saveMessagesCache();
@@ -6561,10 +6601,11 @@ void Backend::pollDelta() {
             m_pollDeltaInFlight = false;
             reply->deleteLater();
             if (reply->error() != QNetworkReply::NoError) {
-                handleNetworkFailure(QStringLiteral("pollDelta"));
+                if (!handleChatDbUnreadableReply(reply)) handleNetworkFailure(QStringLiteral("pollDelta"));
                 return;
             }
             handleNetworkSuccess();
+            setMacNeedsFullDiskAccess(false);
             const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
             processIncomingMessages(arr, false);
         });
@@ -9883,8 +9924,10 @@ void Backend::loadChatMessages(const QString &chatGuid) {
                     return;
                 }
                 if (fallbackReply->error() != QNetworkReply::NoError) {
-                    handleNetworkFailure(QStringLiteral("loadChatMessages"));
-                    QTimer::singleShot(1500, this, [this, chatGuid, reqSeq]() {
+                    // Can't read chat.db: retry slowly until Full Disk Access is granted
+                    const bool denied = handleChatDbUnreadableReply(fallbackReply);
+                    if (!denied) handleNetworkFailure(QStringLiteral("loadChatMessages"));
+                    QTimer::singleShot(denied ? 10000 : 1500, this, [this, chatGuid, reqSeq]() {
                         if (reqSeq == m_messageRequestSeq && m_selectedChatGuid == chatGuid && !m_activeMessagesReply) {
                             loadChatMessages(chatGuid);
                         }
@@ -10125,10 +10168,11 @@ void Backend::loadOlderMessages() {
         emit olderMessagesChanged();
 
         if (reply->error() != QNetworkReply::NoError) {
-            handleNetworkFailure(QStringLiteral("loadOlderMessages"));
+            if (!handleChatDbUnreadableReply(reply)) handleNetworkFailure(QStringLiteral("loadOlderMessages"));
             return;
         }
         handleNetworkSuccess();
+        setMacNeedsFullDiskAccess(false);
         if (reqSeq != m_messageRequestSeq || m_selectedChatGuid != chatGuid) return;
 
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();

@@ -1804,6 +1804,83 @@ private slots:
         }
     }
 
+    void testRelayThatCantReadChatDbShowsFullDiskAccessNotDisconnected() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) qunsetenv(k);
+            for (auto it = savedEnv.cbegin(); it != savedEnv.cend(); ++it) qputenv(it.key().constData(), it.value());
+        });
+
+        // A relay that answers, but macOS won't let it open chat.db (no Full Disk Access)
+        bool dbReadable = false;
+        QTcpServer server;
+        QVERIFY(server.listen(QHostAddress::LocalHost, 0));
+        QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
+            while (QTcpSocket *sock = server.nextPendingConnection()) {
+                QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
+                    const QByteArray reqLine = sock->readAll().split('\n').value(0).trimmed();
+                    QByteArray status = "200 OK";
+                    QByteArray body = "{\"status\":200,\"message\":\"Success\",\"data\":[]}";
+                    if (reqLine.contains("/api/v1/server/info")) {
+                        body = QByteArray("{\"status\":200,\"message\":\"Success\",\"data\":{\"server_version\":\"1.2.15\",\"os_version\":\"26.6\",\"private_api\":false,\"chat_db_readable\":")
+                               + (dbReadable ? "true" : "false") + "}}";
+                    } else if (!dbReadable && (reqLine.contains("/api/v1/message/query") || reqLine.contains("/api/v1/chat/query"))) {
+                        status = "503 Service Unavailable";
+                        body = "{\"status\":503,\"message\":\"The Mac cannot read chat.db: give Full Disk Access\",\"data\":null,\"error\":\"chat_db_unreadable\"}";
+                    }
+                    sock->write("HTTP/1.1 " + status + "\r\nContent-Type: application/json\r\nContent-Length: "
+                                + QByteArray::number(body.size()) + "\r\nConnection: close\r\n\r\n" + body);
+                    sock->flush();
+                    sock->disconnectFromHost();
+                });
+            }
+        });
+        qputenv("BLUEBUBBLES_URL", QStringLiteral("http://127.0.0.1:%1").arg(server.serverPort()).toUtf8());
+        qputenv("BLUEBUBBLES_PASSWORD", QByteArrayLiteral("test-pass"));
+
+        Backend b(false);
+        b.setStateFilePath(tempDir.filePath(QStringLiteral("state_fda.json")));
+        b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_fda.json")));
+        QSignalSpy toasts(&b, &Backend::toastMessage);
+
+        // server/info says chat.db is unreadable: connected, but flagged
+        b.fetchServerInfoForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.macNeedsFullDiskAccess(), 3000);
+        QVERIFY(b.connected());
+        QVERIFY2(b.serverStatus().contains(QStringLiteral("Full Disk Access")), qPrintable(b.serverStatus()));
+        QVERIFY(b.serverStatus().startsWith(QStringLiteral("Connected v1.2.15")));
+
+        // The 503 from message/query is not a network failure: no "Disconnected · Reconnecting"
+        for (int i = 0; i < 5; ++i) {
+            b.pollDeltaForTest();
+            QTest::qWait(150);
+        }
+        QVERIFY(b.connected());
+        QVERIFY(b.macNeedsFullDiskAccess());
+        QVERIFY2(!b.serverStatus().startsWith(QStringLiteral("Disconnected")), qPrintable(b.serverStatus()));
+        int fdaToasts = 0;
+        for (const QList<QVariant> &args : toasts) {
+            if (args.value(0).toString().contains(QStringLiteral("Full Disk Access"))) ++fdaToasts;
+        }
+        QCOMPARE(fdaToasts, 1);  // once, not on every poll
+
+        // Access granted: the next successful query clears the warning
+        dbReadable = true;
+        b.pollDeltaForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(!b.macNeedsFullDiskAccess(), 3000);
+        QVERIFY(b.connected());
+        QCOMPARE(b.serverStatus(), QStringLiteral("Connected v1.2.15 · macOS 26.6"));
+    }
+
     void testV161BackgroundImagePrefetchAndRetry() {
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());

@@ -426,6 +426,23 @@ def encode_typedstream_nsattributedstring(text: str) -> bytes:
     )
 
 
+CHAT_DB_UNREADABLE_MESSAGE = (
+    "The Mac can't read the Messages database (chat.db): macOS denied access. "
+    "Give Full Disk Access to the Python that runs bluepill-server "
+    "(System Settings > Privacy & Security > Full Disk Access), then restart it "
+    "(brew services restart bluepill)."
+)
+
+
+class ChatDbUnreadableError(sqlite3.DatabaseError):
+    """chat.db exists but macOS refuses to open it (no Full Disk Access)."""
+
+
+def _is_chat_db_access_denied(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return "authorization denied" in text or "unable to open database" in text
+
+
 class SocketIOSession:
     """Represents an Engine.IO v4 / Socket.IO v4 long-polling client session."""
 
@@ -1989,10 +2006,37 @@ class BluePillEngine:
         if not os.path.exists(self.db_path):
             raise FileNotFoundError(f"chat.db not found at {self.db_path}")
         uri = f"file:{urllib.parse.quote(os.path.abspath(self.db_path))}?mode=ro"
-        conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
-        conn.row_factory = sqlite3.Row
-        conn.execute("PRAGMA query_only = ON;")
+        try:
+            conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON;")
+        except sqlite3.DatabaseError as exc:
+            if _is_chat_db_access_denied(exc):
+                raise ChatDbUnreadableError(CHAT_DB_UNREADABLE_MESSAGE) from exc
+            raise
         return conn
+
+    def chat_db_readable(self) -> bool:
+        """Whether chat.db can be opened and read; cached for a few seconds."""
+        now = time.time()
+        cached = getattr(self, "_chat_db_readable_cache", None)
+        if cached is not None and now - cached[1] < 5.0:
+            return cached[0]
+        ok = True
+        try:
+            conn = self._open_chat_db()
+            try:
+                conn.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchall()
+            finally:
+                conn.close()
+        except ChatDbUnreadableError:
+            ok = False
+        except sqlite3.DatabaseError as exc:
+            ok = not _is_chat_db_access_denied(exc)
+        except Exception:  # noqa: BLE001 - missing file etc. is not an access problem
+            ok = True
+        self._chat_db_readable_cache = (ok, now)
+        return ok
 
     def get_macos_version(self) -> str:
         if sys.platform == "darwin":
@@ -2057,6 +2101,7 @@ class BluePillEngine:
             "private_api": priv,
             "helper_connected": priv,
             "proxy_service": "bluepill-server",
+            "chat_db_readable": self.chat_db_readable(),
             "detected_icloud": acct,
             "detected_imessage": acct,
             "macos_time_sync": int(time.time() * 1000),
@@ -12299,7 +12344,32 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
 
+    def send_response(self, code: int, message: Optional[str] = None) -> None:
+        self._response_started = True
+        super().send_response(code, message)
+
+    def _run_guarded(self, impl: Any) -> None:
+        # macOS refusing chat.db must reach clients as an answer they can show,
+        # not as a dropped connection that looks like the relay is down.
+        self._response_started = False
+        try:
+            impl()
+        except ChatDbUnreadableError as exc:
+            if getattr(self, "_response_started", False):
+                raise
+            self.engine.logger.warning("[chatdb] %s", exc)
+            self._send_json(503, None, str(exc), extra={"error": "chat_db_unreadable"})
+
     def do_GET(self) -> None:
+        self._run_guarded(self._handle_get)
+
+    def do_POST(self) -> None:
+        self._run_guarded(self._handle_post)
+
+    def do_DELETE(self) -> None:
+        self._run_guarded(self._handle_delete)
+
+    def _handle_get(self) -> None:
         self._req_t0 = time.time()
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -12709,7 +12779,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, None, f"Not found: {path}")
 
-    def do_POST(self) -> None:
+    def _handle_post(self) -> None:
         self._req_t0 = time.time()
         parsed = urllib.parse.urlsplit(self.path)
         path = parsed.path.rstrip("/") or "/"
@@ -12988,7 +13058,7 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
 
         self._send_json(404, None, f"Not found: {path}")
 
-    def do_DELETE(self) -> None:
+    def _handle_delete(self) -> None:
         self._req_t0 = time.time()
         parsed = urllib.parse.urlsplit(self.path)
         if not self._check_auth(parsed):
@@ -13301,6 +13371,46 @@ def run_selftest(engine: BluePillEngine) -> int:
         return urllib.request.urlopen(req_obj, timeout=timeout)
 
     try:
+        # macOS refusing chat.db (no Full Disk Access) is a JSON 503 the client can show,
+        # not a dropped connection that the cloud reports as "relay unreachable"
+        with tempfile.TemporaryDirectory() as denied_dir:
+            denied_db = os.path.join(denied_dir, "chat.db")
+            open(denied_db, "wb").close()
+            real_connect = sqlite3.connect
+
+            def _denied_connect(target, *a, **kw):
+                if isinstance(target, str) and "chat.db" in target and denied_dir.replace("/", "%2F") in target.replace("/", "%2F"):
+                    raise sqlite3.DatabaseError("authorization denied")
+                return real_connect(target, *a, **kw)
+
+            saved_db_path = test_eng.db_path
+            test_eng.db_path = denied_db
+            test_eng._chat_db_readable_cache = None
+            sqlite3.connect = _denied_connect
+            try:
+                try:
+                    _open_loopback_selftest(
+                        "/api/v1/message/query?password=selftest-secret",
+                        data=json.dumps({"limit": 1}).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    raise AssertionError("message/query must fail while chat.db is denied")
+                except urllib.error.HTTPError as denied_exc:
+                    assert denied_exc.code == 503, f"chat.db denial must be HTTP 503, got {denied_exc.code}"
+                    denied_body = json.loads(denied_exc.read().decode("utf-8"))
+                    assert denied_body.get("error") == "chat_db_unreadable", denied_body
+                    assert "Full Disk Access" in denied_body.get("message", ""), denied_body
+                with _open_loopback_selftest("/api/v1/server/info?password=selftest-secret") as info_resp:
+                    info_data = json.loads(info_resp.read().decode("utf-8"))["data"]
+                assert info_data.get("chat_db_readable") is False, info_data
+            finally:
+                sqlite3.connect = real_connect
+                test_eng.db_path = saved_db_path
+                test_eng._chat_db_readable_cache = None
+        # A missing chat.db (e.g. Linux) is not an access problem
+        assert test_eng.chat_db_readable() is True, "missing chat.db must not report as denied"
+
         boundary = "----BluePillSelftestBoundary987654"
         png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"
         parts = [
