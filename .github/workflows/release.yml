@@ -319,15 +319,43 @@ jobs:
             git push origin main
           fi
 
-      - name: Optional Sync to AUR
+  sync-aur:
+    name: Sync AUR Packages (bluepill & bluepill-bin)
+    needs: [build-arch-and-bottle, publish-release]
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      - name: Check AUR Secret Configured
+        id: check
         env:
           AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
         run: |
           if [ -z "${AUR_KEY}" ]; then
             echo "::notice ::AUR_SSH_PRIVATE_KEY not configured. Skipping automated AUR commit."
-            exit 0
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
           fi
-          echo "Automated AUR push enabled via SSH key."
+
+      - name: Install Arch Packaging Tools
+        if: steps.check.outputs.enabled == 'true'
+        run: |
+          pacman -Syu --noconfirm base-devel git openssh python curl
+
+      - name: Checkout Tag
+        if: steps.check.outputs.enabled == 'true'
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Publish bluepill & bluepill-bin to AUR
+        if: steps.check.outputs.enabled == 'true'
+        env:
+          AUR_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
           VER="${{ needs.build-arch-and-bottle.outputs.version }}"
           SRC_URL="https://github.com/nertwork/bluepill/archive/refs/tags/v${VER}.tar.gz"
           SRC_TMP="/tmp/bluepill-aur-v${VER}.tar.gz"
@@ -338,10 +366,14 @@ jobs:
             echo "::error ::Failed to compute v${VER} archive checksum for AUR PKGBUILD"
             exit 1
           fi
+
           mkdir -p ~/.ssh
-          echo "${AUR_KEY}" > ~/.ssh/aur_key
+          printf '%s\n' "${AUR_KEY}" > ~/.ssh/aur_key
           chmod 600 ~/.ssh/aur_key
-          ssh-keyscan aur.archlinux.org >> ~/.ssh/known_hosts
+          ssh-keyscan -H aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          useradd -m builder || true
+
+          # 1. Source AUR package (bluepill)
           GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill.git /tmp/aur-bluepill
           cp pkgbuild/PKGBUILD.aur /tmp/aur-bluepill/PKGBUILD
           VER="${VER}" SRC_SHA="${SRC_SHA}" python3 - <<'PY'
@@ -350,14 +382,15 @@ jobs:
           sha = os.environ["SRC_SHA"]
           p = pathlib.Path("/tmp/aur-bluepill/PKGBUILD")
           txt = p.read_text(encoding="utf-8")
-          txt = re.sub(r'^pkgver=.*$', f'pkgver={ver}', txt, count=1, flags=re.M)
-          txt = re.sub(r'^pkgrel=.*$', 'pkgrel=1', txt, count=1, flags=re.M)
-          txt = re.sub(r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')", txt, count=1, flags=re.M)
+          for pat, rep in [
+              (r'^pkgver=.*$', f'pkgver={ver}'),
+              (r'^pkgrel=.*$', 'pkgrel=1'),
+              (r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')"),
+          ]:
+              txt, n = re.subn(pat, rep, txt, count=1, flags=re.M)
+              assert n == 1, f"AUR PKGBUILD substitution failed: {pat}"
           p.write_text(txt, encoding="utf-8")
           PY
-          mkdir -p /tmp/aur-build
-          chmod 777 /tmp/aur-build
-          useradd -m builder || true
           chown -R builder:builder /tmp/aur-bluepill
           su builder -c "cd /tmp/aur-bluepill && makepkg --printsrcinfo > .SRCINFO"
           chown -R root:root /tmp/aur-bluepill
@@ -370,34 +403,38 @@ jobs:
             GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
           fi
 
-          # Also publish prebuilt binary AUR package (bluepill-bin) for instant ~2s installs on x86_64 Arch
+          # 2. Prebuilt binary AUR package (bluepill-bin) for ~2s installs on x86_64 Arch
+          cd "$GITHUB_WORKSPACE"
           BIN_URL="https://github.com/nertwork/bluepill/releases/download/v${VER}/bluepill-${VER}-1-x86_64.pkg.tar.zst"
           BIN_TMP="/tmp/bluepill-${VER}-1-x86_64.pkg.tar.zst"
-          if curl -fsSL "${BIN_URL}" -o "${BIN_TMP}"; then
-            BIN_SHA=$(sha256sum "${BIN_TMP}" | awk '{print $1}')
-            rm -f "${BIN_TMP}"
-            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill-bin.git /tmp/aur-bluepill-bin
-            cp "$GITHUB_WORKSPACE/pkgbuild/PKGBUILD.bin" /tmp/aur-bluepill-bin/PKGBUILD
-            VER="${VER}" BIN_SHA="${BIN_SHA}" python3 - <<'PY'
+          curl -fsSL "${BIN_URL}" -o "${BIN_TMP}"
+          BIN_SHA=$(sha256sum "${BIN_TMP}" | awk '{print $1}')
+          rm -f "${BIN_TMP}"
+          GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git clone ssh://aur@aur.archlinux.org/bluepill-bin.git /tmp/aur-bluepill-bin
+          cp "$GITHUB_WORKSPACE/pkgbuild/PKGBUILD.bin" /tmp/aur-bluepill-bin/PKGBUILD
+          VER="${VER}" BIN_SHA="${BIN_SHA}" python3 - <<'PY'
           import os, pathlib, re
           ver = os.environ["VER"]
           sha = os.environ["BIN_SHA"]
           p = pathlib.Path("/tmp/aur-bluepill-bin/PKGBUILD")
           txt = p.read_text(encoding="utf-8")
-          txt = re.sub(r'^pkgver=.*$', f'pkgver={ver}', txt, count=1, flags=re.M)
-          txt = re.sub(r'^pkgrel=.*$', 'pkgrel=1', txt, count=1, flags=re.M)
-          txt = re.sub(r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')", txt, count=1, flags=re.M)
+          for pat, rep in [
+              (r'^pkgver=.*$', f'pkgver={ver}'),
+              (r'^pkgrel=.*$', 'pkgrel=1'),
+              (r"^sha256sums=\('[^']+'\)", f"sha256sums=('{sha}')"),
+          ]:
+              txt, n = re.subn(pat, rep, txt, count=1, flags=re.M)
+              assert n == 1, f"AUR bin PKGBUILD substitution failed: {pat}"
           p.write_text(txt, encoding="utf-8")
           PY
-            chown -R builder:builder /tmp/aur-bluepill-bin
-            su builder -c "cd /tmp/aur-bluepill-bin && makepkg --printsrcinfo > .SRCINFO"
-            chown -R root:root /tmp/aur-bluepill-bin
-            cd /tmp/aur-bluepill-bin
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add PKGBUILD .SRCINFO
-            if ! git diff-index --quiet HEAD; then
-              git commit -m "chore(release): bump bluepill-bin to v${VER}"
-              GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
-            fi
+          chown -R builder:builder /tmp/aur-bluepill-bin
+          su builder -c "cd /tmp/aur-bluepill-bin && makepkg --printsrcinfo > .SRCINFO"
+          chown -R root:root /tmp/aur-bluepill-bin
+          cd /tmp/aur-bluepill-bin
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          if ! git diff-index --quiet HEAD; then
+            git commit -m "chore(release): bump bluepill-bin to v${VER}"
+            GIT_SSH_COMMAND="ssh -i ~/.ssh/aur_key" git push origin master
           fi
