@@ -1240,6 +1240,8 @@ private:
     bool m_initialSyncComplete = false;
     // A history load was cut short by a chat.db denial; resume it once access is back
     bool m_historyResumePending = false;
+    // History generation resumed after startup finished: its pages are live, not startup history
+    int m_liveHistoryResumeGen = -1;
     qint64 m_lastContactsFetchMs = 0;
     QString m_playingAudioGuid;
     bool m_audioPlaying = false;

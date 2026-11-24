@@ -5355,7 +5355,11 @@ void Backend::maybeResumeHistoryAfterDenial() {
     if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
     QTimer::singleShot(0, this, [this]() {
         if (m_historyResumePending && !m_macNeedsFullDiskAccess && !m_syncingHistory) {
+            const bool startupDone = m_initialSyncComplete;
             fetchRecentMessages(0);  // starts a new sync generation
+            // After startup, keep its notification cutoff: messages that arrived since are
+            // notified normally (older history stays quiet via shouldNotifyForIncomingMessage).
+            m_liveHistoryResumeGen = startupDone ? m_historySyncGeneration : -1;
         }
     });
 }
@@ -6200,8 +6204,9 @@ void Backend::fetchRecentMessages(int offset, int syncGen) {
         handleNetworkSuccess();
         if (syncGen == m_historySyncGeneration) setMacNeedsFullDiskAccess(false);
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
-        processIncomingMessages(arr, true);
-        if (offset == 0) {
+        const bool asStartupHistory = (syncGen != m_liveHistoryResumeGen);
+        processIncomingMessages(arr, asStartupHistory);
+        if (offset == 0 && asStartupHistory) {
             m_initialSyncComplete = true;
             m_startupHighestRowId = qMax(m_startupHighestRowId, m_highestMessageRowId);
             saveMessagesCache();

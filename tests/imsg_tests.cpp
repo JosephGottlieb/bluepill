@@ -1826,6 +1826,7 @@ private slots:
         int historyLoadsServed = 0;    // startup history pages (limit 250) answered with data
         bool dropNextHistoryLoad = false;  // the first reload after access returns hits a network error
         QHash<QTcpSocket *, QByteArray> pending;  // requests can arrive in pieces
+        QByteArray historyPayload;                // non-empty: history pages return this body
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
@@ -1854,11 +1855,15 @@ private slots:
                                + (dbReadable ? "true" : "false") + "}}";
                     } else if (dbReadable && reqLine.contains("/api/v1/message/query") && req.contains("\"limit\":250")) {
                         if (dropNextHistoryLoad) {
+                            // An HTTP error, not a closed socket: Qt may silently resend a
+                            // request whose connection closed, which would turn this into a 200
                             dropNextHistoryLoad = false;
-                            sock->abort();
-                            return;
+                            status = "502 Bad Gateway";
+                            body = "{\"status\":502,\"error\":\"local_bluepill_unreachable\"}";
+                        } else {
+                            ++historyLoadsServed;
+                            if (!historyPayload.isEmpty()) body = historyPayload;
                         }
-                        ++historyLoadsServed;
                     } else if (!dbReadable && (reqLine.contains("/api/v1/message/query") || reqLine.contains("/api/v1/chat/query"))) {
                         status = "503 Service Unavailable";
                         body = "{\"status\":503,\"message\":\"The Mac cannot read chat.db: give Full Disk Access\",\"data\":null,\"error\":\"chat_db_unreadable\"}";
@@ -1935,6 +1940,24 @@ private slots:
         b.pollDeltaForTest();
         QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 1, 3000);
         QTRY_VERIFY_WITH_TIMEOUT(b.initialSyncCompleteForTest(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.syncingHistory(), 3000);
+
+        // Denied again after startup finished: the resumed load is live, so a message that
+        // arrived meanwhile is notified (not swallowed as startup history)
+        dbReadable = false;
+        b.fetchRecentMessagesForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.macNeedsFullDiskAccess(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(!b.syncingHistory(), 3000);
+        b.resetNotificationCountersForTest();
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        historyPayload = "{\"status\":200,\"data\":[{\"guid\":\"m-fda-new\",\"text\":\"Arrived while denied\","
+                         "\"isFromMe\":false,\"service\":\"iMessage\",\"originalROWID\":900,\"dateCreated\":"
+                         + QByteArray::number(nowMs) + ",\"handle\":{\"address\":\"+15555550100\"},"
+                         "\"chats\":[{\"guid\":\"iMessage;-;+15555550100\",\"style\":45}]}]}";
+        dbReadable = true;
+        b.pollDeltaForTest();
+        QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 2, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(b.notificationCountForTest(), 1, 3000);
     }
 
     void testV161BackgroundImagePrefetchAndRetry() {
