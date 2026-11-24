@@ -1953,11 +1953,19 @@ private slots:
         historyPayload = "{\"status\":200,\"data\":[{\"guid\":\"m-fda-new\",\"text\":\"Arrived while denied\","
                          "\"isFromMe\":false,\"service\":\"iMessage\",\"originalROWID\":900,\"dateCreated\":"
                          + QByteArray::number(nowMs) + ",\"handle\":{\"address\":\"+15555550100\"},"
-                         "\"chats\":[{\"guid\":\"iMessage;-;+15555550100\",\"style\":45}]}]}";
+                         "\"chats\":[{\"guid\":\"iMessage;-;+15555550100\",\"style\":45}]},"
+                         // An old send that failed before BluePill started: history, so no toast
+                         "{\"guid\":\"m-fda-old-fail\",\"text\":\"Old failed send\",\"isFromMe\":true,\"error\":22,"
+                         "\"service\":\"iMessage\",\"originalROWID\":120,\"dateCreated\":"
+                         + QByteArray::number(nowMs - 3LL * 86400000LL) + ",\"chats\":[{\"guid\":\"iMessage;-;+15555550100\",\"style\":45}]}]}";
         dbReadable = true;
         b.pollDeltaForTest();
         QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 2, 3000);
         QTRY_COMPARE_WITH_TIMEOUT(b.notificationCountForTest(), 1, 3000);
+        for (const QList<QVariant> &args : toasts) {
+            QVERIFY2(!args.value(0).toString().contains(QStringLiteral("failed to deliver")),
+                     qPrintable(args.value(0).toString()));
+        }
     }
 
     void testV161BackgroundImagePrefetchAndRetry() {

@@ -7634,7 +7634,10 @@ void Backend::processIncomingMessages(const QJsonArray &messagesArray, bool isIn
                 const bool existedBefore = (beforeChatIt != m_chatMessagesCache.constEnd() && beforeChatIt->contains(msgGuid));
                 const QJsonObject beforeCached = existedBefore ? beforeChatIt->value(msgGuid) : QJsonObject();
                 const int oldErr = existedBefore ? beforeCached.value(QStringLiteral("error")).toInt(0) : 0;
-                if (!isInitialLoad && incomingFromMe && incomingErr != 0 && (oldErr == 0 || !alreadySeen) && !notifiedSendError) {
+                // Only sends from this session: a resumed history load can bring back
+                // failures from before BluePill started that were never cached.
+                if (!isInitialLoad && incomingFromMe && incomingErr != 0 && (oldErr == 0 || !alreadySeen) && !notifiedSendError &&
+                    dateCreated >= m_startupTimestamp) {
                     notifiedSendError = true;
                     emit toastMessage(QStringLiteral("⚠ Message failed to deliver (error %1)").arg(incomingErr));
                 }
