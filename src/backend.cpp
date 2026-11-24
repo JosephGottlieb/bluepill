@@ -5339,15 +5339,25 @@ void Backend::setMacNeedsFullDiskAccess(bool needed) {
     if (changed && needed) {
         emit toastMessage(QStringLiteral("⚠ ") + fullDiskAccessStatusNote());
     }
-    if (changed && !needed && !m_initialSyncComplete && !m_demoMode && !m_serverUrl.isEmpty()) {
-        // The startup history load failed while chat.db was denied and nothing else
-        // reissues it; fetchRecentMessages(0) starts a new sync generation.
-        QTimer::singleShot(0, this, [this]() { fetchRecentMessages(0); });
+    if (changed && !needed) {
+        maybeResumeHistoryAfterDenial();
     }
     if (changed || next != m_serverStatus) {
         m_serverStatus = next;
         emit statusChanged();
     }
+}
+
+void Backend::maybeResumeHistoryAfterDenial() {
+    // A history load (any page) was refused while chat.db was denied, and nothing
+    // else reissues it. Retried from each successful poll until a sync completes.
+    if (!m_historyResumePending || m_macNeedsFullDiskAccess || m_syncingHistory) return;
+    if (m_demoMode || m_serverUrl.isEmpty() || m_password.isEmpty()) return;
+    QTimer::singleShot(0, this, [this]() {
+        if (m_historyResumePending && !m_macNeedsFullDiskAccess && !m_syncingHistory) {
+            fetchRecentMessages(0);  // starts a new sync generation
+        }
+    });
 }
 
 bool Backend::handleChatDbUnreadableReply(QNetworkReply *reply) {
@@ -6175,7 +6185,11 @@ void Backend::fetchRecentMessages(int offset, int syncGen) {
         }
 
         if (reply->error() != QNetworkReply::NoError) {
-            handleChatDbUnreadableReply(reply);
+            // Only the current generation speaks for chat.db: a late denial from a
+            // superseded load must not bring the warning back.
+            if (syncGen == m_historySyncGeneration && handleChatDbUnreadableReply(reply)) {
+                m_historyResumePending = true;
+            }
             if (syncGen == m_historySyncGeneration && m_syncingHistory) {
                 m_syncingHistory = false;
                 emit syncingHistoryChanged();
@@ -6184,6 +6198,7 @@ void Backend::fetchRecentMessages(int offset, int syncGen) {
             return;
         }
         handleNetworkSuccess();
+        if (syncGen == m_historySyncGeneration) setMacNeedsFullDiskAccess(false);
         const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
         processIncomingMessages(arr, true);
         if (offset == 0) {
@@ -6199,6 +6214,7 @@ void Backend::fetchRecentMessages(int offset, int syncGen) {
                 fetchRecentMessages(offset + pageSize, syncGen);
             });
         } else {
+            m_historyResumePending = false;
             if (m_syncingHistory) {
                 m_syncingHistory = false;
                 emit syncingHistoryChanged();
@@ -6609,6 +6625,7 @@ void Backend::pollDelta() {
             }
             handleNetworkSuccess();
             setMacNeedsFullDiskAccess(false);
+            maybeResumeHistoryAfterDenial();  // retry an interrupted history load on each poll
             const QJsonArray arr = QJsonDocument::fromJson(reply->readAll()).object().value(QStringLiteral("data")).toArray();
             processIncomingMessages(arr, false);
         });

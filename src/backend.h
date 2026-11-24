@@ -1001,6 +1001,7 @@ private:
     // Returns true (and updates the status) when the reply is that error.
     bool handleChatDbUnreadableReply(QNetworkReply *reply);
     void setMacNeedsFullDiskAccess(bool needed);
+    void maybeResumeHistoryAfterDenial();
     void applyRemoteIcloudNotes(const QJsonArray &data, const QString &acknowledgedNoteId = QString(), quint64 acknowledgedMutationSeq = 0);
     void applyRemoteIcloudEvents(const QJsonArray &data, const QString &acknowledgedEventId = QString());
     void scheduleIcloudMutationRetry(bool immediate);
@@ -1237,6 +1238,8 @@ private:
     qint64 m_startupHighestRowId = 0;
     qint64 m_startupTimestamp = 0;
     bool m_initialSyncComplete = false;
+    // A history load was cut short by a chat.db denial; resume it once access is back
+    bool m_historyResumePending = false;
     qint64 m_lastContactsFetchMs = 0;
     QString m_playingAudioGuid;
     bool m_audioPlaying = false;

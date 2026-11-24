@@ -1824,12 +1824,24 @@ private slots:
         bool dbReadable = false;
         bool dropConnections = false;  // simulates the relay being unreachable
         int historyLoadsServed = 0;    // startup history pages (limit 250) answered with data
+        bool dropNextHistoryLoad = false;  // the first reload after access returns hits a network error
+        QHash<QTcpSocket *, QByteArray> pending;  // requests can arrive in pieces
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
             while (QTcpSocket *sock = server.nextPendingConnection()) {
                 QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
-                    const QByteArray req = sock->readAll();
+                    QByteArray &buf = pending[sock];
+                    buf += sock->readAll();
+                    const int headerEnd = buf.indexOf("\r\n\r\n");
+                    if (headerEnd < 0) return;
+                    qsizetype contentLength = 0;
+                    for (const QByteArray &h : buf.left(headerEnd).split('\n')) {
+                        if (h.trimmed().toLower().startsWith("content-length:"))
+                            contentLength = h.mid(h.indexOf(':') + 1).trimmed().toLongLong();
+                    }
+                    if (buf.size() < headerEnd + 4 + contentLength) return;  // body not complete yet
+                    const QByteArray req = pending.take(sock);
                     const QByteArray reqLine = req.split('\n').value(0).trimmed();
                     if (dropConnections) {
                         sock->abort();
@@ -1841,6 +1853,11 @@ private slots:
                         body = QByteArray("{\"status\":200,\"message\":\"Success\",\"data\":{\"server_version\":\"1.2.15\",\"os_version\":\"26.6\",\"private_api\":false,\"chat_db_readable\":")
                                + (dbReadable ? "true" : "false") + "}}";
                     } else if (dbReadable && reqLine.contains("/api/v1/message/query") && req.contains("\"limit\":250")) {
+                        if (dropNextHistoryLoad) {
+                            dropNextHistoryLoad = false;
+                            sock->abort();
+                            return;
+                        }
                         ++historyLoadsServed;
                     } else if (!dbReadable && (reqLine.contains("/api/v1/message/query") || reqLine.contains("/api/v1/chat/query"))) {
                         status = "503 Service Unavailable";
@@ -1905,11 +1922,17 @@ private slots:
 
         // Access granted: the next successful query clears the warning
         dbReadable = true;
+        dropNextHistoryLoad = true;
         b.pollDeltaForTest();
         QTRY_VERIFY_WITH_TIMEOUT(!b.macNeedsFullDiskAccess(), 3000);
         QVERIFY(b.connected());
         QCOMPARE(b.serverStatus(), QStringLiteral("Connected v1.2.15 · macOS 26.6"));
-        // ...and the startup history load is reissued, so the initial sync completes
+        // ...and the startup history load is reissued. The first reissue hits a network
+        // error; the next successful poll retries it, and the initial sync completes.
+        QTRY_VERIFY_WITH_TIMEOUT(!dropNextHistoryLoad, 3000);
+        QTest::qWait(200);
+        QCOMPARE(historyLoadsServed, 0);
+        b.pollDeltaForTest();
         QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 1, 3000);
         QTRY_VERIFY_WITH_TIMEOUT(b.initialSyncCompleteForTest(), 3000);
     }
