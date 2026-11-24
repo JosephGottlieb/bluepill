@@ -816,7 +816,8 @@ void Backend::setStateFilePath(const QString &path) {
     m_historySyncDays = 60;
     m_showTopBarStatusPill = false;
     m_showPinnedRow = true;
-    m_hoverMessageActions = true;
+    m_hoverMessageActions = false;
+    m_onboardingCompleted = false;
     m_stayOnHomePage = false;
     m_mutedChats.clear();
     m_readWatermarks.clear();
@@ -902,7 +903,12 @@ void Backend::loadAppState() {
         m_showPinnedRow = obj.value(QStringLiteral("showPinnedRow")).toBool(true);
     }
     if (obj.contains(QStringLiteral("hoverMessageActions"))) {
-        m_hoverMessageActions = obj.value(QStringLiteral("hoverMessageActions")).toBool(true);
+        m_hoverMessageActions = obj.value(QStringLiteral("hoverMessageActions")).toBool(false);
+    }
+    if (obj.contains(QStringLiteral("onboardingCompleted"))) {
+        m_onboardingCompleted = obj.value(QStringLiteral("onboardingCompleted")).toBool(false);
+    } else if (!m_serverUrl.isEmpty() || !m_cloudAccountEmail.isEmpty()) {
+        m_onboardingCompleted = true;
     }
     const QString savedStatus = obj.value(QStringLiteral("lastKnownServerStatus")).toString().trimmed();
     if (!savedStatus.isEmpty()) {
@@ -1142,6 +1148,7 @@ bool Backend::saveAppState() const {
     root.insert(QStringLiteral("showTopBarStatusPill"), m_showTopBarStatusPill);
     root.insert(QStringLiteral("showPinnedRow"), m_showPinnedRow);
     root.insert(QStringLiteral("hoverMessageActions"), m_hoverMessageActions);
+    root.insert(QStringLiteral("onboardingCompleted"), m_onboardingCompleted);
     root.insert(QStringLiteral("lastKnownServerStatus"), m_lastKnownServerStatus);
     QJsonArray pinnedArr;
     for (const QString &g : m_pinnedChats) {
@@ -1613,6 +1620,13 @@ void Backend::setShowPinnedRow(bool enabled) {
 void Backend::setHoverMessageActions(bool enabled) {
     if (m_hoverMessageActions == enabled) return;
     m_hoverMessageActions = enabled;
+    saveAppState();
+    emit uiPreferencesChanged();
+}
+
+void Backend::setOnboardingCompleted(bool completed) {
+    if (m_onboardingCompleted == completed) return;
+    m_onboardingCompleted = completed;
     saveAppState();
     emit uiPreferencesChanged();
 }
@@ -10827,9 +10841,14 @@ QString Backend::resolveMergedOutgoingReceiptAndPending(
     return finalReceipt;
 }
 
-void Backend::sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid) {
+void Backend::sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid, const QString &effectId) {
     const QString trimmed = replaceEmojiShortcodes(text.trimmed());
     if (chatGuid.isEmpty() || trimmed.isEmpty()) return;
+
+    const QString cleanEffectId = effectId.trimmed();
+    if (!cleanEffectId.isEmpty()) {
+        m_recentOutboundEffects.insert(trimmed, cleanEffectId);
+    }
 
     const QString canonicalGuid = resolveCanonicalChatGuid(chatGuid);
     const QString sendChatGuid = resolveActiveSendChatGuid(canonicalGuid);
@@ -10856,6 +10875,20 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     optimistic.insert(QStringLiteral("replyToGuid"), replyToGuid);
     optimistic.insert(QStringLiteral("dateCreated"), optNowMs);
     optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), optNowMs);
+    if (!cleanEffectId.isEmpty()) {
+        optimistic.insert(QStringLiteral("expressiveSendStyleId"), cleanEffectId);
+        QString expressiveEffectName;
+        if (cleanEffectId.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🕵️ Invisible Ink");
+        else if (cleanEffectId.endsWith(QStringLiteral(".impact"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("💥 Slam");
+        else if (cleanEffectId.endsWith(QStringLiteral(".loud"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("📢 Loud");
+        else if (cleanEffectId.endsWith(QStringLiteral(".gentle"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🪶 Gentle");
+        else if (cleanEffectId.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎉 Confetti");
+        else if (cleanEffectId.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("✨ Lasers");
+        else if (cleanEffectId.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎆 Fireworks");
+        else expressiveEffectName = formatExpressiveEffectLabel(cleanEffectId);
+        optimistic.insert(QStringLiteral("expressiveEffect"), expressiveEffectName);
+        optimistic.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(cleanEffectId));
+    }
     if (m_demoMode && m_demoChatMessages.contains(canonicalGuid)) {
         m_demoChatMessages[canonicalGuid].append(optimistic);
     }
@@ -10886,6 +10919,9 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
     payload.insert(QStringLiteral("tempGuid"), tempGuid);
     payload.insert(QStringLiteral("message"), trimmed);
     payload.insert(QStringLiteral("method"), QStringLiteral("private-api"));
+    if (!cleanEffectId.isEmpty()) {
+        payload.insert(QStringLiteral("effectId"), cleanEffectId);
+    }
     if (!replyToGuid.isEmpty()) {
         payload.insert(QStringLiteral("selectedMessageGuid"), replyToGuid);
         int partIndex = 0;
@@ -15624,82 +15660,8 @@ void Backend::stopAndSendVoiceRecording() {
 }
 
 void Backend::sendMessageWithEffect(const QString &text, const QString &effectId) {
-    const QString trimmed = replaceEmojiShortcodes(text.trimmed());
-    if (m_selectedChatGuid.isEmpty() || trimmed.isEmpty()) return;
-
-    m_recentOutboundEffects.insert(trimmed, effectId);
-
-    const QString tempGuid = QStringLiteral("temp-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
-
-    QVariantMap optimistic;
-    optimistic.insert(QStringLiteral("guid"), tempGuid);
-    optimistic.insert(QStringLiteral("chatGuid"), m_selectedChatGuid);
-    optimistic.insert(QStringLiteral("text"), trimmed);
-    optimistic.insert(QStringLiteral("formattedText"), formatMessageTextWithLinks(trimmed));
-    optimistic.insert(QStringLiteral("verificationCode"), extractVerificationCode(trimmed));
-    optimistic.insert(QStringLiteral("isFromMe"), true);
-    optimistic.insert(QStringLiteral("senderName"), QStringLiteral("You"));
-    optimistic.insert(QStringLiteral("senderColor"), QStringLiteral("#7aa2f7"));
-    optimistic.insert(QStringLiteral("timeText"), QDateTime::currentDateTime().toString(QStringLiteral("h:mm AP")));
-    optimistic.insert(QStringLiteral("showDateHeader"), false);
-    optimistic.insert(QStringLiteral("dateHeaderText"), QString());
-    optimistic.insert(QStringLiteral("reactions"), QVariantList());
-    optimistic.insert(QStringLiteral("hasImageAttachment"), false);
-    optimistic.insert(QStringLiteral("hasFileAttachment"), false);
-    optimistic.insert(QStringLiteral("receiptText"), m_demoMode ? QStringLiteral("Delivered") : QStringLiteral("Sending..."));
-    optimistic.insert(QStringLiteral("optimisticCreatedAtMs"), QDateTime::currentMSecsSinceEpoch());
-    optimistic.insert(QStringLiteral("expressiveSendStyleId"), effectId);
-
-    QString expressiveEffectName;
-    if (effectId.endsWith(QStringLiteral(".invisibleink"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🕵️ Invisible Ink");
-    else if (effectId.endsWith(QStringLiteral(".impact"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("💥 Slam");
-    else if (effectId.endsWith(QStringLiteral(".loud"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("📢 Loud");
-    else if (effectId.endsWith(QStringLiteral(".gentle"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🪶 Gentle");
-    else if (effectId.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎉 Confetti");
-    else if (effectId.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("✨ Lasers");
-    else if (effectId.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎆 Fireworks");
-    else expressiveEffectName = formatExpressiveEffectLabel(effectId);
-
-    optimistic.insert(QStringLiteral("expressiveEffect"), expressiveEffectName);
-    optimistic.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(effectId));
-
-    m_messages.append(optimistic);
-    emit messagesChanged();
-
-    m_unreadOverrides.remove(m_selectedChatGuid);
-    for (ChatEntry &c : m_chats) {
-        if (c.guid == m_selectedChatGuid) {
-            c.lastMessagePreview = trimmed;
-            c.lastMessageDate = QDateTime::currentMSecsSinceEpoch();
-            c.relativeTime = QStringLiteral("now");
-            c.unreadCount = 0;
-            m_readWatermarks[m_selectedChatGuid] = qMax(m_readWatermarks.value(m_selectedChatGuid, 0), c.lastMessageDate);
-            break;
-        }
-    }
-    sortChats();
-    emit chatsChanged();
-
-    if (m_demoMode || m_serverUrl.isEmpty()) return;
-
-    QJsonObject payload;
-    payload.insert(QStringLiteral("chatGuid"), m_selectedChatGuid);
-    payload.insert(QStringLiteral("tempGuid"), tempGuid);
-    payload.insert(QStringLiteral("message"), trimmed);
-    payload.insert(QStringLiteral("method"), QStringLiteral("private-api"));
-    payload.insert(QStringLiteral("effectId"), effectId);
-
-    QUrl url(m_serverUrl + QStringLiteral("/api/v1/message/text"));
-    if (!m_password.isEmpty()) {
-        QUrlQuery query(url);
-        query.addQueryItem(QStringLiteral("password"), m_password);
-        url.setQuery(query);
-    }
-    QNetworkRequest req(url);
-    req.setHeader(QNetworkRequest::ContentTypeHeader, QStringLiteral("application/json"));
-    req.setTransferTimeout(45000);
-    QNetworkReply *effReply = m_sendNam.post(req, QJsonDocument(payload).toJson(QJsonDocument::Compact));
-    connect(effReply, &QNetworkReply::finished, effReply, &QNetworkReply::deleteLater);
+    if (m_selectedChatGuid.isEmpty() || text.trimmed().isEmpty()) return;
+    sendMessage(m_selectedChatGuid, text, QString(), effectId);
 }
 
 void Backend::scheduleMessage(const QString &text, qint64 sendAtMs) {
@@ -17798,6 +17760,117 @@ void Backend::shareIcloudPhotoToChat(const QString &chatGuid, const QString &att
                 return;
             }
             sendAttachment(chatGuid, destPath);
+        }
+    });
+}
+
+void Backend::sendAttachments(const QString &chatGuid, const QStringList &filePaths, const QString &caption) {
+    if (chatGuid.trimmed().isEmpty() || filePaths.isEmpty()) return;
+    QStringList validPaths;
+    for (const QString &p : filePaths) {
+        const QString trimmed = p.trimmed();
+        if (!trimmed.isEmpty()) validPaths.append(trimmed);
+    }
+    if (validPaths.isEmpty()) return;
+    const QString cleanCaption = caption.trimmed();
+    for (int i = 0; i < validPaths.size(); ++i) {
+        const bool isLast = (i == validPaths.size() - 1);
+        const QString itemCaption = isLast ? cleanCaption : QString();
+        if (i == 0) {
+            sendAttachment(chatGuid, validPaths.at(i), itemCaption);
+        } else {
+            const QString pathCopy = validPaths.at(i);
+            QTimer::singleShot(i * 220, this, [this, chatGuid, pathCopy, itemCaption]() {
+                sendAttachment(chatGuid, pathCopy, itemCaption);
+            });
+        }
+    }
+}
+
+void Backend::stageIcloudPhotoForChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName) {
+    if (chatGuid.trimmed().isEmpty() || attachmentGuid.trimmed().isEmpty()) return;
+    QString safeName = QFileInfo(fileName.isEmpty() ? QStringLiteral("photo.jpg") : fileName).fileName();
+    if (safeName.isEmpty()) safeName = QStringLiteral("photo.jpg");
+
+    const QString cachedUrl = m_attachmentPaths.value(attachmentGuid);
+    if (!cachedUrl.isEmpty()) {
+        const QString localPath = QUrl(cachedUrl).isLocalFile() ? QUrl(cachedUrl).toLocalFile() : cachedUrl;
+        if (QFileInfo::exists(localPath) && (m_demoMode || isSecureOrLocalIcloudEndpoint())) {
+            emit icloudPhotoStaged(chatGuid, localPath, safeName);
+            return;
+        }
+    }
+    if (m_demoMode) {
+        // In demo mode, stage using the cached or synthetic path
+        emit icloudPhotoStaged(chatGuid, cachedUrl.isEmpty() ? attachmentGuid : cachedUrl, safeName);
+        return;
+    }
+    if (!isSecureOrLocalIcloudEndpoint()) {
+        emit toastMessage(QStringLiteral("Attaching iCloud photos requires HTTPS or a local loopback tunnel"));
+        return;
+    }
+    const QString encodedGuid = QString::fromUtf8(QUrl::toPercentEncoding(attachmentGuid));
+    QNetworkReply *reply = m_mediaNam.get(makeRequest(QStringLiteral("/api/v1/attachment/") + encodedGuid + QStringLiteral("/download")));
+    connect(reply, &QNetworkReply::finished, this, [this, reply, chatGuid, attachmentGuid, safeName]() {
+        reply->deleteLater();
+        if (reply->error() != QNetworkReply::NoError) {
+            emit toastMessage(QStringLiteral("Failed to fetch iCloud photo for message"));
+            return;
+        }
+        const QByteArray raw = reply->readAll();
+        if (raw.isEmpty()) {
+            emit toastMessage(QStringLiteral("Downloaded iCloud photo is empty"));
+            return;
+        }
+        const QString cacheDir = effectiveHomePath() + QStringLiteral("/.cache/imsg/attachments");
+        QDir().mkpath(cacheDir);
+        QString safeGuid = attachmentGuid;
+        safeGuid.replace(QLatin1Char('/'), QLatin1Char('_'));
+        safeGuid.replace(QLatin1Char(':'), QLatin1Char('_'));
+        const QString destPath = cacheDir + QLatin1Char('/') + safeGuid + QLatin1Char('_') + safeName;
+        QFile out(destPath);
+        if (out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            out.setPermissions(QFile::ReadOwner | QFile::WriteOwner);
+            out.write(raw);
+            out.close();
+
+            const QString lower = destPath.toLower();
+            const QByteArray hdr = raw.left(16);
+            const bool isHeifMagic = (hdr.size() >= 12 && hdr.mid(4, 4) == QByteArrayLiteral("ftyp"));
+            const bool isNonNativeExt = lower.endsWith(QStringLiteral(".heic")) || lower.endsWith(QStringLiteral(".heif")) ||
+                                        lower.endsWith(QStringLiteral(".heics")) || lower.endsWith(QStringLiteral(".avif")) ||
+                                        lower.endsWith(QStringLiteral(".tiff")) || lower.endsWith(QStringLiteral(".tif")) ||
+                                        lower.endsWith(QStringLiteral(".bmp"));
+            if (isHeifMagic || isNonNativeExt) {
+                const bool inPlaceJpg = lower.endsWith(QStringLiteral(".jpg")) || lower.endsWith(QStringLiteral(".jpeg"));
+                const QString outTarget = inPlaceJpg
+                                              ? (destPath + QStringLiteral(".conv.jpg"))
+                                              : (destPath + QStringLiteral(".jpg"));
+                startImageConvertProcess(this, destPath, outTarget, [this, chatGuid, attachmentGuid, safeName, destPath, outTarget, inPlaceJpg]() {
+                    QString finalPath = destPath;
+                    if (QFileInfo::exists(outTarget) && QFileInfo(outTarget).size() >= 100) {
+#ifndef Q_OS_WIN
+                        QFile::setPermissions(outTarget, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
+                        if (inPlaceJpg) {
+                            QFile::remove(destPath);
+                            QFile::rename(outTarget, destPath);
+                            finalPath = destPath;
+                        } else {
+                            finalPath = outTarget;
+                        }
+                    }
+#ifndef Q_OS_WIN
+                    QFile::setPermissions(finalPath, QFileDevice::ReadOwner | QFileDevice::WriteOwner);
+#endif
+                    m_attachmentPaths.insert(attachmentGuid, finalPath);
+                    emit icloudPhotoStaged(chatGuid, finalPath, safeName);
+                });
+                return;
+            }
+
+            m_attachmentPaths.insert(attachmentGuid, destPath);
+            emit icloudPhotoStaged(chatGuid, destPath, safeName);
         }
     });
 }

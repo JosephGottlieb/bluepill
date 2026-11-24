@@ -68,9 +68,12 @@ ApplicationWindow {
         composerInput.text = root.preEditDraft
         root.preEditDraft = ""
     }
+    property var stagedAttachments: []
     property string stagedAttachmentPath: ""
     property string stagedAttachmentName: ""
     property string stagedAttachmentChatGuid: ""
+    property string pendingSendEffectId: ""
+    property string pendingSendEffectName: ""
     property var chatAttachmentDrafts: ({})
     property var chatDrafts: ({})
     property string lastDraftChatGuid: ""
@@ -86,7 +89,7 @@ ApplicationWindow {
     property real tapbackEmojiPopupY: 0
     property Item previousFocusBeforeTapbackPicker: null
     property string settingsActiveTab: "server"
-    // Shows on hover when backend.hoverMessageActions is enabled (default true), and always when pinned via right-click.
+    // Right-click opens message actions; hoverMessageActions kept for settings/test compatibility.
     readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== ""
                                                       ? pinnedActionMessageGuid
                                                       : (backend.hoverMessageActions ? hoveredActionMessageGuid : "")
@@ -146,20 +149,57 @@ ApplicationWindow {
     }
 
     function isStagedAttachmentForChat(chatGuid) {
-        if (!chatGuid || chatGuid.length === 0 || root.stagedAttachmentPath.length === 0) return false
-        if (root.stagedAttachmentChatGuid.length === 0) return false
-        return root.stagedAttachmentChatGuid === chatGuid || backend.isSameConversation(root.stagedAttachmentChatGuid, chatGuid)
+        if (!chatGuid || chatGuid.length === 0) return false
+        var list = root.stagedAttachments || []
+        if (list.length === 0 && root.stagedAttachmentPath.length === 0) return false
+        var refGuid = list.length > 0 ? (list[0].chatGuid || root.stagedAttachmentChatGuid) : root.stagedAttachmentChatGuid
+        if (!refGuid || refGuid.length === 0) return false
+        return refGuid === chatGuid || backend.isSameConversation(refGuid, chatGuid)
+    }
+
+    function syncStagedAttachmentCompat(list) {
+        if (list && list.length > 0) {
+            root.stagedAttachmentPath = list[0].path || ""
+            root.stagedAttachmentName = list[0].name || ""
+            root.stagedAttachmentChatGuid = list[0].chatGuid || ""
+        } else {
+            root.stagedAttachmentPath = ""
+            root.stagedAttachmentName = ""
+            root.stagedAttachmentChatGuid = ""
+        }
     }
 
     function stageAttachment(attPath, attName, chatGuid) {
         var targetGuid = (chatGuid && chatGuid.length > 0) ? chatGuid : (backend.selectedChatGuid || "")
         if (!attPath || attPath.length === 0 || targetGuid.length === 0) return
-        root.stagedAttachmentPath = attPath
-        root.stagedAttachmentName = (attName && attName.length > 0) ? attName : attPath.split("/").pop()
-        root.stagedAttachmentChatGuid = targetGuid
+        var cleanName = (attName && attName.length > 0) ? attName : attPath.split("/").pop()
+        var currentList = (root.stagedAttachments || []).slice()
+        if (currentList.length > 0) {
+            var existingGuid = currentList[0].chatGuid || root.stagedAttachmentChatGuid
+            if (existingGuid.length > 0 && existingGuid !== targetGuid && !backend.isSameConversation(existingGuid, targetGuid)) {
+                currentList = []
+            }
+        }
+        var duplicate = false
+        for (var i = 0; i < currentList.length; ++i) {
+            if (currentList[i] && currentList[i].path === attPath) {
+                duplicate = true
+                break
+            }
+        }
+        if (!duplicate) {
+            currentList.push({
+                path: attPath,
+                name: cleanName,
+                chatGuid: targetGuid
+            })
+        }
+        root.stagedAttachments = currentList
+        root.syncStagedAttachmentCompat(currentList)
         var attDrafts = root.chatAttachmentDrafts || ({})
         var canonGuid = backend.resolveCanonicalChatGuid(targetGuid) || targetGuid
         attDrafts[canonGuid] = {
+            items: currentList,
             path: root.stagedAttachmentPath,
             name: root.stagedAttachmentName,
             chatGuid: targetGuid
@@ -170,9 +210,34 @@ ApplicationWindow {
         root.chatAttachmentDrafts = attDrafts
     }
 
+    function removeStagedAttachmentAt(idx) {
+        var list = (root.stagedAttachments || []).slice()
+        if (idx < 0 || idx >= list.length) return
+        list.splice(idx, 1)
+        if (list.length === 0) {
+            root.clearStagedAttachment()
+            return
+        }
+        root.stagedAttachments = list
+        root.syncStagedAttachmentCompat(list)
+        var targetGuid = root.stagedAttachmentChatGuid
+        if (targetGuid.length > 0) {
+            var attDrafts = root.chatAttachmentDrafts || ({})
+            var canonGuid = backend.resolveCanonicalChatGuid(targetGuid) || targetGuid
+            attDrafts[canonGuid] = {
+                items: list,
+                path: root.stagedAttachmentPath,
+                name: root.stagedAttachmentName,
+                chatGuid: targetGuid
+            }
+            root.chatAttachmentDrafts = attDrafts
+        }
+    }
+
     function clearStagedAttachment() {
         var prevGuid = stagedAttachmentChatGuid
         var curGuid = backend.selectedChatGuid || ""
+        stagedAttachments = []
         stagedAttachmentPath = ""
         stagedAttachmentName = ""
         stagedAttachmentChatGuid = ""
@@ -213,13 +278,25 @@ ApplicationWindow {
             if (edited.length > 0) backend.editMessage(editGuid, edited)
             return
         }
-        if (root.stagedAttachmentPath.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+        var activeAttachments = (root.stagedAttachments && root.stagedAttachments.length > 0)
+                                ? root.stagedAttachments.slice()
+                                : (root.stagedAttachmentPath.length > 0
+                                   ? [{ path: root.stagedAttachmentPath, name: root.stagedAttachmentName, chatGuid: root.stagedAttachmentChatGuid }]
+                                   : [])
+        if (activeAttachments.length > 0 && !root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+            root.stagedAttachments = []
             root.stagedAttachmentPath = ""
             root.stagedAttachmentName = ""
             root.stagedAttachmentChatGuid = ""
+            activeAttachments = []
         }
-        if (root.stagedAttachmentPath.length > 0) {
-            var attPath = root.stagedAttachmentPath
+        if (activeAttachments.length > 0) {
+            var paths = []
+            for (var i = 0; i < activeAttachments.length; ++i) {
+                if (activeAttachments[i] && activeAttachments[i].path && activeAttachments[i].path.length > 0) {
+                    paths.push(activeAttachments[i].path)
+                }
+            }
             var targetChatGuid = backend.selectedChatGuid
             var caption = composerInput.text.trim()
             root.clearStagedAttachment()
@@ -229,10 +306,26 @@ ApplicationWindow {
             root.replyTargetGuid = ""
             root.replyTargetSender = ""
             root.replyTargetText = ""
-            backend.sendAttachment(targetChatGuid, attPath, caption)
+            root.pendingSendEffectId = ""
+            root.pendingSendEffectName = ""
+            if (paths.length > 1) {
+                backend.sendAttachments(targetChatGuid, paths, caption)
+            } else if (paths.length === 1) {
+                backend.sendAttachment(targetChatGuid, paths[0], caption)
+            }
             messageListView.scrollToBottom()
         } else if (composerInput.text.trim().length > 0) {
-            backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
+            if (root.pendingSendEffectId.length > 0) {
+                var effId = root.pendingSendEffectId
+                var effName = root.pendingSendEffectName
+                var txtToSend = composerInput.text
+                root.pendingSendEffectId = ""
+                root.pendingSendEffectName = ""
+                backend.sendMessageWithEffect(txtToSend, effId)
+                root.triggerExpressiveEffect(effName)
+            } else {
+                backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
+            }
             messageListView.scrollToBottom()
             composerInput.text = ""
             root.showEmojiPicker = false
@@ -604,6 +697,8 @@ ApplicationWindow {
     property bool showServerConfigModal: false
     property bool showServerPassword: false
     property bool showUpdateModal: false
+    property bool forceShowOnboarding: false
+    property int onboardingStep: 0
 
     onShowServerConfigModalChanged: {
         if (showServerConfigModal) {
@@ -709,7 +804,7 @@ ApplicationWindow {
         running: true
         repeat: false
         onTriggered: {
-            if (backend.needsSetup && !root.showServerConfigModal && !root.showContactInfo
+            if (backend.onboardingCompleted && backend.needsSetup && !root.showServerConfigModal && !root.showContactInfo
                     && !root.showPhotoViewer && !root.showContactModal
                     && !root.showShortcutsModal && !root.showNewChatModal) {
                 root.openServerConfigModal()
@@ -1075,17 +1170,21 @@ ApplicationWindow {
     function resolveSavedAttachmentForChat(chatGuid) {
         if (!chatGuid || chatGuid.length === 0) return null
         var attDrafts = root.chatAttachmentDrafts || ({})
-        if (attDrafts[chatGuid] !== undefined && attDrafts[chatGuid] && attDrafts[chatGuid].path) {
+        if (attDrafts[chatGuid] !== undefined && attDrafts[chatGuid] && (attDrafts[chatGuid].path || (attDrafts[chatGuid].items && attDrafts[chatGuid].items.length > 0))) {
             return attDrafts[chatGuid]
         }
         var keys = Object.keys(attDrafts)
         for (var i = 0; i < keys.length; ++i) {
             var k = keys[i]
             var entry = attDrafts[k]
-            if (k !== "" && k !== chatGuid && entry && entry.path && backend.isSameConversation(k, chatGuid)) {
+            if (k !== "" && k !== chatGuid && entry && (entry.path || (entry.items && entry.items.length > 0)) && backend.isSameConversation(k, chatGuid)) {
+                var itemsList = (entry.items && entry.items.length > 0)
+                                ? entry.items.map(function(it) { return { path: it.path, name: it.name || it.path.split("/").pop(), chatGuid: chatGuid } })
+                                : [{ path: entry.path, name: entry.name || entry.path.split("/").pop(), chatGuid: chatGuid }]
                 var migrated = {
-                    path: entry.path,
-                    name: entry.name || entry.path.split("/").pop(),
+                    items: itemsList,
+                    path: itemsList[0].path,
+                    name: itemsList[0].name,
                     chatGuid: chatGuid
                 }
                 attDrafts[chatGuid] = migrated
@@ -1143,6 +1242,8 @@ ApplicationWindow {
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
                 root.replyTargetText = ""
+                root.pendingSendEffectId = ""
+                root.pendingSendEffectName = ""
             }
             if (root.lastDraftChatGuid !== "" && root.lastDraftChatGuid !== newGuid) {
                 var drafts = root.chatDrafts || ({})
@@ -1158,11 +1259,15 @@ ApplicationWindow {
                 root.chatDrafts = drafts
 
                 var attDrafts = root.chatAttachmentDrafts || ({})
-                if (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(root.lastDraftChatGuid)) {
+                if ((root.stagedAttachments.length > 0 || root.stagedAttachmentPath.length > 0) && root.isStagedAttachmentForChat(root.lastDraftChatGuid)) {
                     var targetKey = (sameConv && newGuid.length > 0) ? newGuid : canonPrev
+                    var savedItems = (root.stagedAttachments && root.stagedAttachments.length > 0)
+                                     ? root.stagedAttachments.map(function(it) { return { path: it.path, name: it.name, chatGuid: targetKey } })
+                                     : [{ path: root.stagedAttachmentPath, name: root.stagedAttachmentName, chatGuid: targetKey }]
                     attDrafts[targetKey] = {
-                        path: root.stagedAttachmentPath,
-                        name: root.stagedAttachmentName,
+                        items: savedItems,
+                        path: savedItems[0].path,
+                        name: savedItems[0].name,
                         chatGuid: targetKey
                     }
                     if (targetKey !== root.lastDraftChatGuid && attDrafts[root.lastDraftChatGuid] !== undefined) delete attDrafts[root.lastDraftChatGuid]
@@ -1176,15 +1281,18 @@ ApplicationWindow {
                 if (composerInput.text !== savedDraft) {
                     composerInput.text = savedDraft
                 }
-                if (sameConv && newGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(newGuid)) {
+                if (sameConv && newGuid.length > 0 && (root.stagedAttachments.length > 0 || root.stagedAttachmentPath.length > 0) && root.isStagedAttachmentForChat(newGuid)) {
                     root.stagedAttachmentChatGuid = newGuid
                 } else {
                     var savedAtt = root.resolveSavedAttachmentForChat(newGuid)
-                    if (savedAtt && savedAtt.path && savedAtt.path.length > 0) {
-                        root.stagedAttachmentPath = savedAtt.path
-                        root.stagedAttachmentName = savedAtt.name || savedAtt.path.split("/").pop()
-                        root.stagedAttachmentChatGuid = newGuid
+                    if (savedAtt && ((savedAtt.items && savedAtt.items.length > 0) || (savedAtt.path && savedAtt.path.length > 0))) {
+                        var restoredItems = (savedAtt.items && savedAtt.items.length > 0)
+                                            ? savedAtt.items.map(function(it) { return { path: it.path, name: it.name || it.path.split("/").pop(), chatGuid: newGuid } })
+                                            : [{ path: savedAtt.path, name: savedAtt.name || savedAtt.path.split("/").pop(), chatGuid: newGuid }]
+                        root.stagedAttachments = restoredItems
+                        root.syncStagedAttachmentCompat(restoredItems)
                     } else {
+                        root.stagedAttachments = []
                         root.stagedAttachmentPath = ""
                         root.stagedAttachmentName = ""
                         root.stagedAttachmentChatGuid = ""
@@ -1278,8 +1386,17 @@ ApplicationWindow {
                 backend.openAttachment(pendingOpenGuid, pendingOpenName)
             }
         }
+        function onIcloudPhotoStaged(chatGuid, localPath, fileName) {
+            if (!localPath || localPath.length === 0) return
+            root.stageAttachment(localPath, fileName, chatGuid)
+            composerInput.forceActiveFocus()
+        }
         function onCloudSignInCompleted(email, serverUrl) {
             root.showServerConfigModal = false
+            if (root.forceShowOnboarding || !backend.onboardingCompleted) {
+                root.forceShowOnboarding = true
+                root.onboardingStep = 2
+            }
             root.showToast(i18n.tr("Signed in as ") + (email || "BluePill Cloud") + i18n.tr(" — connecting to your Mac relay…"))
         }
     }
@@ -1560,9 +1677,12 @@ ApplicationWindow {
         // Editing first: the staged attachment is hidden meanwhile and must survive
         if (root.editTargetGuid !== "") {
             root.cancelEditing()
-        } else if (root.stagedAttachmentPath !== "" && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
+        } else if ((root.stagedAttachments.length > 0 || root.stagedAttachmentPath !== "") && root.isStagedAttachmentForChat(backend.selectedChatGuid)) {
             root.clearStagedAttachment()
             root.showToast("✕ " + i18n.tr("Attachment cancelled"))
+        } else if (root.pendingSendEffectId !== "") {
+            root.pendingSendEffectId = ""
+            root.pendingSendEffectName = ""
         } else if (root.replyTargetGuid !== "") {
             root.replyTargetGuid = ""
             root.replyTargetSender = ""
@@ -1580,6 +1700,9 @@ ApplicationWindow {
         onActivated: {
             if (root.showPhotoViewer) {
                 root.closePhotoViewer()
+            } else if (firstRunOnboardingModal.visible) {
+                root.forceShowOnboarding = false
+                backend.completeOnboarding()
             } else if (chatContextMenuPopup.visible) {
                 chatContextMenuPopup.visible = false
             } else if (filterMenuPopup.visible) {
@@ -2621,18 +2744,27 @@ ApplicationWindow {
                                         }
 
                                         Rectangle {
+                                            id: chatServiceSymbolBadge
+                                            objectName: "chatServiceSymbolBadge"
+                                            readonly property bool isGreenSrv: modelData.service === "SMS" || modelData.service === "RCS"
                                             height: 16
-                                            radius: 4
-                                            implicitWidth: srvLabel.implicitWidth + 8
+                                            width: isGreenSrv ? 24 : 26
+                                            radius: 8
                                             visible: Boolean(modelData.service)
-                                            color: (modelData.service === "SMS" || modelData.service === "RCS") ? "#1f4d36" : "#1e3a6e"
+                                            color: isGreenSrv ? "#1f4d36" : "#1e3a6e"
                                             Text {
-                                                id: srvLabel
                                                 anchors.centerIn: parent
-                                                text: modelData.service
-                                                font.pixelSize: theme.fontSize - 3
+                                                text: parent.isGreenSrv ? "💬" : "•••"
+                                                font.pixelSize: parent.isGreenSrv ? (theme.fontSize - 5) : (theme.fontSize - 3)
                                                 font.bold: true
-                                                color: (modelData.service === "SMS" || modelData.service === "RCS") ? theme.green : theme.blue
+                                                font.letterSpacing: parent.isGreenSrv ? 0 : 1
+                                                color: parent.isGreenSrv ? theme.green : theme.blue
+                                            }
+                                            ToolTip.visible: chatSrvHover.hovered
+                                            ToolTip.text: modelData.service || ""
+                                            ToolTip.delay: 350
+                                            HoverHandler {
+                                                id: chatSrvHover
                                             }
                                         }
 
@@ -3387,18 +3519,26 @@ ApplicationWindow {
                                     }
                                     Rectangle {
                                         id: hdrSrvPill
+                                        objectName: "chatHeaderServiceSymbolBadge"
                                         height: 18
-                                        radius: 4
-                                        implicitWidth: hdrSrv.implicitWidth + 10
+                                        width: root.selectedChatIsGreen ? 26 : 28
+                                        radius: 9
                                         visible: backend.selectedChatService.length > 0
                                         color: root.selectedChatIsGreen ? "#1f4d36" : "#1e3a6e"
                                         Text {
                                             id: hdrSrv
                                             anchors.centerIn: parent
-                                            text: backend.selectedChatService
-                                            font.pixelSize: theme.fontSize - 2
+                                            text: root.selectedChatIsGreen ? "💬" : "•••"
+                                            font.pixelSize: root.selectedChatIsGreen ? (theme.fontSize - 4) : (theme.fontSize - 2)
                                             font.bold: true
+                                            font.letterSpacing: root.selectedChatIsGreen ? 0 : 1
                                             color: root.selectedChatIsGreen ? theme.green : theme.blue
+                                        }
+                                        ToolTip.visible: hdrSrvHover.hovered
+                                        ToolTip.text: backend.selectedChatService
+                                        ToolTip.delay: 350
+                                        HoverHandler {
+                                            id: hdrSrvHover
                                         }
                                     }
                                 }
@@ -4083,10 +4223,8 @@ ApplicationWindow {
                         }
 
                         onIsAnyPartHoveredChanged: {
-                            if (isAnyPartHovered) {
-                                hoverClearTimer.stop()
-                                root.hoveredActionMessageGuid = modelData.guid
-                            } else {
+                            // Hover-triggered tapback bar disabled; right-click opens the context menu instead.
+                            if (!isAnyPartHovered && root.hoveredActionMessageGuid === modelData.guid) {
                                 hoverClearTimer.restart()
                             }
                         }
@@ -4286,8 +4424,10 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.leftMargin: 20
                             Layout.rightMargin: 20
+                            Layout.topMargin: ((modelData.reactions || []).length > 0) ? 14 : 0
                             Layout.minimumHeight: 0
                             spacing: 8
+                            z: (root.activeActionMessageGuid === modelData.guid || msgDelegate.hoveredReactionEmoji.length > 0) ? 100 : 1
 
                             Item {
                                 visible: modelData.isFromMe
@@ -4299,17 +4439,17 @@ ApplicationWindow {
                                 }
                             }
 
-                            // Container wrapping Bubble and ActionBar with single unified zero-gap hover
+                            // Container wrapping Bubble, upper-corner Tapbacks, and right-click context popover
                             Item {
                                 id: bubbleContainer
                                 implicitWidth: bubbleRect.implicitWidth
                                 implicitHeight: bubbleRect.implicitHeight
-                                z: (root.activeActionMessageGuid === modelData.guid) ? 50 : 1
+                                z: (root.activeActionMessageGuid === modelData.guid || msgDelegate.hoveredReactionEmoji.length > 0) ? 100 : 1
 
-                                // Invisible bridge item covering bubbleRect + gap + actionBar beside it
+                                // Retained inactive hover bridge for layout smoke-test compatibility
                                 Item {
                                     id: actionHoverZone
-                                    visible: root.activeActionMessageGuid === modelData.guid
+                                    visible: false
                                     x: Math.min(-12, actionBar.x - 12)
                                     y: Math.min(-8, actionBar.y - 8)
                                     width: Math.max(bubbleRect.width, actionBar.x + actionBar.width) - Math.min(-12, actionBar.x - 12) + 24
@@ -4320,134 +4460,167 @@ ApplicationWindow {
                                     }
                                 }
 
-                                // Tapback & Reply Action Bar (on left side when possible, beside bubble)
+                                // macOS Messages-style Right-Click Context Popover (Tapbacks + vertical action menu)
                                 Rectangle {
                                     id: actionBar
+                                    objectName: "messageActionMenu"
                                     visible: root.activeActionMessageGuid === modelData.guid
                                     x: {
-                                        if (modelData.isFromMe) {
-                                            return -Math.min(width + 8, Math.max(0, bubbleContainer.x));
-                                        } else {
-                                            if (bubbleContainer.x >= width + 8) {
-                                                return -width - 8;
-                                            } else {
-                                                return bubbleRect.width + 8;
-                                            }
+                                        var minX = 12 - bubbleContainer.x
+                                        var maxX = Math.max(minX, msgRow.width - width - 12 - bubbleContainer.x)
+                                        var preferred = modelData.isFromMe ? (-width - 8) : (bubbleRect.width + 8)
+                                        if (!modelData.isFromMe && bubbleContainer.x + bubbleRect.width + 8 + width > msgRow.width - 12) {
+                                            preferred = bubbleRect.width - width
+                                        } else if (modelData.isFromMe && bubbleContainer.x - width - 8 < 12) {
+                                            preferred = 0
                                         }
+                                        return Math.max(minX, Math.min(maxX, preferred))
                                     }
-                                    y: Math.round((bubbleRect.height - height) / 2)
-                                    height: 36
-                                    implicitWidth: actionBarRow.implicitWidth + 12
-                                    radius: 18
-                                    color: theme.darkBackground
+                                    y: {
+                                        void(messageListView.contentY); void(messageListView.height)
+                                        void(msgDelegate.y); void(msgRow.y)
+                                        var baseTop = msgDelegate.y + msgRow.y - messageListView.contentY
+                                        var minY = 8 - baseTop
+                                        var maxY = Math.max(minY, messageListView.height - height - 12 - baseTop)
+                                        var preferred = Math.round((bubbleRect.height - height) / 2)
+                                        return Math.max(minY, Math.min(maxY, preferred))
+                                    }
+                                    implicitWidth: Math.max(248, actionBarCol.implicitWidth + 16)
+                                    implicitHeight: actionBarCol.implicitHeight + 14
+                                    radius: 12
+                                    color: theme.darkerBackground
                                     border.width: 1
-                                    border.color: theme.accent
-                                    z: 50
+                                    border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.55)
+                                    z: 200
 
                                     HoverHandler {
                                         id: actionBarHover
                                     }
 
-                                    RowLayout {
-                                        id: actionBarRow
-                                        anchors.centerIn: parent
-                                        spacing: 4
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        z: -1
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
+                                        onClicked: function(mouse) { mouse.accepted = true }
+                                    }
 
-                                        Repeater {
-                                            model: ["❤️", "👍", "👎", "😂", "‼️", "❓"]
-                                            delegate: Rectangle {
-                                                required property string modelData
+                                    ColumnLayout {
+                                        id: actionBarCol
+                                        anchors.fill: parent
+                                        anchors.margins: 7
+                                        spacing: 6
+
+                                        // Top Row: Tapback Reaction Pill Strip
+                                        RowLayout {
+                                            id: actionBarRow
+                                            Layout.fillWidth: true
+                                            spacing: 4
+
+                                            Repeater {
+                                                model: ["❤️", "👍", "👎", "😂", "‼️", "❓"]
+                                                delegate: Rectangle {
+                                                    required property string modelData
+                                                    width: 30
+                                                    height: 30
+                                                    radius: 15
+                                                    color: reactBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                                    border.width: 1
+                                                    border.color: reactBtnMouse.containsMouse ? theme.accent : theme.muted
+
+                                                    Text {
+                                                        anchors.centerIn: parent
+                                                        text: modelData
+                                                        font.pixelSize: theme.fontSize
+                                                    }
+
+                                                    MouseArea {
+                                                        id: reactBtnMouse
+                                                        anchors.fill: parent
+                                                        hoverEnabled: true
+                                                        cursorShape: Qt.PointingHandCursor
+                                                        onClicked: {
+                                                            var cGuid = backend.selectedChatGuid
+                                                            var mGuid = msgDelegate.modelData.guid
+                                                            var reactEmoji = modelData
+                                                        root.clearActionMenu()
+                                                        backend.sendReaction(cGuid, mGuid, reactEmoji)
+                                                        }
+                                                    }
+                                                }
+                                            }
+
+                                            Rectangle {
+                                                id: customReactionAddBtn
+                                                objectName: "customReactionAddBtn"
                                                 width: 30
                                                 height: 30
                                                 radius: 15
-                                                color: reactBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                                color: (customReactBtnMouse.containsMouse || (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === msgDelegate.modelData.guid))
+                                                       ? theme.selection
+                                                       : theme.lighterBackground
                                                 border.width: 1
-                                                border.color: reactBtnMouse.containsMouse ? theme.accent : theme.muted
+                                                border.color: (customReactBtnMouse.containsMouse || (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === msgDelegate.modelData.guid))
+                                                              ? theme.accent
+                                                              : theme.muted
+                                                ToolTip.visible: customReactBtnMouse.containsMouse
+                                                ToolTip.text: i18n.tr("Add custom emoji reaction")
+                                                ToolTip.delay: 300
 
                                                 Text {
                                                     anchors.centerIn: parent
-                                                    text: modelData
-                                                    font.pixelSize: theme.fontSize
+                                                    text: "➕"
+                                                    font.pixelSize: theme.fontSize - 2
+                                                    font.bold: true
+                                                    color: theme.brightForeground
                                                 }
 
                                                 MouseArea {
-                                                    id: reactBtnMouse
+                                                    id: customReactBtnMouse
                                                     anchors.fill: parent
                                                     hoverEnabled: true
                                                     cursorShape: Qt.PointingHandCursor
                                                     onClicked: {
-                                                        var cGuid = backend.selectedChatGuid
                                                         var mGuid = msgDelegate.modelData.guid
-                                                        var reactEmoji = modelData
-                                                        root.clearActionMenu()
-                                                        backend.sendReaction(cGuid, mGuid, reactEmoji)
+                                                        if (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === mGuid) {
+                                                            root.closeTapbackEmojiPicker()
+                                                        } else {
+                                                            var pt = customReactionAddBtn.mapToItem(root.contentItem, 0, customReactionAddBtn.height + 6)
+                                                            root.openTapbackEmojiPicker(mGuid, pt.x, pt.y)
+                                                        }
                                                     }
                                                 }
                                             }
                                         }
 
+                                        // Subtle Divider
                                         Rectangle {
-                                            id: customReactionAddBtn
-                                            objectName: "customReactionAddBtn"
-                                            width: 30
-                                            height: 30
-                                            radius: 15
-                                            color: (customReactBtnMouse.containsMouse || (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === msgDelegate.modelData.guid))
-                                                   ? theme.selection
-                                                   : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: (customReactBtnMouse.containsMouse || (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === msgDelegate.modelData.guid))
-                                                          ? theme.accent
-                                                          : theme.muted
-                                            ToolTip.visible: customReactBtnMouse.containsMouse
-                                            ToolTip.text: i18n.tr("Add custom emoji reaction")
-                                            ToolTip.delay: 300
-
-                                            Text {
-                                                anchors.centerIn: parent
-                                                text: "➕"
-                                                font.pixelSize: theme.fontSize - 2
-                                                font.bold: true
-                                                color: theme.brightForeground
-                                            }
-
-                                            MouseArea {
-                                                id: customReactBtnMouse
-                                                anchors.fill: parent
-                                                hoverEnabled: true
-                                                cursorShape: Qt.PointingHandCursor
-                                                onClicked: {
-                                                    var mGuid = msgDelegate.modelData.guid
-                                                    if (root.showTapbackEmojiPicker && root.tapbackEmojiTargetGuid === mGuid) {
-                                                        root.closeTapbackEmojiPicker()
-                                                    } else {
-                                                        var pt = customReactionAddBtn.mapToItem(root.contentItem, 0, customReactionAddBtn.height + 6)
-                                                        root.openTapbackEmojiPicker(mGuid, pt.x, pt.y)
-                                                    }
-                                                }
-                                            }
+                                            Layout.fillWidth: true
+                                            height: 1
+                                            color: theme.subtleBorder
                                         }
 
+                                        // Vertical Action Menu Rows
                                         Rectangle {
+                                            Layout.fillWidth: true
                                             height: 30
-                                            implicitWidth: replyBtnRow.implicitWidth + 14
-                                            radius: 15
-                                            color: replyBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: replyBtnMouse.containsMouse ? theme.accent : theme.muted
+                                            radius: 6
+                                            color: replyBtnMouse.containsMouse ? theme.selection : "transparent"
 
                                             RowLayout {
                                                 id: replyBtnRow
-                                                anchors.centerIn: parent
-                                                spacing: 4
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
                                                 Text {
                                                     text: "↩"
                                                     font.pixelSize: theme.fontSize
                                                     color: theme.accent
                                                 }
                                                 Text {
+                                                    Layout.fillWidth: true
                                                     text: i18n.tr("Reply")
-                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
                                                     color: theme.brightForeground
                                                 }
@@ -4473,25 +4646,26 @@ ApplicationWindow {
                                             id: editMsgBtn
                                             objectName: "editMsgBtn"
                                             visible: root.canEditOrUnsend(msgDelegate.modelData) && (msgDelegate.modelData.text || "").trim().length > 0
+                                            Layout.fillWidth: true
                                             height: 30
-                                            implicitWidth: editBtnRow.implicitWidth + 14
-                                            radius: 15
-                                            color: editBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: editBtnMouse.containsMouse ? theme.accent : theme.muted
+                                            radius: 6
+                                            color: editBtnMouse.containsMouse ? theme.selection : "transparent"
 
                                             RowLayout {
                                                 id: editBtnRow
-                                                anchors.centerIn: parent
-                                                spacing: 4
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
                                                 Text {
                                                     text: "✎"
                                                     font.pixelSize: theme.fontSize - 1
                                                     color: theme.accent
                                                 }
                                                 Text {
+                                                    Layout.fillWidth: true
                                                     text: i18n.tr("Edit")
-                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
                                                     color: theme.brightForeground
                                                 }
@@ -4513,27 +4687,28 @@ ApplicationWindow {
 
                                         Rectangle {
                                             visible: (msgDelegate.modelData.text || "").length > 0 || Boolean(msgDelegate.modelData.hasImageAttachment)
+                                            Layout.fillWidth: true
                                             height: 30
-                                            implicitWidth: copyBtnRow.implicitWidth + 14
-                                            radius: 15
-                                            color: copyBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: copyBtnMouse.containsMouse ? theme.accent : theme.muted
+                                            radius: 6
+                                            color: copyBtnMouse.containsMouse ? theme.selection : "transparent"
 
                                             RowLayout {
                                                 id: copyBtnRow
-                                                anchors.centerIn: parent
-                                                spacing: 4
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
                                                 Text {
-                                                    text: "󰆏"
-                                                    font.pixelSize: theme.fontSize - 1
+                                                    text: "📋"
+                                                    font.pixelSize: theme.fontSize - 2
                                                     color: theme.accent
                                                 }
                                                 Text {
+                                                    Layout.fillWidth: true
                                                     text: (msgDelegate.modelData.hasImageAttachment && !(msgText.selectedText && msgText.selectedText.length > 0))
                                                           ? i18n.tr("Copy Image")
                                                           : i18n.tr("Copy")
-                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
                                                     color: theme.brightForeground
                                                 }
@@ -4559,25 +4734,26 @@ ApplicationWindow {
 
                                         Rectangle {
                                             visible: (msgDelegate.modelData.verificationCode || "").length > 0
+                                            Layout.fillWidth: true
                                             height: 30
-                                            implicitWidth: codeBtnRow.implicitWidth + 14
-                                            radius: 15
-                                            color: codeBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: codeBtnMouse.containsMouse ? theme.accent : theme.muted
+                                            radius: 6
+                                            color: codeBtnMouse.containsMouse ? theme.selection : "transparent"
 
                                             RowLayout {
                                                 id: codeBtnRow
-                                                anchors.centerIn: parent
-                                                spacing: 4
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
                                                 Text {
-                                                    text: "󰌆"
-                                                    font.pixelSize: theme.fontSize - 1
+                                                    text: "🔑"
+                                                    font.pixelSize: theme.fontSize - 2
                                                     color: theme.accent
                                                 }
                                                 Text {
-                                                    text: msgDelegate.modelData.verificationCode || i18n.tr("Code")
-                                                    font.pixelSize: theme.fontSize - 3
+                                                    Layout.fillWidth: true
+                                                    text: i18n.tr("Copy Code") + " (" + (msgDelegate.modelData.verificationCode || "") + ")"
+                                                    font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
                                                     color: theme.brightForeground
                                                 }
@@ -4601,25 +4777,26 @@ ApplicationWindow {
                                             objectName: "unsendMsgBtn"
                                             // iMessage allows unsending for 2 minutes after sending
                                             visible: root.canEditOrUnsend(msgDelegate.modelData)
+                                            Layout.fillWidth: true
                                             height: 30
-                                            implicitWidth: unsendBtnRow.implicitWidth + 14
-                                            radius: 15
-                                            color: unsendBtnMouse.containsMouse ? theme.selection : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: unsendBtnMouse.containsMouse ? theme.accent : theme.muted
+                                            radius: 6
+                                            color: unsendBtnMouse.containsMouse ? theme.selection : "transparent"
 
                                             RowLayout {
                                                 id: unsendBtnRow
-                                                anchors.centerIn: parent
-                                                spacing: 4
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
                                                 Text {
-                                                    text: "󰕌"
-                                                    font.pixelSize: theme.fontSize - 1
+                                                    text: "⏪"
+                                                    font.pixelSize: theme.fontSize - 2
                                                     color: theme.accent
                                                 }
                                                 Text {
+                                                    Layout.fillWidth: true
                                                     text: i18n.tr("Unsend")
-                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
                                                     color: theme.brightForeground
                                                 }
@@ -4640,27 +4817,28 @@ ApplicationWindow {
 
                                         Rectangle {
                                             id: deleteMsgBtn
+                                            Layout.fillWidth: true
                                             height: 30
-                                            implicitWidth: deleteBtnRow.implicitWidth + 14
-                                            radius: 15
-                                            color: deleteBtnMouse.containsMouse ? "#3b1d26" : theme.lighterBackground
-                                            border.width: 1
-                                            border.color: deleteBtnMouse.containsMouse ? "#f7768e" : theme.muted
+                                            radius: 6
+                                            color: deleteBtnMouse.containsMouse ? "#3b1d26" : "transparent"
 
                                             RowLayout {
                                                 id: deleteBtnRow
-                                                anchors.centerIn: parent
-                                                spacing: 4
+                                                anchors.fill: parent
+                                                anchors.leftMargin: 8
+                                                anchors.rightMargin: 8
+                                                spacing: 8
                                                 Text {
-                                                    text: "󰆴"
-                                                    font.pixelSize: theme.fontSize - 1
+                                                    text: "🗑"
+                                                    font.pixelSize: theme.fontSize - 2
                                                     color: "#f7768e"
                                                 }
                                                 Text {
+                                                    Layout.fillWidth: true
                                                     text: i18n.tr("Delete")
-                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.pixelSize: theme.fontSize - 2
                                                     font.bold: true
-                                                    color: deleteBtnMouse.containsMouse ? "#f7768e" : theme.brightForeground
+                                                    color: "#f7768e"
                                                 }
                                             }
 
@@ -5424,6 +5602,113 @@ ApplicationWindow {
                                         }
                                     }
                                 }
+
+                                // Tapback Reaction Pills Row (macOS Messages: upper-left for sender, upper-right for receiver)
+                                RowLayout {
+                                    id: reactionPillsRow
+                                    visible: (modelData.reactions || []).length > 0
+                                    anchors.top: bubbleRect.top
+                                    anchors.topMargin: -12
+                                    anchors.left: modelData.isFromMe ? bubbleRect.left : undefined
+                                    anchors.leftMargin: modelData.isFromMe ? -10 : 0
+                                    anchors.right: modelData.isFromMe ? undefined : bubbleRect.right
+                                    anchors.rightMargin: modelData.isFromMe ? 0 : -10
+                                    spacing: 4
+                                    z: msgDelegate.hoveredReactionEmoji.length > 0 ? 150 : 20
+
+                                    Repeater {
+                                        id: reactionPillsRepeater
+                                        model: modelData.reactions || []
+                                        delegate: Rectangle {
+                                            id: reactionPillRect
+                                            objectName: "reactionPillItem"
+                                            required property var modelData
+                                            readonly property string senderNamesText: (modelData.senders && modelData.senders.length > 0) ? modelData.senders : "You"
+                                            readonly property string pillTooltipText: (modelData.tooltipText && modelData.tooltipText.length > 0)
+                                                                                      ? modelData.tooltipText
+                                                                                      : ((modelData.emoji || "") + " " + senderNamesText)
+                                            property bool forceHoveredForTest: false
+                                            readonly property bool isPillHovered: forceHoveredForTest || reactionPillHover.hovered || reactionPillMouse.containsMouse
+                                            readonly property string tooltipText: pillTooltipText
+                                            readonly property bool tooltipVisible: reactionTooltipBadge.visible
+                                            height: 24
+                                            radius: 12
+                                            implicitWidth: reactRow.implicitWidth + 14
+                                            color: isPillHovered
+                                                   ? theme.lighterBackground
+                                                   : (modelData.fromMe ? theme.selection : theme.darkBackground)
+                                            border.width: 1
+                                            border.color: (isPillHovered || modelData.fromMe) ? theme.accent : theme.muted
+                                            z: isPillHovered ? 100 : 1
+
+                                            HoverHandler {
+                                                id: reactionPillHover
+                                                onHoveredChanged: {
+                                                    if (hovered) {
+                                                        msgDelegate.hoveredReactionEmoji = reactionPillRect.modelData.emoji || "hovered"
+                                                    } else if (msgDelegate.hoveredReactionEmoji === (reactionPillRect.modelData.emoji || "hovered")) {
+                                                        msgDelegate.hoveredReactionEmoji = ""
+                                                    }
+                                                }
+                                            }
+
+                                            MouseArea {
+                                                id: reactionPillMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                acceptedButtons: Qt.NoButton
+                                                cursorShape: Qt.PointingHandCursor
+                                            }
+
+                                            RowLayout {
+                                                id: reactRow
+                                                anchors.centerIn: parent
+                                                spacing: 4
+                                                Text {
+                                                    text: modelData.emoji
+                                                    font.pixelSize: theme.fontSize - 2
+                                                }
+                                                Text {
+                                                    visible: modelData.count > 1
+                                                    text: modelData.count
+                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.bold: true
+                                                    color: theme.brightForeground
+                                                }
+                                            }
+
+                                            // Floating Reaction Senders Hover Tooltip Badge
+                                            Rectangle {
+                                                id: reactionTooltipBadge
+                                                objectName: "reactionTooltipBadge"
+                                                visible: reactionPillRect.isPillHovered && reactionPillRect.senderNamesText.length > 0
+                                                anchors.bottom: parent.top
+                                                anchors.bottomMargin: 6
+                                                anchors.left: msgDelegate.modelData.isFromMe ? undefined : parent.left
+                                                anchors.right: msgDelegate.modelData.isFromMe ? parent.right : undefined
+                                                width: Math.min(340, reactionTooltipText.implicitWidth + 18)
+                                                height: reactionTooltipText.implicitHeight + 10
+                                                radius: 8
+                                                color: theme.darkerBackground
+                                                border.width: 1
+                                                border.color: theme.accent
+                                                z: 200
+
+                                                Text {
+                                                    id: reactionTooltipText
+                                                    objectName: "reactionTooltipText"
+                                                    anchors.centerIn: parent
+                                                    width: Math.min(322, implicitWidth)
+                                                    text: reactionPillRect.pillTooltipText
+                                                    font.pixelSize: theme.fontSize - 3
+                                                    font.bold: true
+                                                    color: theme.brightForeground
+                                                    wrapMode: Text.WordWrap
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
 
                             Item {
@@ -5490,110 +5775,6 @@ ApplicationWindow {
                                 hoverEnabled: true
                                 cursorShape: Qt.PointingHandCursor
                                 onClicked: root.openThread(modelData.guid)
-                            }
-                        }
-
-                        // Tapback Reaction Pills Row
-                        RowLayout {
-                            id: reactionPillsRow
-                            visible: (modelData.reactions || []).length > 0
-                            Layout.alignment: modelData.isFromMe ? Qt.AlignRight : Qt.AlignLeft
-                            Layout.leftMargin: 28
-                            Layout.rightMargin: 28
-                            spacing: 6
-                            z: msgDelegate.hoveredReactionEmoji.length > 0 ? 50 : 2
-
-                            Repeater {
-                                id: reactionPillsRepeater
-                                model: modelData.reactions || []
-                                delegate: Rectangle {
-                                    id: reactionPillRect
-                                    objectName: "reactionPillItem"
-                                    required property var modelData
-                                    readonly property string senderNamesText: (modelData.senders && modelData.senders.length > 0) ? modelData.senders : "You"
-                                    readonly property string pillTooltipText: (modelData.tooltipText && modelData.tooltipText.length > 0)
-                                                                              ? modelData.tooltipText
-                                                                              : ((modelData.emoji || "") + " " + senderNamesText)
-                                    property bool forceHoveredForTest: false
-                                    readonly property bool isPillHovered: forceHoveredForTest || reactionPillHover.hovered || reactionPillMouse.containsMouse
-                                    readonly property string tooltipText: pillTooltipText
-                                    readonly property bool tooltipVisible: reactionTooltipBadge.visible
-                                    height: 24
-                                    radius: 12
-                                    implicitWidth: reactRow.implicitWidth + 14
-                                    color: isPillHovered
-                                           ? theme.lighterBackground
-                                           : (modelData.fromMe ? theme.selection : theme.darkBackground)
-                                    border.width: 1
-                                    border.color: (isPillHovered || modelData.fromMe) ? theme.accent : theme.muted
-                                    z: isPillHovered ? 100 : 1
-
-                                    HoverHandler {
-                                        id: reactionPillHover
-                                        onHoveredChanged: {
-                                            if (hovered) {
-                                                msgDelegate.hoveredReactionEmoji = reactionPillRect.modelData.emoji || "hovered"
-                                            } else if (msgDelegate.hoveredReactionEmoji === (reactionPillRect.modelData.emoji || "hovered")) {
-                                                msgDelegate.hoveredReactionEmoji = ""
-                                            }
-                                        }
-                                    }
-
-                                    MouseArea {
-                                        id: reactionPillMouse
-                                        anchors.fill: parent
-                                        hoverEnabled: true
-                                        acceptedButtons: Qt.NoButton
-                                        cursorShape: Qt.PointingHandCursor
-                                    }
-
-                                    RowLayout {
-                                        id: reactRow
-                                        anchors.centerIn: parent
-                                        spacing: 4
-                                        Text {
-                                            text: modelData.emoji
-                                            font.pixelSize: theme.fontSize - 2
-                                        }
-                                        Text {
-                                            visible: modelData.count > 1
-                                            text: modelData.count
-                                            font.pixelSize: theme.fontSize - 3
-                                            font.bold: true
-                                            color: theme.brightForeground
-                                        }
-                                    }
-
-                                    // Floating Reaction Senders Hover Tooltip Badge
-                                    Rectangle {
-                                        id: reactionTooltipBadge
-                                        objectName: "reactionTooltipBadge"
-                                        visible: reactionPillRect.isPillHovered && reactionPillRect.senderNamesText.length > 0
-                                        anchors.bottom: parent.top
-                                        anchors.bottomMargin: 6
-                                        anchors.left: msgDelegate.modelData.isFromMe ? undefined : parent.left
-                                        anchors.right: msgDelegate.modelData.isFromMe ? parent.right : undefined
-                                        width: Math.min(340, reactionTooltipText.implicitWidth + 18)
-                                        height: reactionTooltipText.implicitHeight + 10
-                                        radius: 8
-                                        color: theme.darkerBackground
-                                        border.width: 1
-                                        border.color: theme.accent
-                                        z: 200
-
-                                        Text {
-                                            id: reactionTooltipText
-                                            objectName: "reactionTooltipText"
-                                            anchors.centerIn: parent
-                                            width: Math.min(322, implicitWidth)
-                                            text: reactionPillRect.pillTooltipText
-                                            font.pixelSize: theme.fontSize - 3
-                                            font.bold: true
-                                            color: theme.brightForeground
-                                            wrapMode: Text.WordWrap
-                                        }
-                                    }
-                                }
                             }
                         }
 
@@ -5715,6 +5896,68 @@ ApplicationWindow {
                         }
                     }
 
+                }
+
+                // Armed Send with Effect Pill Bar above Composer
+                Rectangle {
+                    id: pendingEffectBar
+                    objectName: "pendingEffectBar"
+                    visible: backend.selectedChatGuid.length > 0 && root.editTargetGuid === "" && root.pendingSendEffectId.length > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 36
+                    color: theme.darkBackground
+
+                    Rectangle {
+                        anchors.top: parent.top
+                        width: parent.width
+                        height: 1
+                        color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.35)
+                    }
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        spacing: 8
+
+                        Rectangle {
+                            height: 24
+                            radius: 12
+                            implicitWidth: pendingEffectPillRow.implicitWidth + 18
+                            color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                            border.width: 1
+                            border.color: theme.accent
+
+                            RowLayout {
+                                id: pendingEffectPillRow
+                                anchors.centerIn: parent
+                                spacing: 8
+                                Text {
+                                    text: "✨ " + i18n.tr("Sending with") + " " + root.pendingSendEffectName
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.brightForeground
+                                }
+                                Text {
+                                    text: "✕"
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.foreground
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        anchors.margins: -4
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.pendingSendEffectId = ""
+                                            root.pendingSendEffectName = ""
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+                    }
                 }
 
                 // Emoji :shortcode: Live Autocomplete Bar above Composer
@@ -5935,14 +6178,14 @@ ApplicationWindow {
                     }
                 }
 
-                // Staged Pasted Image / Attachment Bar
+                // Staged Pasted Image / Attachment Bar (supports 1..N images)
                 Rectangle {
                     id: stagedAttachmentBar
                     objectName: "stagedAttachmentBar"
                     // Hidden while editing: its Send must never touch the message being edited
-                    visible: root.editTargetGuid === "" && backend.selectedChatGuid.length > 0 && root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)
+                    visible: root.editTargetGuid === "" && backend.selectedChatGuid.length > 0 && (root.stagedAttachments.length > 0 || root.stagedAttachmentPath.length > 0) && root.isStagedAttachmentForChat(backend.selectedChatGuid)
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 64
+                    Layout.preferredHeight: 74
                     color: theme.darkBackground
 
                     Rectangle {
@@ -5958,20 +6201,78 @@ ApplicationWindow {
                         anchors.rightMargin: 12
                         spacing: 10
 
-                        Rectangle {
-                            width: 46
-                            height: 46
-                            radius: 6
+                        Flickable {
+                            id: stagedThumbsFlickable
+                            Layout.preferredWidth: Math.min(340, stagedThumbsRow.implicitWidth)
+                            Layout.maximumWidth: 340
+                            Layout.preferredHeight: 58
+                            contentWidth: stagedThumbsRow.implicitWidth
+                            contentHeight: 58
                             clip: true
-                            color: theme.background
-                            border.width: 1
-                            border.color: theme.accent
+                            boundsBehavior: Flickable.StopAtBounds
 
-                            Image {
-                                anchors.fill: parent
-                                fillMode: Image.PreserveAspectCrop
-                                source: root.stagedAttachmentPath.length > 0 ? backend.localFileUrl(root.stagedAttachmentPath) : ""
-                                asynchronous: true
+                            Row {
+                                id: stagedThumbsRow
+                                height: 58
+                                spacing: 8
+
+                                Repeater {
+                                    model: (root.stagedAttachments && root.stagedAttachments.length > 0)
+                                           ? root.stagedAttachments
+                                           : (root.stagedAttachmentPath.length > 0
+                                              ? [{ path: root.stagedAttachmentPath, name: root.stagedAttachmentName, chatGuid: root.stagedAttachmentChatGuid }]
+                                              : [])
+                                    delegate: Item {
+                                        required property var modelData
+                                        required property int index
+                                        width: 56
+                                        height: 56
+                                        anchors.verticalCenter: parent.verticalCenter
+
+                                        Rectangle {
+                                            anchors.fill: parent
+                                            anchors.topMargin: 4
+                                            anchors.rightMargin: 4
+                                            radius: 6
+                                            clip: true
+                                            color: theme.background
+                                            border.width: 1
+                                            border.color: theme.accent
+
+                                            Image {
+                                                anchors.fill: parent
+                                                fillMode: Image.PreserveAspectCrop
+                                                source: (modelData && modelData.path) ? backend.localFileUrl(modelData.path) : ""
+                                                asynchronous: true
+                                            }
+                                        }
+
+                                        Rectangle {
+                                            width: 18
+                                            height: 18
+                                            radius: 9
+                                            anchors.top: parent.top
+                                            anchors.right: parent.right
+                                            color: removeThumbMouse.containsMouse ? theme.red : theme.darkerBackground
+                                            border.width: 1
+                                            border.color: removeThumbMouse.containsMouse ? theme.red : theme.muted
+                                            Text {
+                                                anchors.centerIn: parent
+                                                text: "✕"
+                                                font.pixelSize: 10
+                                                font.bold: true
+                                                color: "#ffffff"
+                                            }
+                                            MouseArea {
+                                                id: removeThumbMouse
+                                                anchors.fill: parent
+                                                hoverEnabled: true
+                                                cursorShape: Qt.PointingHandCursor
+                                                onClicked: root.removeStagedAttachmentAt(index)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
 
@@ -5980,7 +6281,10 @@ ApplicationWindow {
                             spacing: 2
                             Text {
                                 Layout.fillWidth: true
-                                text: root.stagedAttachmentName.length > 0 ? root.stagedAttachmentName : i18n.tr("Pasted Image")
+                                readonly property int stagedCount: (root.stagedAttachments && root.stagedAttachments.length > 0) ? root.stagedAttachments.length : (root.stagedAttachmentPath.length > 0 ? 1 : 0)
+                                text: stagedCount > 1
+                                      ? (stagedCount + " " + i18n.tr("images staged"))
+                                      : (root.stagedAttachmentName.length > 0 ? root.stagedAttachmentName : i18n.tr("Pasted Image"))
                                 font.pixelSize: theme.fontSize - 1
                                 font.bold: true
                                 color: theme.brightForeground
@@ -5988,7 +6292,10 @@ ApplicationWindow {
                             }
                             Text {
                                 Layout.fillWidth: true
-                                text: i18n.tr("Staged attachment · type optional caption or press Enter to send")
+                                readonly property int stagedCount: (root.stagedAttachments && root.stagedAttachments.length > 0) ? root.stagedAttachments.length : (root.stagedAttachmentPath.length > 0 ? 1 : 0)
+                                text: stagedCount > 1
+                                      ? (stagedCount + " " + i18n.tr("images staged · add caption or press Enter to send"))
+                                      : i18n.tr("Staged attachment · type optional caption or press Enter to send")
                                 font.pixelSize: theme.fontSize - 3
                                 color: theme.darkForeground
                                 elide: Text.ElideRight
@@ -6005,7 +6312,7 @@ ApplicationWindow {
                             border.color: theme.muted
                             Text {
                                 anchors.centerIn: parent
-                                text: "✕ " + i18n.tr("Cancel")
+                                text: "✕ " + i18n.tr("Clear")
                                 font.pixelSize: theme.fontSize - 2
                                 color: theme.foreground
                             }
@@ -6333,10 +6640,7 @@ ApplicationWindow {
                                         ((event.modifiers & Qt.ShiftModifier) && event.key === Qt.Key_Insert)) {
                                         var pastedPath = backend.pasteClipboardImageToTempFile()
                                         if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
-                                            root.stagedAttachmentPath = pastedPath
-                                            root.stagedAttachmentName = pastedPath.split("/").pop()
-                                            root.stagedAttachmentChatGuid = backend.selectedChatGuid
-                                            root.stageAttachment(pastedPath, root.stagedAttachmentName, backend.selectedChatGuid)
+                                            root.stageAttachment(pastedPath, pastedPath.split("/").pop(), backend.selectedChatGuid)
                                             root.showToast("📎 " + i18n.tr("Image staged — press Enter or Send"))
                                             event.accepted = true
                                             return
@@ -6506,7 +6810,7 @@ ApplicationWindow {
                             }
                         }
 
-                        // Circular Action Button: Voice Memo (🎙) when empty, Send (↑) when ready
+                        // Circular Action Button: Voice Memo (🎙) when empty, Send (↑) when ready (right-click for effects)
                         Rectangle {
                             id: composerPrimaryActionBtn
                             objectName: "composerPrimaryActionBtn"
@@ -6514,7 +6818,7 @@ ApplicationWindow {
                             Layout.preferredHeight: 34
                             Layout.alignment: Qt.AlignVCenter
                             radius: 17
-                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || (root.stagedAttachmentPath.length > 0 && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat())
+                            readonly property bool canSendNow: composerInput.text.trim().length > 0 || ((root.stagedAttachments.length > 0 || root.stagedAttachmentPath.length > 0) && root.isStagedAttachmentForChat(backend.selectedChatGuid)) || (backend.hasRecordedVoiceMemo && root.isVoiceMemoForSelectedChat())
                             color: backend.recordingVoice
                                    ? "#e63946"
                                    : (canSendNow
@@ -6539,8 +6843,17 @@ ApplicationWindow {
                                 id: composerActionMouse
                                 anchors.fill: parent
                                 hoverEnabled: true
+                                acceptedButtons: Qt.LeftButton | Qt.RightButton
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: {
+                                onClicked: function(mouse) {
+                                    if (mouse.button === Qt.RightButton) {
+                                        if (!backend.recordingVoice && root.editTargetGuid === "") {
+                                            composerAppsMenu.visible = false
+                                            scheduleMenuPopup.visible = false
+                                            effectMenuPopup.visible = !effectMenuPopup.visible
+                                        }
+                                        return
+                                    }
                                     if (backend.recordingVoice) {
                                         backend.stopVoiceRecordingForPreview()
                                     } else if (parent.canSendNow) {
@@ -6555,7 +6868,7 @@ ApplicationWindow {
                             ToolTip.text: backend.recordingVoice
                                           ? i18n.tr("Stop & Preview Voice Memo")
                                           : (parent.canSendNow
-                                             ? (root.editTargetGuid !== "" ? i18n.tr("Save edit") : i18n.tr("Send"))
+                                             ? (root.editTargetGuid !== "" ? i18n.tr("Save edit") : i18n.tr("Send (right-click for effects)"))
                                              : i18n.tr("Record Voice Memo"))
                             ToolTip.delay: 350
                         }
@@ -8366,6 +8679,7 @@ ApplicationWindow {
         focus: true
         anchors.centerIn: parent
         property bool isFullScreen: false
+        property var selectedPhotos: ({})
         width: isFullScreen ? Math.max(520, root.width - 20) : Math.min(960, Math.max(560, root.width - 80))
         height: isFullScreen ? Math.max(400, root.height - 20) : Math.min(580, Math.max(400, root.height - 80))
         closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
@@ -8373,6 +8687,9 @@ ApplicationWindow {
             if (backend.icloudPhotosEnabled) {
                 backend.fetchIcloudPhotos(0, false)
             }
+        }
+        onClosed: {
+            icloudPhotosPopup.selectedPhotos = ({})
         }
         Timer {
             interval: 20000
@@ -8514,8 +8831,9 @@ ApplicationWindow {
                     clip: true
                     radius: 8
                     color: theme.background
-                    border.color: Qt.rgba(1, 1, 1, 0.1)
-                    border.width: 1
+                    readonly property bool isPhotoSelected: Boolean(modelData && modelData.guid && icloudPhotosPopup.selectedPhotos && icloudPhotosPopup.selectedPhotos[modelData.guid])
+                    border.color: isPhotoSelected ? theme.accent : Qt.rgba(1, 1, 1, 0.1)
+                    border.width: isPhotoSelected ? 2 : 1
 
                     Connections {
                         target: backend
@@ -8660,6 +8978,49 @@ ApplicationWindow {
                                     }
                                 }
                             }
+
+                            // Top-left multi-select checkbox badge (for non-evicted photos)
+                            Rectangle {
+                                id: photoSelectBadge
+                                objectName: "photoSelectBadge"
+                                visible: !modelData.isCloudEvicted && Boolean(modelData.guid)
+                                readonly property bool checked: Boolean(modelData.guid && icloudPhotosPopup.selectedPhotos && icloudPhotosPopup.selectedPhotos[modelData.guid])
+                                anchors.top: parent.top
+                                anchors.left: parent.left
+                                anchors.margins: 4
+                                width: 22
+                                height: 22
+                                radius: 11
+                                z: 5
+                                color: checked ? theme.accent : Qt.rgba(0, 0, 0, 0.6)
+                                border.width: 1.5
+                                border.color: checked ? "#ffffff" : Qt.rgba(1, 1, 1, 0.75)
+
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: parent.checked ? "✓" : ""
+                                    font.pixelSize: 12
+                                    font.bold: true
+                                    color: "#ffffff"
+                                }
+
+                                MouseArea {
+                                    anchors.fill: parent
+                                    anchors.margins: -3
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        var g = modelData.guid || ""
+                                        if (!g) return
+                                        var next = Object.assign({}, icloudPhotosPopup.selectedPhotos || ({}))
+                                        if (next[g]) {
+                                            delete next[g]
+                                        } else {
+                                            next[g] = { guid: g, name: modelData.name || "photo.jpg" }
+                                        }
+                                        icloudPhotosPopup.selectedPhotos = next
+                                    }
+                                }
+                            }
                         }
 
                         Text {
@@ -8721,15 +9082,15 @@ ApplicationWindow {
                                 leftPadding: 6
                                 rightPadding: 6
                                 font.pixelSize: theme.fontSize - 2
-                                text: "📤 Send"
+                                text: "＋ " + i18n.tr("Attach")
                                 enabled: backend.selectedChatGuid !== "" && !!modelData.guid && !modelData.isCloudEvicted
                                 ToolTip.visible: hovered && backend.selectedChatGuid !== ""
                                 ToolTip.text: modelData.isCloudEvicted
-                                              ? i18n.tr("Download from iCloud before sending")
-                                              : (i18n.tr("Send to ") + (backend.selectedChatTitle || i18n.tr("active chat")))
+                                              ? i18n.tr("Download from iCloud before attaching")
+                                              : (i18n.tr("Attach to ") + (backend.selectedChatTitle || i18n.tr("active chat")))
                                 onClicked: {
                                     if (modelData.guid && !modelData.isCloudEvicted) {
-                                        backend.shareIcloudPhotoToChat(backend.selectedChatGuid, modelData.guid, modelData.name || "photo.jpg")
+                                        backend.stageIcloudPhotoForChat(backend.selectedChatGuid, modelData.guid, modelData.name || "photo.jpg")
                                         icloudPhotosPopup.close()
                                     }
                                 }
@@ -8737,6 +9098,73 @@ ApplicationWindow {
                         }
                     }
 
+                }
+            }
+
+            // Multi-Select Action Bar
+            Rectangle {
+                id: photosSelectionBar
+                objectName: "photosSelectionBar"
+                readonly property int selectedCount: Object.keys(icloudPhotosPopup.selectedPhotos || ({})).length
+                visible: selectedCount > 0
+                Layout.fillWidth: true
+                Layout.preferredHeight: 44
+                radius: 8
+                color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.14)
+                border.width: 1
+                border.color: theme.accent
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 12
+                    anchors.rightMargin: 12
+                    spacing: 8
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: photosSelectionBar.selectedCount + " " + i18n.tr("selected")
+                        font.pixelSize: theme.fontSize - 1
+                        font.bold: true
+                        color: theme.brightForeground
+                    }
+
+                    Button {
+                        text: i18n.tr("Clear")
+                        onClicked: icloudPhotosPopup.selectedPhotos = ({})
+                    }
+
+                    Rectangle {
+                        objectName: "photosAttachSelectedBtn"
+                        height: 30
+                        implicitWidth: attachSelTxt.implicitWidth + 20
+                        radius: 6
+                        opacity: backend.selectedChatGuid !== "" ? 1.0 : 0.5
+                        color: theme.accent
+                        Text {
+                            id: attachSelTxt
+                            anchors.centerIn: parent
+                            text: "📎 " + i18n.tr("Attach to Message") + " (" + photosSelectionBar.selectedCount + ")"
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: "#ffffff"
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            enabled: backend.selectedChatGuid !== ""
+                            onClicked: {
+                                var sel = icloudPhotosPopup.selectedPhotos || ({})
+                                var keys = Object.keys(sel)
+                                for (var i = 0; i < keys.length; ++i) {
+                                    var entry = sel[keys[i]]
+                                    if (entry && entry.guid) {
+                                        backend.stageIcloudPhotoForChat(backend.selectedChatGuid, entry.guid, entry.name || "photo.jpg")
+                                    }
+                                }
+                                icloudPhotosPopup.close()
+                            }
+                        }
+                    }
                 }
             }
 
@@ -10053,7 +10481,7 @@ ApplicationWindow {
                         }
                     }
 
-                    // Settings Section Tabs (Server & Sync / UI & Appearance / Notifications & Audio)
+                    // Settings Section Tabs (Connection / Appearance / Notifications)
                     RowLayout {
                         id: settingsSectionTabsRow
                         objectName: "settingsSectionTabsRow"
@@ -10062,9 +10490,9 @@ ApplicationWindow {
 
                         Repeater {
                             model: [
-                                { key: "server", label: "🌐 " + i18n.tr("Server & Sync") },
-                                { key: "appearance", label: "🎨 " + i18n.tr("UI & Appearance") },
-                                { key: "notifications", label: "🔔 " + i18n.tr("Notifications & Audio") }
+                                { key: "server", label: "🌐 " + i18n.tr("Connection") },
+                                { key: "appearance", label: "🎨 " + i18n.tr("Appearance") },
+                                { key: "notifications", label: "🔔 " + i18n.tr("Notifications") }
                             ]
                             delegate: Rectangle {
                                 required property var modelData
@@ -10110,16 +10538,20 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 12
 
-                // BluePill Cloud Default Onboarding Card
+                // BluePill Connection & Cloud Card
                 Rectangle {
                     id: cloudOnboardingCard
                     objectName: "cloudOnboardingCard"
                     Layout.fillWidth: true
                     implicitHeight: cloudCardCol.implicitHeight + 20
                     radius: 8
-                    color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
+                    color: (backend.connected || backend.cloudAccountEmail.length > 0)
+                           ? theme.lighterBackground
+                           : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
                     border.width: 1
-                    border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.38)
+                    border.color: (backend.connected || backend.cloudAccountEmail.length > 0)
+                                  ? Qt.rgba(48/255, 209/255, 88/255, 0.45)
+                                  : Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.38)
 
                     ColumnLayout {
                         id: cloudCardCol
@@ -10127,7 +10559,69 @@ ApplicationWindow {
                         anchors.margins: 10
                         spacing: 8
 
+                        // Calm Connection Status Summary when connected or signed into Cloud
+                        RowLayout {
+                            id: settingsConnectionStatusCard
+                            objectName: "settingsConnectionStatusCard"
+                            visible: (backend.connected || backend.cloudAccountEmail.length > 0) && !backend.cloudSignInPending
+                            Layout.fillWidth: true
+                            spacing: 10
+
+                            Rectangle {
+                                width: 10
+                                height: 10
+                                radius: 5
+                                color: backend.connected ? theme.green : theme.accent
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: backend.cloudAccountEmail.length > 0
+                                          ? (i18n.tr("BluePill Cloud") + " · " + backend.cloudAccountEmail)
+                                          : (backend.connected ? i18n.tr("Connected to Relay") : i18n.tr("Configured"))
+                                    font.pixelSize: theme.fontSize - 1
+                                    font.bold: true
+                                    color: theme.brightForeground
+                                    elide: Text.ElideRight
+                                }
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: backend.serverUrl && backend.serverUrl.length > 0 ? backend.serverUrl : backend.serverStatus
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                    elide: Text.ElideMiddle
+                                }
+                            }
+
+                            Rectangle {
+                                visible: backend.cloudAccountEmail.length === 0
+                                height: 28
+                                implicitWidth: reconnectBtnTxt.implicitWidth + 16
+                                radius: 6
+                                color: theme.background
+                                border.width: 1
+                                border.color: theme.muted
+                                Text {
+                                    id: reconnectBtnTxt
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Reconnect")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.foreground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.refreshAll()
+                                }
+                            }
+                        }
+
                         Text {
+                            visible: !backend.connected && backend.cloudAccountEmail.length === 0
                             Layout.fillWidth: true
                             text: "☁️ " + i18n.tr("BluePill Cloud (Recommended)")
                             font.pixelSize: theme.fontSize - 1
@@ -10135,8 +10629,9 @@ ApplicationWindow {
                             color: theme.brightForeground
                         }
                         Text {
+                            visible: !backend.connected && backend.cloudAccountEmail.length === 0
                             Layout.fillWidth: true
-                            text: i18n.tr("Sign in with BluePill Cloud to connect automatically, or connect to the live demo in one click.")
+                            text: i18n.tr("Sign in with BluePill Cloud to connect automatically, or try the live demo.")
                             font.pixelSize: theme.fontSize - 2
                             color: theme.foreground
                             wrapMode: Text.WordWrap
@@ -10144,7 +10639,7 @@ ApplicationWindow {
                         ColumnLayout {
                             Layout.fillWidth: true
                             spacing: 8
-                            visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
+                            visible: !backend.connected && !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
                             RowLayout {
                                 Layout.fillWidth: true
                                 spacing: 8
@@ -10305,20 +10800,20 @@ ApplicationWindow {
                             objectName: "settingsCloudSignedInBanner"
                             visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length > 0
                             Layout.fillWidth: true
-                            implicitHeight: settingsSignedInRow.implicitHeight + 14
+                            implicitHeight: settingsSignedInRow.implicitHeight + 10
                             radius: 7
-                            color: Qt.rgba(48/255, 209/255, 88/255, 0.14)
+                            color: Qt.rgba(48/255, 209/255, 88/255, 0.12)
                             border.width: 1
                             border.color: theme.green
                             RowLayout {
                                 id: settingsSignedInRow
                                 anchors.fill: parent
-                                anchors.margins: 7
+                                anchors.margins: 6
                                 spacing: 8
                                 Text {
                                     objectName: "settingsCloudSignedInText"
                                     Layout.fillWidth: true
-                                    text: "✓ " + i18n.tr("Signed in as ") + backend.cloudAccountEmail
+                                    text: "✓ " + i18n.tr("Signed in")
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.green
@@ -10382,23 +10877,58 @@ ApplicationWindow {
                     }
                 }
 
+                // Collapsible Advanced & Self-Hosted Toggle
+                Rectangle {
+                    id: advancedServerToggleBtn
+                    objectName: "advancedServerToggleBtn"
+                    Layout.fillWidth: true
+                    height: 36
+                    radius: 8
+                    color: advancedToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: serverSyncSection.advancedServerExpanded ? theme.accent : theme.muted
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 8
+                        Text {
+                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Advanced & Self-Hosted")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+                    }
+                    MouseArea {
+                        id: advancedToggleMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
+                    }
+                }
+
                 Text {
+                    visible: serverSyncSection.advancedServerExpanded
                     Layout.fillWidth: true
                     text: Qt.platform.os === "windows"
-                        ? i18n.tr("Or enter a self-hosted BluePill macOS Relay (http://mac-ip:1235), HTTPS reverse proxy, or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved to %APPDATA%\\bluepill\\config.json.")
-                        : i18n.tr("Or enter a self-hosted BluePill macOS Relay (http://mac-ip:1235), HTTPS reverse proxy, or Direct SSH (ssh://user@mac). Without a scheme, http:// is used; if no port is given, 1235 is used. Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
-                    font.pixelSize: theme.fontSize - 2
+                        ? i18n.tr("Enter a self-hosted BluePill macOS Relay (http://mac-ip:1235), HTTPS reverse proxy, or Direct SSH (ssh://user@mac). Credentials are saved to %APPDATA%\\bluepill\\config.json.")
+                        : i18n.tr("Enter a self-hosted BluePill macOS Relay (http://mac-ip:1235), HTTPS reverse proxy, or Direct SSH (ssh://user@mac). Credentials are saved with 0600 permissions to ~/.config/bluepill/config.json.")
+                    font.pixelSize: theme.fontSize - 3
                     color: theme.darkForeground
                     wrapMode: Text.WordWrap
                 }
 
-                // Tailscale relay discovery
+                // Tailscale relay discovery (inside Advanced & Self-Hosted)
                 ColumnLayout {
                     id: tailscaleDiscoverySection
                     objectName: "tailscaleDiscoverySection"
                     Layout.fillWidth: true
                     spacing: 6
-                    visible: backend.tailscaleStatus !== "" && backend.tailscaleStatus !== "not-installed"
+                    visible: serverSyncSection.advancedServerExpanded && backend.tailscaleStatus !== "" && backend.tailscaleStatus !== "not-installed"
 
                     RowLayout {
                         Layout.fillWidth: true
@@ -10554,40 +11084,6 @@ ApplicationWindow {
                                 onClicked: parent.selectRelay()
                             }
                         }
-                    }
-                }
-
-                // Collapsible Advanced Settings Toggle (keeps startup/settings clean: BluePill Cloud + Tailscale first)
-                Rectangle {
-                    id: advancedServerToggleBtn
-                    objectName: "advancedServerToggleBtn"
-                    Layout.fillWidth: true
-                    height: 36
-                    radius: 8
-                    color: advancedToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
-                    border.width: 1
-                    border.color: serverSyncSection.advancedServerExpanded ? theme.accent : theme.muted
-
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 12
-                        anchors.rightMargin: 12
-                        spacing: 8
-                        Text {
-                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Advanced Options (Server URL, History Retention & Version Info)")
-                            font.pixelSize: theme.fontSize - 2
-                            font.bold: true
-                            color: theme.brightForeground
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                        }
-                    }
-                    MouseArea {
-                        id: advancedToggleMouse
-                        anchors.fill: parent
-                        hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
-                        onClicked: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
                     }
                 }
 
@@ -10782,11 +11278,11 @@ ApplicationWindow {
                     }
                 }
 
-                // API Password / Key (visible when Advanced is expanded or when user has a non-Cloud server selected)
+                // API Password / Key (visible when Advanced is expanded)
                 ColumnLayout {
                     Layout.fillWidth: true
                     spacing: 4
-                    visible: serverSyncSection.advancedServerExpanded || !backend.cloudLoggedIn
+                    visible: serverSyncSection.advancedServerExpanded
                     Text {
                         Layout.fillWidth: true
                         text: i18n.tr("API Password / Key")
@@ -10862,37 +11358,43 @@ ApplicationWindow {
                     }
                 }
 
-                // Optional iCloud Hub Feature Modules
-                ColumnLayout {
+                // Optional iCloud Hub Feature Modules (Compact Single-Row Card)
+                Rectangle {
                     id: icloudModulesSettingsCol
                     objectName: "icloudModulesSettingsCol"
                     Layout.fillWidth: true
-                    spacing: 6
-                    Text {
-                        Layout.fillWidth: true
-                        text: i18n.tr("iCloud Hub Modules (Optional)")
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.foreground
-                        elide: Text.ElideRight
-                    }
+                    implicitHeight: icloudModulesRow.implicitHeight + 16
+                    radius: 8
+                    color: theme.lighterBackground
+                    border.width: 1
+                    border.color: theme.muted
+
                     RowLayout {
-                        Layout.fillWidth: true
+                        id: icloudModulesRow
+                        anchors.fill: parent
+                        anchors.margins: 8
                         spacing: 8
+
+                        Text {
+                            text: i18n.tr("iCloud Hub")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
 
                         Rectangle {
                             id: toggleNotesModuleBtn
                             objectName: "toggleNotesModuleBtn"
                             Layout.fillWidth: true
-                            height: 34
+                            height: 30
                             radius: 6
-                            color: backend.icloudNotesEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            color: backend.icloudNotesEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
                             border.width: 1
                             border.color: backend.icloudNotesEnabled ? theme.accent : theme.muted
                             Text {
                                 anchors.centerIn: parent
                                 text: (backend.icloudNotesEnabled ? "✓ " : "○ ") + "📝 " + i18n.tr("Notes")
-                                font.pixelSize: theme.fontSize - 2
+                                font.pixelSize: theme.fontSize - 3
                                 font.bold: backend.icloudNotesEnabled
                                 color: backend.icloudNotesEnabled ? theme.brightForeground : theme.darkForeground
                             }
@@ -10907,15 +11409,15 @@ ApplicationWindow {
                             id: toggleCalendarModuleBtn
                             objectName: "toggleCalendarModuleBtn"
                             Layout.fillWidth: true
-                            height: 34
+                            height: 30
                             radius: 6
-                            color: backend.icloudCalendarEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            color: backend.icloudCalendarEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
                             border.width: 1
                             border.color: backend.icloudCalendarEnabled ? theme.accent : theme.muted
                             Text {
                                 anchors.centerIn: parent
                                 text: (backend.icloudCalendarEnabled ? "✓ " : "○ ") + "📅 " + i18n.tr("Calendar")
-                                font.pixelSize: theme.fontSize - 2
+                                font.pixelSize: theme.fontSize - 3
                                 font.bold: backend.icloudCalendarEnabled
                                 color: backend.icloudCalendarEnabled ? theme.brightForeground : theme.darkForeground
                             }
@@ -10930,15 +11432,15 @@ ApplicationWindow {
                             id: togglePhotosModuleBtn
                             objectName: "togglePhotosModuleBtn"
                             Layout.fillWidth: true
-                            height: 34
+                            height: 30
                             radius: 6
-                            color: backend.icloudPhotosEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                            color: backend.icloudPhotosEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
                             border.width: 1
                             border.color: backend.icloudPhotosEnabled ? theme.accent : theme.muted
                             Text {
                                 anchors.centerIn: parent
                                 text: (backend.icloudPhotosEnabled ? "✓ " : "○ ") + "☁️ " + i18n.tr("Photos")
-                                font.pixelSize: theme.fontSize - 2
+                                font.pixelSize: theme.fontSize - 3
                                 font.bold: backend.icloudPhotosEnabled
                                 color: backend.icloudPhotosEnabled ? theme.brightForeground : theme.darkForeground
                             }
@@ -11056,14 +11558,45 @@ ApplicationWindow {
                         color: theme.darkForeground
                         wrapMode: Text.WordWrap
                     }
+
+                    Rectangle {
+                        id: runSetupGuideBtn
+                        objectName: "runSetupGuideBtn"
+                        Layout.topMargin: 4
+                        height: 30
+                        implicitWidth: setupGuideLbl.implicitWidth + 20
+                        radius: 6
+                        color: setupGuideMouse.containsMouse ? theme.selection : theme.lighterBackground
+                        border.width: 1
+                        border.color: setupGuideMouse.containsMouse ? theme.accent : theme.muted
+                        Text {
+                            id: setupGuideLbl
+                            anchors.centerIn: parent
+                            text: "🧭 " + i18n.tr("Run Setup Guide")
+                            font.pixelSize: theme.fontSize - 3
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+                        MouseArea {
+                            id: setupGuideMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.showServerConfigModal = false
+                                root.onboardingStep = 0
+                                root.forceShowOnboarding = true
+                            }
+                        }
+                    }
                 }
 
-                // Cloud Managed Updates (Strictly gated to signed-in bluepill.nertwork.com users)
+                // Updates (Compact Single-Card Controls)
                 Rectangle {
                     id: cloudUpdatesSettingsBox
                     objectName: "cloudUpdatesSettingsBox"
                     Layout.fillWidth: true
-                    implicitHeight: cloudUpdatesCol.implicitHeight + 18
+                    implicitHeight: cloudUpdatesCol.implicitHeight + 16
                     radius: 8
                     color: theme.lighterBackground
                     border.width: 1
@@ -11072,7 +11605,7 @@ ApplicationWindow {
                     ColumnLayout {
                         id: cloudUpdatesCol
                         anchors.fill: parent
-                        anchors.margins: 9
+                        anchors.margins: 8
                         spacing: 6
 
                         RowLayout {
@@ -11080,27 +11613,17 @@ ApplicationWindow {
                             spacing: 8
                             Text {
                                 Layout.fillWidth: true
-                                text: "🔄 " + i18n.tr("Cloud Managed Updates")
+                                text: "🔄 " + i18n.tr("Updates")
                                 font.pixelSize: theme.fontSize - 2
                                 font.bold: true
                                 color: theme.brightForeground
                             }
                             Text {
-                                text: backend.cloudLoggedIn ? i18n.tr("BluePill Cloud Active") : i18n.tr("Cloud Login Only")
+                                text: backend.cloudLoggedIn ? i18n.tr("Cloud Active") : i18n.tr("Cloud Login Only")
                                 font.pixelSize: theme.fontSize - 3
                                 font.bold: true
                                 color: backend.cloudLoggedIn ? theme.green : theme.darkForeground
                             }
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            text: backend.cloudLoggedIn
-                                  ? i18n.tr("Background stable update checks run automatically and always ask for your confirmation before installing.")
-                                  : i18n.tr("Available when signed in at bluepill.nertwork.com. Local/self-hosted setups never phone home.")
-                            font.pixelSize: theme.fontSize - 3
-                            color: theme.darkForeground
-                            wrapMode: Text.WordWrap
                         }
 
                         RowLayout {
@@ -11121,7 +11644,7 @@ ApplicationWindow {
                                 border.color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled) ? theme.accent : theme.muted
                                 Text {
                                     anchors.centerIn: parent
-                                    text: (backend.autoUpdateCheckEnabled ? "✓ " : "○ ") + i18n.tr("Auto-Check Stable Updates")
+                                    text: (backend.autoUpdateCheckEnabled ? "✓ " : "○ ") + i18n.tr("Auto-Check Updates")
                                     font.pixelSize: theme.fontSize - 3
                                     font.bold: backend.autoUpdateCheckEnabled
                                     color: backend.autoUpdateCheckEnabled ? theme.brightForeground : theme.darkForeground
@@ -11147,7 +11670,7 @@ ApplicationWindow {
                                 Text {
                                     id: checkUpdLbl
                                     anchors.centerIn: parent
-                                    text: backend.updateChecking ? i18n.tr("Checking…") : i18n.tr("Check for Updates")
+                                    text: backend.updateChecking ? i18n.tr("Checking…") : i18n.tr("Check Now")
                                     font.pixelSize: theme.fontSize - 3
                                     font.bold: true
                                     color: theme.accent
@@ -13512,10 +14035,7 @@ ApplicationWindow {
                         composerAppsMenu.visible = false
                         var pastedPath = backend.pasteClipboardImageToTempFile()
                         if (pastedPath && pastedPath.length > 0 && backend.selectedChatGuid.length > 0) {
-                            root.stagedAttachmentPath = pastedPath
-                            root.stagedAttachmentName = pastedPath.split("/").pop()
-                            root.stagedAttachmentChatGuid = backend.selectedChatGuid
-                            root.stageAttachment(pastedPath, root.stagedAttachmentName, backend.selectedChatGuid)
+                            root.stageAttachment(pastedPath, pastedPath.split("/").pop(), backend.selectedChatGuid)
                             root.showToast("📎 " + i18n.tr("Image staged — press Enter or Send"))
                         } else {
                             root.showToast(i18n.tr("No image on clipboard (or drag & drop a file)"))
@@ -13627,8 +14147,22 @@ ApplicationWindow {
         color: theme.darkerBackground
         border.color: theme.muted
         border.width: 1
-        x: Math.max(12, Math.min(root.width - width - 12, root.width - 320))
-        y: Math.max(12, root.height - height - 80)
+        x: {
+            void(root.width); void(effectMenuPopup.visible)
+            if (composerPrimaryActionBtn && composerPrimaryActionBtn.visible) {
+                var pt = composerPrimaryActionBtn.mapToItem(root.contentItem, composerPrimaryActionBtn.width - width, 0)
+                return Math.max(12, Math.min(root.width - width - 12, pt.x))
+            }
+            return Math.max(12, Math.min(root.width - width - 12, root.width - 320))
+        }
+        y: {
+            void(root.height); void(effectMenuPopup.visible)
+            if (composerPrimaryActionBtn && composerPrimaryActionBtn.visible) {
+                var pt = composerPrimaryActionBtn.mapToItem(root.contentItem, 0, -height - 10)
+                return Math.max(12, Math.min(root.height - height - 12, pt.y))
+            }
+            return Math.max(12, root.height - height - 80)
+        }
 
         ColumnLayout {
             id: effectCol
@@ -13681,13 +14215,588 @@ ApplicationWindow {
                             if (root.editTargetGuid !== "") return;
                             var txt = composerInput.text.trim();
                             if (txt.length === 0) {
-                                root.showToast("Type a message to send with effect");
+                                root.pendingSendEffectId = modelData.id;
+                                root.pendingSendEffectName = modelData.name;
+                                composerInput.forceActiveFocus();
                                 return;
                             }
+                            root.pendingSendEffectId = "";
+                            root.pendingSendEffectName = "";
                             backend.sendMessageWithEffect(txt, modelData.id);
                             root.triggerExpressiveEffect(modelData.name);
                             composerInput.text = "";
+                            root.showEmojiPicker = false;
+                            root.emojiAutocompleteResults = [];
+                            root.replyTargetGuid = "";
+                            root.replyTargetSender = "";
+                            root.replyTargetText = "";
                             messageListView.scrollToBottom();
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // One-Time First-Time Onboarding Modal (3-step guided setup)
+    Rectangle {
+        id: firstRunOnboardingModal
+        objectName: "firstRunOnboardingModal"
+        visible: root.forceShowOnboarding || (!backend.onboardingCompleted && backend.needsSetup && !root.showServerConfigModal)
+        anchors.fill: parent
+        color: "#b80e0e14"
+        z: 1005
+
+        MouseArea {
+            anchors.fill: parent
+            onClicked: {} // keep user inside guided modal until Skip or Start Messaging
+        }
+
+        Rectangle {
+            id: firstRunOnboardingCard
+            objectName: "firstRunOnboardingCard"
+            anchors.centerIn: parent
+            width: Math.min(540, root.width - 36)
+            height: Math.min(root.height - 36, onboardingCol.implicitHeight + 44)
+            radius: 14
+            clip: true
+            color: theme.darkBackground
+            border.width: 1
+            border.color: theme.accent
+
+            ColumnLayout {
+                id: onboardingCol
+                anchors.fill: parent
+                anchors.margins: 22
+                spacing: 14
+
+                // Step Indicator Dots
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: 6
+                    Text {
+                        text: "💊 BluePill"
+                        font.pixelSize: theme.fontSize
+                        font.bold: true
+                        color: theme.accent
+                    }
+                    Item { Layout.fillWidth: true }
+                    Repeater {
+                        model: 3
+                        delegate: Rectangle {
+                            required property int index
+                            width: root.onboardingStep === index ? 20 : 8
+                            height: 8
+                            radius: 4
+                            color: root.onboardingStep === index ? theme.accent : theme.muted
+                        }
+                    }
+                }
+
+                // Step 0: Welcome
+                ColumnLayout {
+                    visible: root.onboardingStep === 0
+                    Layout.fillWidth: true
+                    spacing: 14
+
+                    Rectangle {
+                        Layout.alignment: Qt.AlignHCenter
+                        width: 64
+                        height: 64
+                        radius: 32
+                        color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.16)
+                        border.width: 1
+                        border.color: theme.accent
+                        Text {
+                            anchors.centerIn: parent
+                            text: "💬"
+                            font.pixelSize: 30
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        text: i18n.tr("Welcome to BluePill")
+                        font.pixelSize: theme.fontSize + 6
+                        font.bold: true
+                        color: theme.brightForeground
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        text: i18n.tr("Connect BluePill to a Mac running the BluePill Relay or sign in with BluePill Cloud")
+                        font.pixelSize: theme.fontSize
+                        color: theme.foreground
+                        wrapMode: Text.WordWrap
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 6
+                        spacing: 10
+
+                        Rectangle {
+                            objectName: "onboardingSkipBtn"
+                            height: 36
+                            implicitWidth: skipLbl.implicitWidth + 24
+                            radius: 8
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: skipLbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("Skip")
+                                font.pixelSize: theme.fontSize - 1
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.forceShowOnboarding = false
+                                    backend.completeOnboarding()
+                                }
+                            }
+                        }
+
+                        Item { Layout.fillWidth: true }
+
+                        Rectangle {
+                            objectName: "onboardingGetStartedBtn"
+                            height: 36
+                            implicitWidth: getStartedLbl.implicitWidth + 28
+                            radius: 8
+                            color: theme.accent
+                            Text {
+                                id: getStartedLbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("Get Started →")
+                                font.pixelSize: theme.fontSize - 1
+                                font.bold: true
+                                color: theme.onAccent
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.onboardingStep = 1
+                                    backend.discoverTailscaleRelays()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Step 1: Connect Your Relay (3 crisp option cards)
+                ColumnLayout {
+                    visible: root.onboardingStep === 1
+                    Layout.fillWidth: true
+                    spacing: 10
+
+                    Text {
+                        Layout.fillWidth: true
+                        text: i18n.tr("Connect Your Relay")
+                        font.pixelSize: theme.fontSize + 3
+                        font.bold: true
+                        color: theme.brightForeground
+                    }
+
+                    // Card (a): BluePill Cloud
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: obCloudCol.implicitHeight + 18
+                        radius: 10
+                        color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
+                        border.width: 1
+                        border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45)
+
+                        ColumnLayout {
+                            id: obCloudCol
+                            anchors.fill: parent
+                            anchors.margins: 9
+                            spacing: 6
+
+                            Text {
+                                text: "☁️ " + i18n.tr("BluePill Cloud")
+                                font.pixelSize: theme.fontSize
+                                font.bold: true
+                                color: theme.brightForeground
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 30
+                                    radius: 6
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "G  " + i18n.tr("Google")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.forceShowOnboarding = true
+                                            backend.startCloudSignIn("google")
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 30
+                                    radius: 6
+                                    color: theme.lighterBackground
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "🐙  " + i18n.tr("GitHub")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.forceShowOnboarding = true
+                                            backend.startCloudSignIn("github")
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 30
+                                    radius: 6
+                                    color: theme.accent
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Email")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.onAccent
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            root.forceShowOnboarding = true
+                                            backend.startCloudSignIn("")
+                                        }
+                                    }
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: backend.cloudSignInPending
+                                spacing: 8
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: i18n.tr("Finish sign-in in your browser…")
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.brightForeground
+                                }
+                                Button {
+                                    text: i18n.tr("Cancel")
+                                    onClicked: backend.cancelCloudSignIn()
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length > 0
+                                spacing: 8
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "✓ " + backend.cloudAccountEmail
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.green
+                                }
+                                Button {
+                                    text: i18n.tr("Continue →")
+                                    onClicked: root.onboardingStep = 2
+                                }
+                            }
+                        }
+                    }
+
+                    // Card (b): Self-Hosted Mac Relay
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: obRelayCol.implicitHeight + 18
+                        radius: 10
+                        color: theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.muted
+
+                        ColumnLayout {
+                            id: obRelayCol
+                            anchors.fill: parent
+                            anchors.margins: 9
+                            spacing: 6
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "🖥 " + i18n.tr("Self-Hosted Mac Relay")
+                                    font.pixelSize: theme.fontSize
+                                    font.bold: true
+                                    color: theme.brightForeground
+                                }
+                                Text {
+                                    visible: backend.tailscaleRelays.length > 0
+                                    text: backend.tailscaleRelays.length + " " + i18n.tr("Tailscale peer(s)")
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.green
+                                }
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 6
+                                Rectangle {
+                                    Layout.fillWidth: true
+                                    height: 28
+                                    radius: 6
+                                    color: theme.background
+                                    border.width: 1
+                                    border.color: theme.muted
+                                    Text {
+                                        anchors.fill: parent
+                                        anchors.leftMargin: 8
+                                        anchors.rightMargin: 8
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: "brew install nertwork/tap/bluepill"
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: theme.foreground
+                                        elide: Text.ElideRight
+                                    }
+                                }
+                                Rectangle {
+                                    height: 28
+                                    implicitWidth: copyBrewTxt.implicitWidth + 16
+                                    radius: 6
+                                    color: theme.background
+                                    border.width: 1
+                                    border.color: theme.accent
+                                    Text {
+                                        id: copyBrewTxt
+                                        anchors.centerIn: parent
+                                        text: "📋 " + i18n.tr("Copy")
+                                        font.pixelSize: theme.fontSize - 3
+                                        font.bold: true
+                                        color: theme.accent
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.copyToClipboard("brew install nertwork/tap/bluepill", "brew install command")
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                height: 30
+                                radius: 6
+                                color: theme.background
+                                border.width: 1
+                                border.color: theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Enter Relay URL & Password (or pick Tailscale Mac) →")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.brightForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: {
+                                        root.forceShowOnboarding = false
+                                        backend.completeOnboarding()
+                                        root.settingsActiveTab = "server"
+                                        root.openServerConfigModal()
+                                        serverSyncSection.advancedServerExpanded = true
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // Card (c): Try Live Demo
+                    Rectangle {
+                        Layout.fillWidth: true
+                        height: 44
+                        radius: 10
+                        color: Qt.rgba(48/255, 209/255, 88/255, 0.14)
+                        border.width: 1
+                        border.color: theme.green
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            Text {
+                                Layout.fillWidth: true
+                                text: "✨ " + i18n.tr("Try Live Demo")
+                                font.pixelSize: theme.fontSize
+                                font.bold: true
+                                color: theme.green
+                            }
+                            Text {
+                                text: i18n.tr("Explore sample chats →")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.green
+                            }
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.forceShowOnboarding = true
+                                root.connectToLiveDemo()
+                                root.onboardingStep = 2
+                            }
+                        }
+                    }
+
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Layout.topMargin: 4
+                        spacing: 10
+                        Rectangle {
+                            height: 32
+                            implicitWidth: obBackLbl.implicitWidth + 20
+                            radius: 6
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: obBackLbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("← Back")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.onboardingStep = 0
+                            }
+                        }
+                        Item { Layout.fillWidth: true }
+                        Rectangle {
+                            height: 32
+                            implicitWidth: obSkip2Lbl.implicitWidth + 20
+                            radius: 6
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: obSkip2Lbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("Skip")
+                                font.pixelSize: theme.fontSize - 2
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: {
+                                    root.forceShowOnboarding = false
+                                    backend.completeOnboarding()
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Step 2: You're All Set
+                ColumnLayout {
+                    visible: root.onboardingStep === 2
+                    Layout.fillWidth: true
+                    spacing: 14
+
+                    Rectangle {
+                        Layout.alignment: Qt.AlignHCenter
+                        width: 60
+                        height: 60
+                        radius: 30
+                        color: Qt.rgba(48/255, 209/255, 88/255, 0.18)
+                        border.width: 1
+                        border.color: theme.green
+                        Text {
+                            anchors.centerIn: parent
+                            text: "✓"
+                            font.pixelSize: 28
+                            font.bold: true
+                            color: theme.green
+                        }
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        text: i18n.tr("You're All Set")
+                        font.pixelSize: theme.fontSize + 5
+                        font.bold: true
+                        color: theme.brightForeground
+                    }
+
+                    Text {
+                        Layout.fillWidth: true
+                        horizontalAlignment: Text.AlignHCenter
+                        text: backend.cloudAccountEmail.length > 0
+                              ? (i18n.tr("Signed in as ") + backend.cloudAccountEmail)
+                              : (backend.serverUrl && backend.serverUrl.length > 0
+                                 ? (i18n.tr("Connected to ") + backend.serverUrl)
+                                 : i18n.tr("BluePill is ready for messaging."))
+                        font.pixelSize: theme.fontSize - 1
+                        color: theme.foreground
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Rectangle {
+                        objectName: "onboardingStartMessagingBtn"
+                        Layout.alignment: Qt.AlignHCenter
+                        height: 38
+                        implicitWidth: startMsgLbl.implicitWidth + 32
+                        radius: 8
+                        color: theme.accent
+                        Text {
+                            id: startMsgLbl
+                            anchors.centerIn: parent
+                            text: i18n.tr("Start Messaging")
+                            font.pixelSize: theme.fontSize
+                            font.bold: true
+                            color: theme.onAccent
+                        }
+                        MouseArea {
+                            anchors.fill: parent
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: {
+                                root.forceShowOnboarding = false
+                                backend.completeOnboarding()
+                            }
                         }
                     }
                 }

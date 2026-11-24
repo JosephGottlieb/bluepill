@@ -302,6 +302,7 @@ class Backend : public QObject {
     Q_PROPERTY(bool showTopBarStatusPill READ showTopBarStatusPill WRITE setShowTopBarStatusPill NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool showPinnedRow READ showPinnedRow WRITE setShowPinnedRow NOTIFY uiPreferencesChanged)
     Q_PROPERTY(bool hoverMessageActions READ hoverMessageActions WRITE setHoverMessageActions NOTIFY uiPreferencesChanged)
+    Q_PROPERTY(bool onboardingCompleted READ onboardingCompleted WRITE setOnboardingCompleted NOTIFY uiPreferencesChanged)
     Q_PROPERTY(QString themeMode READ themeMode WRITE setThemeMode NOTIFY themeModeChanged)
     Q_PROPERTY(bool syncingHistory READ syncingHistory NOTIFY syncingHistoryChanged)
     Q_PROPERTY(QString playingAudioGuid READ playingAudioGuid NOTIFY audioPlaybackChanged)
@@ -397,6 +398,9 @@ public:
     void setShowPinnedRow(bool enabled);
     bool hoverMessageActions() const { return m_hoverMessageActions; }
     void setHoverMessageActions(bool enabled);
+    bool onboardingCompleted() const { return m_onboardingCompleted; }
+    Q_INVOKABLE void setOnboardingCompleted(bool completed);
+    Q_INVOKABLE void completeOnboarding() { setOnboardingCompleted(true); }
     QString themeMode() const { return m_themeMode; }
     Q_INVOKABLE void setThemeMode(const QString &mode);
     void setTheme(Theme *theme);
@@ -539,7 +543,7 @@ public:
     Q_INVOKABLE void markAllChatsRead();
     Q_INVOKABLE void toggleChatReadUnread(const QString &chatGuid);
     Q_INVOKABLE void toggleChatRead(const QString &chatGuid) { toggleChatReadUnread(chatGuid); }
-    Q_INVOKABLE void sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid = QString());
+    Q_INVOKABLE void sendMessage(const QString &chatGuid, const QString &text, const QString &replyToGuid = QString(), const QString &effectId = QString());
     Q_INVOKABLE void resendMessage(const QString &chatGuid, const QString &failedGuid, const QString &text);
     Q_INVOKABLE void sendReaction(const QString &chatGuid, const QString &messageGuid, const QString &reaction);
     Q_INVOKABLE void deleteMessage(const QString &messageGuid, const QString &chatGuid = QString());
@@ -634,6 +638,7 @@ public:
     Q_INVOKABLE static QString extractOtpCode(const QString &text) { return extractVerificationCode(text); }
     Q_INVOKABLE QString pasteClipboardImageToTempFile();
     Q_INVOKABLE void sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption = QString());
+    Q_INVOKABLE void sendAttachments(const QString &chatGuid, const QStringList &filePaths, const QString &caption = QString());
     // Audio, Voice, Effects & Scheduling
     Q_INVOKABLE static bool isAudioAttachment(const QString &mimeType, const QString &fileName);
     // GIF / WebP attachments play inline with AnimatedImage.
@@ -679,6 +684,7 @@ public:
     Q_INVOKABLE void downloadCloudAttachment(const QString &attachmentGuid);
     Q_INVOKABLE void syncIcloudPhotos();
     Q_INVOKABLE void shareIcloudPhotoToChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName = QString());
+    Q_INVOKABLE void stageIcloudPhotoForChat(const QString &chatGuid, const QString &attachmentGuid, const QString &fileName = QString());
     Q_INVOKABLE QString attachmentDownloadUrl(const QString &guid) const;
     bool isSecureOrLocalIcloudEndpoint() const;
     void replayPendingIcloudMutations();
@@ -853,6 +859,7 @@ signals:
     void icloudPhotosChanged();
     void icloudPhotosLoadingChanged();
     void icloudPhotosSyncingChanged();
+    void icloudPhotoStaged(const QString &chatGuid, const QString &localPath, const QString &fileName);
     void icloudHubModulesChanged();
     void sendingMessageChanged();
     void statusChanged();
@@ -1121,7 +1128,8 @@ private:
     int m_historySyncDays = 60;
     bool m_showTopBarStatusPill = false;
     bool m_showPinnedRow = true;
-    bool m_hoverMessageActions = true;
+    bool m_hoverMessageActions = false;
+    bool m_onboardingCompleted = false;
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;
     bool m_stayOnHomePage = false;

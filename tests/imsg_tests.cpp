@@ -2590,16 +2590,14 @@ private slots:
         pending.insert(QStringLiteral("guid"), QStringLiteral("temp-123"));
         QVERIFY(!allowed(pending));
 
-        // Hovering opens the action bar by default (hoverMessageActions == true); when disabled, only right-click does
-        QCOMPARE(b.hoverMessageActions(), true);
+        // Hovering does NOT open the action bar by default (hoverMessageActions == false); right-click (pinnedActionMessageGuid) does
+        QCOMPARE(b.hoverMessageActions(), false);
         win->setProperty("hoveredActionMessageGuid", QStringLiteral("m-new"));
-        QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
-        b.setHoverMessageActions(false);
         QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
         win->setProperty("pinnedActionMessageGuid", QStringLiteral("m-new"));
         QCOMPARE(win->property("activeActionMessageGuid").toString(), QStringLiteral("m-new"));
-        b.setHoverMessageActions(true);
         QMetaObject::invokeMethod(win, "clearActionMenu");
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
 
         // Edit mode: Save edits the message instead of sending a new one
         QMetaObject::invokeMethod(win, "startEditing", Q_ARG(QVariant, QStringLiteral("m-new")), Q_ARG(QVariant, QStringLiteral("The typo, fixed")));
@@ -10586,7 +10584,7 @@ private slots:
         QCOMPARE(b.historySyncDays(), 60);
         QCOMPARE(b.showTopBarStatusPill(), false);
         QCOMPARE(b.showPinnedRow(), true);
-        QCOMPARE(b.hoverMessageActions(), true);
+        QCOMPARE(b.hoverMessageActions(), false);
 
         // 2. pinnedChats: strictly shows only explicit pins
         b.setMacPins({});
@@ -10690,8 +10688,10 @@ private slots:
         QVERIFY(!b.messages().isEmpty());
         const QString targetMsgGuid = b.messages().first().toMap().value(QStringLiteral("guid")).toString();
 
-        // Hovering shows the action bar when hoverMessageActions == true
+        // Right-clicking (pinnedActionMessageGuid) shows the action bar; hovering does not
         win->setProperty("hoveredActionMessageGuid", targetMsgGuid);
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        win->setProperty("pinnedActionMessageGuid", targetMsgGuid);
         QCOMPARE(win->property("activeActionMessageGuid").toString(), targetMsgGuid);
         QQuickItem *customReactBtn = findVisual(win->contentItem(), QStringLiteral("customReactionAddBtn"));
         QVERIFY(customReactBtn != nullptr);
@@ -12495,6 +12495,235 @@ private slots:
             }
         }
         QVERIFY(sawErrToast);
+    }
+
+    void testUxOverhaulEffectsTapbacksRightClickMultiImageOnboardingAndBadges() {
+        QTemporaryDir tempDir;
+        QVERIFY(tempDir.isValid());
+        ScopedTestHome testHome(tempDir.path());
+
+        // 1. Mock relay server capturing /api/v1/message/text, /api/v1/attachment/<guid>/download, /api/v1/message/attachment
+        QTcpServer mockServer;
+        QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
+
+        QList<QJsonObject> textPayloads;
+        int attachmentUploadCount = 0;
+        int attachmentDownloadCount = 0;
+
+        // Minimal 1x1 PNG
+        const QByteArray tinyPng = QByteArray::fromBase64(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==");
+
+        QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
+            while (QTcpSocket *s = mockServer.nextPendingConnection()) {
+                auto buf = std::make_shared<QByteArray>();
+                QObject::connect(s, &QTcpSocket::readyRead, s, [s, buf, &textPayloads, &attachmentUploadCount, &attachmentDownloadCount, tinyPng]() {
+                    buf->append(s->readAll());
+                    const int hdrEnd = buf->indexOf("\r\n\r\n");
+                    if (hdrEnd < 0) return;
+                    const QByteArray headerPart = buf->left(hdrEnd);
+                    int contentLen = 0;
+                    for (const QByteArray &line : headerPart.split('\n')) {
+                        if (line.toLower().startsWith("content-length:")) {
+                            contentLen = line.mid(15).trimmed().toInt();
+                        }
+                    }
+                    const QByteArray bodyPart = buf->mid(hdrEnd + 4);
+                    if (bodyPart.size() < contentLen) return;
+
+                    const QList<QByteArray> firstParts = headerPart.left(headerPart.indexOf('\n')).trimmed().split(' ');
+                    const QString method = firstParts.size() >= 1 ? QString::fromUtf8(firstParts[0]) : QString();
+                    const QString fullPath = firstParts.size() >= 2 ? QString::fromUtf8(firstParts[1]) : QString();
+                    const QString path = fullPath.section(QLatin1Char('?'), 0, 0);
+
+                    QByteArray contentType = "application/json";
+                    QByteArray respBody = R"({"status":200,"data":{}})";
+
+                    if (method == QStringLiteral("POST") && path == QStringLiteral("/api/v1/message/text")) {
+                        const QJsonDocument doc = QJsonDocument::fromJson(bodyPart);
+                        if (doc.isObject()) textPayloads.append(doc.object());
+                        respBody = R"({"status":200,"data":{"guid":"srv-eff-1","text":"Boom!"}})";
+                    } else if (method == QStringLiteral("GET") && path.contains(QStringLiteral("/api/v1/attachment/")) && path.endsWith(QStringLiteral("/download"))) {
+                        ++attachmentDownloadCount;
+                        contentType = "image/png";
+                        respBody = tinyPng;
+                    } else if (method == QStringLiteral("POST") && path == QStringLiteral("/api/v1/message/attachment")) {
+                        ++attachmentUploadCount;
+                        respBody = R"({"status":200,"data":{"guid":"srv-att-1"}})";
+                    } else if (path == QStringLiteral("/api/v1/ping")) {
+                        respBody = R"({"status":200,"message":"pong"})";
+                    }
+
+                    const QByteArray resp =
+                        "HTTP/1.1 200 OK\r\nContent-Type: " + contentType +
+                        "\r\nContent-Length: " + QByteArray::number(respBody.size()) +
+                        "\r\nConnection: close\r\n\r\n" + respBody;
+                    s->write(resp);
+                    s->flush();
+                    s->disconnectFromHost();
+                });
+                QObject::connect(s, &QTcpSocket::disconnected, s, &QObject::deleteLater);
+            }
+        });
+
+        // 2. hoverMessageActions defaults to false & onboardingCompleted persistence + completeOnboarding()
+        const QString stateFile = tempDir.filePath(QStringLiteral("state_ux.json"));
+        const QString configFile = tempDir.filePath(QStringLiteral("config_ux.json"));
+        {
+            Backend bFresh(false);
+            bFresh.setConfigFilePath(configFile);
+            bFresh.setStateFilePath(stateFile);
+            QCOMPARE(bFresh.hoverMessageActions(), false);
+            QCOMPARE(bFresh.onboardingCompleted(), false);
+
+            bFresh.completeOnboarding();
+            QCOMPARE(bFresh.onboardingCompleted(), true);
+        }
+        {
+            Backend bReloaded(false);
+            bReloaded.setConfigFilePath(configFile);
+            bReloaded.setStateFilePath(stateFile);
+            QCOMPARE(bReloaded.hoverMessageActions(), false);
+            QCOMPARE(bReloaded.onboardingCompleted(), true);
+        }
+        // Existing configured serverUrl without explicit onboardingCompleted key auto-completes onboarding
+        {
+            const QString stateAuto = tempDir.filePath(QStringLiteral("state_auto.json"));
+            QFile sf(stateAuto);
+            QVERIFY(sf.open(QIODevice::WriteOnly));
+            sf.write(R"({"historySyncDays":60})");
+            sf.close();
+
+            Backend bAuto(false);
+            bAuto.setConfigFilePath(configFile);
+            bAuto.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockServer.serverPort()), QString(), QStringLiteral("pw"));
+            bAuto.setStateFilePath(stateAuto);
+            QCOMPARE(bAuto.onboardingCompleted(), true);
+        }
+
+        // 3. sendMessageWithEffect routes through sendMessage with effectId & optimistic expressiveSendStyleId
+        Backend b(false);
+        b.setConfigFilePath(configFile);
+        b.setStateFilePath(stateFile);
+        b.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockServer.serverPort()), QString(), QStringLiteral("pw"));
+
+        const QString chatGuid = QStringLiteral("iMessage;-;+15552223333");
+        b.ingestChatsMetadataForTest(QJsonArray{
+            QJsonObject{
+                {QStringLiteral("guid"), chatGuid},
+                {QStringLiteral("chatIdentifier"), QStringLiteral("+15552223333")},
+                {QStringLiteral("displayName"), QStringLiteral("Alex")}
+            }
+        });
+        b.selectChat(chatGuid);
+
+        const QString slamEffect = QStringLiteral("com.apple.MobileSMS.expressivesend.impact");
+        b.sendMessageWithEffect(QStringLiteral("Boom!"), slamEffect);
+        QVERIFY(!b.messages().isEmpty());
+        const QVariantMap optMsg = b.messages().last().toMap();
+        QCOMPARE(optMsg.value(QStringLiteral("expressiveSendStyleId")).toString(), slamEffect);
+        QCOMPARE(optMsg.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("💥 Slam"));
+        QTRY_COMPARE_WITH_TIMEOUT(textPayloads.size(), 1, 3000);
+        QCOMPARE(textPayloads.first().value(QStringLiteral("effectId")).toString(), slamEffect);
+        QCOMPARE(textPayloads.first().value(QStringLiteral("message")).toString(), QStringLiteral("Boom!"));
+
+        // 4. stageIcloudPhotoForChat emits icloudPhotoStaged & sendAttachments sends multiple images
+        QSignalSpy stagedSpy(&b, &Backend::icloudPhotoStaged);
+        b.stageIcloudPhotoForChat(chatGuid, QStringLiteral("att-photo-1"), QStringLiteral("sunset.png"));
+        QTRY_COMPARE_WITH_TIMEOUT(stagedSpy.count(), 1, 3000);
+        QCOMPARE(attachmentDownloadCount, 1);
+        const QList<QVariant> stagedArgs = stagedSpy.first();
+        QCOMPARE(stagedArgs.at(0).toString(), chatGuid);
+        const QString stagedPath1 = stagedArgs.at(1).toString();
+        QVERIFY(QFileInfo::exists(stagedPath1));
+        QCOMPARE(stagedArgs.at(2).toString(), QStringLiteral("sunset.png"));
+
+        // Second file for multi-image sendAttachments
+        const QString stagedPath2 = tempDir.filePath(QStringLiteral("second.png"));
+        {
+            QFile f2(stagedPath2);
+            QVERIFY(f2.open(QIODevice::WriteOnly));
+            f2.write(tinyPng);
+            f2.close();
+        }
+        b.sendAttachments(chatGuid, QStringList{stagedPath1, stagedPath2}, QStringLiteral("Two photos"));
+        QTRY_COMPARE_WITH_TIMEOUT(attachmentUploadCount, 2, 4000);
+
+        // 5. QML checks for firstRunOnboardingModal, chatServiceSymbolBadge, upper-corner reactionPillItem, right-click actionBar, and multi-image stagedAttachmentBar
+        Backend bQml(false);
+        bQml.setConfigFilePath(tempDir.filePath(QStringLiteral("config_qml.json")));
+        bQml.setStateFilePath(tempDir.filePath(QStringLiteral("state_qml.json")));
+        bQml.loadDemoData();
+
+        Theme theme;
+        Translator i18n;
+        QQmlApplicationEngine engine;
+        engine.rootContext()->setContextProperty(QStringLiteral("backend"), &bQml);
+        engine.rootContext()->setContextProperty(QStringLiteral("theme"), &theme);
+        engine.rootContext()->setContextProperty(QStringLiteral("i18n"), &i18n);
+        engine.load(QUrl(QStringLiteral("qrc:/Main.qml")));
+        QVERIFY(!engine.rootObjects().isEmpty());
+
+        QQuickWindow *win = qobject_cast<QQuickWindow *>(engine.rootObjects().first());
+        QVERIFY(win != nullptr);
+        win->resize(1280, 800);
+        win->show();
+        QTest::qWait(150);
+
+        std::function<QQuickItem *(QQuickItem *, const QString &)> findVisual = [&](QQuickItem *item, const QString &name) -> QQuickItem * {
+            if (!item) return nullptr;
+            if (item->objectName() == name) return item;
+            for (QQuickItem *c : item->childItems())
+                if (QQuickItem *f = findVisual(c, name)) return f;
+            return nullptr;
+        };
+
+        // 5a. firstRunOnboardingModal exists
+        QQuickItem *onboardingModal = win->findChild<QQuickItem *>(QStringLiteral("firstRunOnboardingModal"));
+        QVERIFY(onboardingModal != nullptr);
+
+        // 5b. chatServiceSymbolBadge exists in sidebar chat delegates
+        QQuickItem *serviceBadge = findVisual(win->contentItem(), QStringLiteral("chatServiceSymbolBadge"));
+        QVERIFY(serviceBadge != nullptr);
+
+        // 5c. Right-click actionBar (no hover open)
+        QVERIFY(!bQml.messages().isEmpty());
+        const QString firstMsgGuid = bQml.messages().first().toMap().value(QStringLiteral("guid")).toString();
+        win->setProperty("hoveredActionMessageGuid", firstMsgGuid);
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        win->setProperty("pinnedActionMessageGuid", firstMsgGuid);
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), firstMsgGuid);
+        QMetaObject::invokeMethod(win, "clearActionMenu");
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+
+        // 5d. Multi-image stagedAttachmentBar
+        QMetaObject::invokeMethod(win, "stageAttachment",
+                                  Q_ARG(QVariant, stagedPath1),
+                                  Q_ARG(QVariant, QStringLiteral("sunset.png")),
+                                  Q_ARG(QVariant, bQml.selectedChatGuid()));
+        QMetaObject::invokeMethod(win, "stageAttachment",
+                                  Q_ARG(QVariant, stagedPath2),
+                                  Q_ARG(QVariant, QStringLiteral("second.png")),
+                                  Q_ARG(QVariant, bQml.selectedChatGuid()));
+        const QVariantList stagedList = win->property("stagedAttachments").toList();
+        QCOMPARE(stagedList.size(), 2);
+        QCOMPARE(win->property("stagedAttachmentPath").toString(), stagedPath1);
+        QQuickItem *stagedBar = win->findChild<QQuickItem *>(QStringLiteral("stagedAttachmentBar"));
+        QVERIFY(stagedBar != nullptr);
+        QCOMPARE(stagedBar->property("visible").toBool(), true);
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
+        QCOMPARE(win->property("stagedAttachments").toList().size(), 0);
+
+        // 5e. Upper-corner reactionPillItem positioning check (source + visual)
+        QFile qmlFile(QStringLiteral(":/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../../src/Main.qml"));
+        if (!qmlFile.exists()) qmlFile.setFileName(QStringLiteral("../src/Main.qml"));
+        QVERIFY(qmlFile.open(QIODevice::ReadOnly | QIODevice::Text));
+        const QString qml = QString::fromUtf8(qmlFile.readAll());
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"firstRunOnboardingModal\"")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"chatServiceSymbolBadge\"")));
+        QVERIFY(qml.contains(QStringLiteral("anchors.top: bubbleRect.top")));
+        QVERIFY(qml.contains(QStringLiteral("objectName: \"reactionPillItem\"")));
     }
 
 };
