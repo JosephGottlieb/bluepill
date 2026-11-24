@@ -1,5 +1,5 @@
 Name:           bluepill
-Version:        %{?_version:%{_version}}%{!?_version:1.2.13}
+Version:        %{?_version:%{_version}}%{!?_version:1.2.14}
 Release:        1
 Summary:        Native Qt6/QML desktop & CLI client for iMessage, RCS, and SMS
 License:        MIT
