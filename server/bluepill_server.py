@@ -2003,8 +2003,14 @@ class BluePillEngine:
                 self.logger.warning("[wal] poll error: %s", exc)
 
     def _open_chat_db(self) -> sqlite3.Connection:
-        if not os.path.exists(self.db_path):
-            raise FileNotFoundError(f"chat.db not found at {self.db_path}")
+        # os.path.exists() is False both for a missing file and for a folder macOS
+        # won't let us look into (no Full Disk Access); only the first is "not found".
+        try:
+            os.stat(self.db_path)
+        except FileNotFoundError:
+            raise FileNotFoundError(f"chat.db not found at {self.db_path}") from None
+        except PermissionError as exc:
+            raise ChatDbUnreadableError(CHAT_DB_UNREADABLE_MESSAGE) from exc
         uri = f"file:{urllib.parse.quote(os.path.abspath(self.db_path))}?mode=ro"
         try:
             conn = sqlite3.connect(uri, uri=True, timeout=5.0, check_same_thread=False)
@@ -13475,6 +13481,29 @@ def run_selftest(engine: BluePillEngine) -> int:
                 test_eng._chat_db_readable_cache = None
         # A missing chat.db (e.g. Linux) is not an access problem
         assert test_eng.chat_db_readable() is True, "missing chat.db must not report as denied"
+        # ...but a folder macOS won't let us look into is (os.path.exists() is False there too)
+        real_stat = os.stat
+        saved_db_path = test_eng.db_path
+        test_eng.db_path = "/selftest-tcc-protected/Messages/chat.db"
+
+        def _tcc_stat(path, *a, **kw):
+            if str(path) == test_eng.db_path:
+                raise PermissionError(1, "Operation not permitted", str(path))
+            return real_stat(path, *a, **kw)
+
+        os.stat = _tcc_stat
+        try:
+            test_eng._chat_db_readable_cache = None
+            assert test_eng.chat_db_readable() is False, "denied folder traversal must report chat.db unreadable"
+            try:
+                test_eng._open_chat_db()
+                raise AssertionError("denied folder traversal must raise ChatDbUnreadableError")
+            except ChatDbUnreadableError:
+                pass
+        finally:
+            os.stat = real_stat
+            test_eng.db_path = saved_db_path
+            test_eng._chat_db_readable_cache = None
 
         boundary = "----BluePillSelftestBoundary987654"
         png_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01\x08\x06\x00\x00\x00\x1f\x15\xc4\x89"

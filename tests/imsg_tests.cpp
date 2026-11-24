@@ -1823,12 +1823,14 @@ private slots:
         // A relay that answers, but macOS won't let it open chat.db (no Full Disk Access)
         bool dbReadable = false;
         bool dropConnections = false;  // simulates the relay being unreachable
+        int historyLoadsServed = 0;    // startup history pages (limit 250) answered with data
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
             while (QTcpSocket *sock = server.nextPendingConnection()) {
                 QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
-                    const QByteArray reqLine = sock->readAll().split('\n').value(0).trimmed();
+                    const QByteArray req = sock->readAll();
+                    const QByteArray reqLine = req.split('\n').value(0).trimmed();
                     if (dropConnections) {
                         sock->abort();
                         return;
@@ -1838,6 +1840,8 @@ private slots:
                     if (reqLine.contains("/api/v1/server/info")) {
                         body = QByteArray("{\"status\":200,\"message\":\"Success\",\"data\":{\"server_version\":\"1.2.15\",\"os_version\":\"26.6\",\"private_api\":false,\"chat_db_readable\":")
                                + (dbReadable ? "true" : "false") + "}}";
+                    } else if (dbReadable && reqLine.contains("/api/v1/message/query") && req.contains("\"limit\":250")) {
+                        ++historyLoadsServed;
                     } else if (!dbReadable && (reqLine.contains("/api/v1/message/query") || reqLine.contains("/api/v1/chat/query"))) {
                         status = "503 Service Unavailable";
                         body = "{\"status\":503,\"message\":\"The Mac cannot read chat.db: give Full Disk Access\",\"data\":null,\"error\":\"chat_db_unreadable\"}";
@@ -1857,12 +1861,17 @@ private slots:
         b.setConfigFilePath(tempDir.filePath(QStringLiteral("config_fda.json")));
         QSignalSpy toasts(&b, &Backend::toastMessage);
 
+        // The startup history load is refused (chat.db denied), so the initial sync can't finish
+        b.fetchRecentMessagesForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.macNeedsFullDiskAccess(), 3000);
+        QVERIFY(!b.initialSyncCompleteForTest());
+
         // server/info says chat.db is unreadable: connected, but flagged
         b.fetchServerInfoForTest();
-        QTRY_VERIFY_WITH_TIMEOUT(b.macNeedsFullDiskAccess(), 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.serverStatus().startsWith(QStringLiteral("Connected v1.2.15")), 3000);
+        QVERIFY(b.macNeedsFullDiskAccess());
         QVERIFY(b.connected());
         QVERIFY2(b.serverStatus().contains(QStringLiteral("Full Disk Access")), qPrintable(b.serverStatus()));
-        QVERIFY(b.serverStatus().startsWith(QStringLiteral("Connected v1.2.15")));
 
         // The 503 from message/query is not a network failure: no "Disconnected · Reconnecting"
         for (int i = 0; i < 5; ++i) {
@@ -1900,6 +1909,9 @@ private slots:
         QTRY_VERIFY_WITH_TIMEOUT(!b.macNeedsFullDiskAccess(), 3000);
         QVERIFY(b.connected());
         QCOMPARE(b.serverStatus(), QStringLiteral("Connected v1.2.15 · macOS 26.6"));
+        // ...and the startup history load is reissued, so the initial sync completes
+        QTRY_COMPARE_WITH_TIMEOUT(historyLoadsServed, 1, 3000);
+        QTRY_VERIFY_WITH_TIMEOUT(b.initialSyncCompleteForTest(), 3000);
     }
 
     void testV161BackgroundImagePrefetchAndRetry() {

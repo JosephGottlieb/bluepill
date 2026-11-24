@@ -799,6 +799,8 @@ public:
     void handleSocketIoPayloadForTest(const QByteArray &rawPayload);
     void pollDeltaForTest() { pollDelta(); }
     void fetchServerInfoForTest() { fetchServerInfo(); }
+    void fetchRecentMessagesForTest() { fetchRecentMessages(0); }
+    bool initialSyncCompleteForTest() const { return m_initialSyncComplete; }
     void startSocketIoForTest() { startSocketIoClient(); }
     QString socketSid() const { return m_socketSid; }
     QString resolveCanonicalChatGuidForTest(const QString &chatGuid) const { return resolveCanonicalChatGuid(chatGuid); }

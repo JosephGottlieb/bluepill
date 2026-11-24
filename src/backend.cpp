@@ -5339,6 +5339,11 @@ void Backend::setMacNeedsFullDiskAccess(bool needed) {
     if (changed && needed) {
         emit toastMessage(QStringLiteral("⚠ ") + fullDiskAccessStatusNote());
     }
+    if (changed && !needed && !m_initialSyncComplete && !m_demoMode && !m_serverUrl.isEmpty()) {
+        // The startup history load failed while chat.db was denied and nothing else
+        // reissues it; fetchRecentMessages(0) starts a new sync generation.
+        QTimer::singleShot(0, this, [this]() { fetchRecentMessages(0); });
+    }
     if (changed || next != m_serverStatus) {
         m_serverStatus = next;
         emit statusChanged();
@@ -6170,6 +6175,7 @@ void Backend::fetchRecentMessages(int offset, int syncGen) {
         }
 
         if (reply->error() != QNetworkReply::NoError) {
+            handleChatDbUnreadableReply(reply);
             if (syncGen == m_historySyncGeneration && m_syncingHistory) {
                 m_syncingHistory = false;
                 emit syncingHistoryChanged();
