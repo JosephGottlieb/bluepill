@@ -1696,9 +1696,9 @@ ApplicationWindow {
                                 width: 10
                                 height: 10
                                 radius: 5
-                                color: backend.connected ? theme.green : theme.red
+                                color: !backend.connected ? theme.red : (backend.macNeedsFullDiskAccess ? theme.yellow : theme.green)
                                 border.width: 1
-                                border.color: backend.connected ? Qt.lighter(theme.green, 1.3) : Qt.lighter(theme.red, 1.3)
+                                border.color: Qt.lighter(color, 1.3)
                                 readonly property string statusText: backend.serverStatus
                                                                      + (backend.syncingHistory ? " · " + i18n.tr("Syncing history…") : "")
                                 ToolTip.visible: statusDotMouse.containsMouse

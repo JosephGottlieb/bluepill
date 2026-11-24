@@ -5329,14 +5329,20 @@ static QString fullDiskAccessStatusNote() {
 }
 
 void Backend::setMacNeedsFullDiskAccess(bool needed) {
-    if (needed == m_macNeedsFullDiskAccess) return;
+    const bool changed = needed != m_macNeedsFullDiskAccess;
+    if (!changed && !needed) return;
     m_macNeedsFullDiskAccess = needed;
+    // Rewrite the status even when already flagged: a network failure in between
+    // replaced it with "Disconnected...", and handleNetworkSuccess() restores only the base.
     const QString base = m_lastKnownServerStatus.isEmpty() ? QStringLiteral("Connected") : m_lastKnownServerStatus;
-    m_serverStatus = needed ? (base + QStringLiteral(" · ") + fullDiskAccessStatusNote()) : base;
-    if (needed) {
+    const QString next = needed ? (base + QStringLiteral(" · ") + fullDiskAccessStatusNote()) : base;
+    if (changed && needed) {
         emit toastMessage(QStringLiteral("⚠ ") + fullDiskAccessStatusNote());
     }
-    emit statusChanged();
+    if (changed || next != m_serverStatus) {
+        m_serverStatus = next;
+        emit statusChanged();
+    }
 }
 
 bool Backend::handleChatDbUnreadableReply(QNetworkReply *reply) {
@@ -5721,19 +5727,10 @@ void Backend::fetchServerInfo() {
                                   privApi ? QStringLiteral(" · Private API") : QString());
         m_lastKnownServerStatus = m_serverStatus;
         saveAppState();
-        const QJsonValue readable = data.value(QStringLiteral("chat_db_readable"));
-        if (readable.isBool()) {
-            // setMacNeedsFullDiskAccess() only notifies on a change; refresh the note either way
-            const bool needed = !readable.toBool();
-            if (needed != m_macNeedsFullDiskAccess) {
-                setMacNeedsFullDiskAccess(needed);
-            } else if (needed) {
-                m_serverStatus += QStringLiteral(" · ") + fullDiskAccessStatusNote();
-            }
-        } else if (m_macNeedsFullDiskAccess) {
-            m_serverStatus += QStringLiteral(" · ") + fullDiskAccessStatusNote();
-        }
         emit statusChanged();
+        // Older relays don't report chat_db_readable: keep what queries told us
+        const QJsonValue readable = data.value(QStringLiteral("chat_db_readable"));
+        setMacNeedsFullDiskAccess(readable.isBool() ? !readable.toBool() : m_macNeedsFullDiskAccess);
     });
 }
 

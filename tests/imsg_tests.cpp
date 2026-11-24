@@ -1822,12 +1822,17 @@ private slots:
 
         // A relay that answers, but macOS won't let it open chat.db (no Full Disk Access)
         bool dbReadable = false;
+        bool dropConnections = false;  // simulates the relay being unreachable
         QTcpServer server;
         QVERIFY(server.listen(QHostAddress::LocalHost, 0));
         QObject::connect(&server, &QTcpServer::newConnection, &server, [&]() {
             while (QTcpSocket *sock = server.nextPendingConnection()) {
                 QObject::connect(sock, &QTcpSocket::readyRead, sock, [&, sock]() {
                     const QByteArray reqLine = sock->readAll().split('\n').value(0).trimmed();
+                    if (dropConnections) {
+                        sock->abort();
+                        return;
+                    }
                     QByteArray status = "200 OK";
                     QByteArray body = "{\"status\":200,\"message\":\"Success\",\"data\":[]}";
                     if (reqLine.contains("/api/v1/server/info")) {
@@ -1872,6 +1877,22 @@ private slots:
             if (args.value(0).toString().contains(QStringLiteral("Full Disk Access"))) ++fdaToasts;
         }
         QCOMPARE(fdaToasts, 1);  // once, not on every poll
+
+        // A real network blip in between replaces the status with "Disconnected...";
+        // the next denial brings the Full Disk Access note back, without a second toast
+        dropConnections = true;
+        b.pollDeltaForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(!b.connected(), 3000);
+        dropConnections = false;
+        b.pollDeltaForTest();
+        QTRY_VERIFY_WITH_TIMEOUT(b.connected(), 3000);
+        QVERIFY(b.macNeedsFullDiskAccess());
+        QVERIFY2(b.serverStatus().contains(QStringLiteral("Full Disk Access")), qPrintable(b.serverStatus()));
+        int fdaToastsAfter = 0;
+        for (const QList<QVariant> &args : toasts) {
+            if (args.value(0).toString().contains(QStringLiteral("Full Disk Access"))) ++fdaToastsAfter;
+        }
+        QCOMPARE(fdaToastsAfter, 1);
 
         // Access granted: the next successful query clears the warning
         dbReadable = true;

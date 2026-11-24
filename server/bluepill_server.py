@@ -12348,17 +12348,33 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
         self._response_started = True
         super().send_response(code, message)
 
+    def _is_chat_db_denial(self, exc: BaseException) -> bool:
+        """True when exc means macOS refused chat.db, wherever the read failed.
+
+        Opening chat.db raises ChatDbUnreadableError; a denial during a later read
+        (schema lookup, query) is a plain sqlite3.DatabaseError, so re-probe chat.db
+        to tell it apart from other databases (AddressBook, Notes) failing.
+        """
+        if isinstance(exc, ChatDbUnreadableError):
+            return True
+        if isinstance(exc, sqlite3.DatabaseError) and _is_chat_db_access_denied(exc):
+            self.engine._chat_db_readable_cache = None
+            return not self.engine.chat_db_readable()
+        return False
+
     def _run_guarded(self, impl: Any) -> None:
         # macOS refusing chat.db must reach clients as an answer they can show,
         # not as a dropped connection that looks like the relay is down.
         self._response_started = False
         try:
             impl()
-        except ChatDbUnreadableError as exc:
-            if getattr(self, "_response_started", False):
+        except sqlite3.DatabaseError as exc:
+            if getattr(self, "_response_started", False) or not self._is_chat_db_denial(exc):
                 raise
-            self.engine.logger.warning("[chatdb] %s", exc)
-            self._send_json(503, None, str(exc), extra={"error": "chat_db_unreadable"})
+            # server/info must not report a stale "readable" right after a denial
+            self.engine._chat_db_readable_cache = (False, time.time())
+            self.engine.logger.warning("[chatdb] %s", CHAT_DB_UNREADABLE_MESSAGE)
+            self._send_json(503, None, CHAT_DB_UNREADABLE_MESSAGE, extra={"error": "chat_db_unreadable"})
 
     def do_GET(self) -> None:
         self._run_guarded(self._handle_get)
@@ -13045,6 +13061,10 @@ class BluePillHTTPHandler(BaseHTTPRequestHandler):
             try:
                 data = self.engine.handle_rpc(method, params)
                 self._send_json(200, {"id": req_id, "data": data})
+            except sqlite3.DatabaseError as exc:
+                if self._is_chat_db_denial(exc):
+                    raise  # _run_guarded answers 503 chat_db_unreadable
+                self._send_json(500, {"id": req_id, "data": None}, str(exc))
             except PermissionError as exc:
                 self._send_json(403, {"id": req_id, "data": None}, str(exc))
             except (ValueError, OverflowError) as exc:
@@ -13378,10 +13398,44 @@ def run_selftest(engine: BluePillEngine) -> int:
             open(denied_db, "wb").close()
             real_connect = sqlite3.connect
 
+            deny_mode = {"at": "open"}
+
+            class _ReadDeniedConnection:
+                """Opens fine, then macOS refuses the first real read."""
+
+                def __init__(self) -> None:
+                    self._conn = real_connect(":memory:")
+                    self.row_factory = None
+
+                def execute(self, sql: str, *a: Any, **kw: Any) -> Any:
+                    if sql.strip().upper().startswith("PRAGMA QUERY_ONLY"):
+                        return self._conn.execute(sql)
+                    raise sqlite3.DatabaseError("authorization denied")
+
+                def close(self) -> None:
+                    self._conn.close()
+
             def _denied_connect(target, *a, **kw):
                 if isinstance(target, str) and "chat.db" in target and denied_dir.replace("/", "%2F") in target.replace("/", "%2F"):
-                    raise sqlite3.DatabaseError("authorization denied")
+                    if deny_mode["at"] == "open":
+                        raise sqlite3.DatabaseError("authorization denied")
+                    return _ReadDeniedConnection()
                 return real_connect(target, *a, **kw)
+
+            def _post_denied(path_and_query: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+                assert path_and_query.startswith(("/api/", "/rpc?")), path_and_query
+                req_obj = urllib.request.Request(
+                    f"http://127.0.0.1:{port}{path_and_query}",
+                    data=json.dumps(payload).encode("utf-8"),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                try:
+                    urllib.request.urlopen(req_obj, timeout=5.0)
+                except urllib.error.HTTPError as http_exc:
+                    assert http_exc.code == 503, f"{path_and_query} with chat.db denied must be 503, got {http_exc.code}"
+                    return json.loads(http_exc.read().decode("utf-8"))
+                raise AssertionError(f"{path_and_query} must fail while chat.db is denied")
 
             saved_db_path = test_eng.db_path
             test_eng.db_path = denied_db
@@ -13404,6 +13458,17 @@ def run_selftest(engine: BluePillEngine) -> int:
                 with _open_loopback_selftest("/api/v1/server/info?password=selftest-secret") as info_resp:
                     info_data = json.loads(info_resp.read().decode("utf-8"))["data"]
                 assert info_data.get("chat_db_readable") is False, info_data
+                # The same answer through /rpc (its own sqlite3.Error handler must not turn it into a 500)
+                rpc_body = _post_denied("/rpc?password=selftest-secret",
+                                        {"id": 1, "method": "message.query", "params": {"limit": 1}})
+                assert rpc_body.get("error") == "chat_db_unreadable", rpc_body
+                # A denial at read time (schema lookup / query), not at open, is the same answer
+                deny_mode["at"] = "read"
+                test_eng._chat_db_readable_cache = (True, time.time())  # stale "readable" from before
+                read_body = _post_denied("/api/v1/message/query?password=selftest-secret", {"limit": 1})
+                assert read_body.get("error") == "chat_db_unreadable", read_body
+                with _open_loopback_selftest("/api/v1/server/info?password=selftest-secret") as info_resp:
+                    assert json.loads(info_resp.read().decode("utf-8"))["data"].get("chat_db_readable") is False
             finally:
                 sqlite3.connect = real_connect
                 test_eng.db_path = saved_db_path
