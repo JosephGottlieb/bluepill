@@ -297,12 +297,16 @@ jobs:
           bottle_sha = os.environ["BOTTLE_SHA"]
           p = pathlib.Path("/tmp/gh-homebrew-tap/Formula/bluepill.rb")
           txt = p.read_text(encoding="utf-8")
-          txt = re.sub(r'url "https://github\.com/nertwork/bluepill/archive/refs/tags/v[^"]+\.tar\.gz"', f'url "{src_url}"', txt, count=1)
-          txt = re.sub(r'sha256 "[0-9a-f]{64}"', f'sha256 "{src_sha}"', txt, count=1)
-          txt = re.sub(r'version "[^"]+"', f'version "{ver}"', txt, count=1)
-          txt = re.sub(r'root_url "https://github\.com/nertwork/bluepill/releases/download/v[^"]+"', f'root_url "https://github.com/nertwork/bluepill/releases/download/v{ver}"', txt, count=1)
-          txt = re.sub(r'sha256 cellar: :any_skip_relocation, all: "[0-9a-f]{64}"', f'sha256 cellar: :any_skip_relocation, all: "{bottle_sha}"', txt, count=1)
-          txt = re.sub(r'assert_match "bluepill-server [^"]+"', f'assert_match "bluepill-server {ver}"', txt, count=1)
+          for pattern, repl in [
+              (r'url "https://github\.com/nertwork/bluepill/archive/refs/tags/v[^"]+\.tar\.gz"', f'url "{src_url}"'),
+              (r'sha256 "[0-9a-f]+"', f'sha256 "{src_sha}"'),
+              (r'version "[^"]+"', f'version "{ver}"'),
+              (r'root_url "https://github\.com/nertwork/bluepill/releases/download/v[^"]+"', f'root_url "https://github.com/nertwork/bluepill/releases/download/v{ver}"'),
+              (r'sha256 cellar: :any_skip_relocation, all: "[0-9a-f]+"', f'sha256 cellar: :any_skip_relocation, all: "{bottle_sha}"'),
+              (r'assert_match "bluepill-server [^"]+"', f'assert_match "bluepill-server {ver}"'),
+          ]:
+              txt, n = re.subn(pattern, repl, txt, count=1)
+              assert n == 1, f"Formula substitution failed for pattern: {pattern}"
           p.write_text(txt, encoding="utf-8")
           PY
           ruby -c /tmp/gh-homebrew-tap/Formula/bluepill.rb
