@@ -88,11 +88,10 @@ ApplicationWindow {
     property real tapbackEmojiPopupX: 0
     property real tapbackEmojiPopupY: 0
     property Item previousFocusBeforeTapbackPicker: null
+    property Item previousFocusBeforeOnboarding: null
     property string settingsActiveTab: "server"
-    // Right-click opens message actions; hoverMessageActions kept for settings/test compatibility.
-    readonly property string activeActionMessageGuid: pinnedActionMessageGuid !== ""
-                                                      ? pinnedActionMessageGuid
-                                                      : (backend.hoverMessageActions ? hoveredActionMessageGuid : "")
+    // Right-click opens message actions only.
+    readonly property string activeActionMessageGuid: pinnedActionMessageGuid
 
     function openTapbackEmojiPicker(msgGuid, xPos, yPos) {
         if (!msgGuid || msgGuid.length === 0) return
@@ -299,21 +298,24 @@ ApplicationWindow {
             }
             var targetChatGuid = backend.selectedChatGuid
             var caption = composerInput.text.trim()
-            root.clearStagedAttachment()
-            composerInput.text = ""
-            root.showEmojiPicker = false
-            root.emojiAutocompleteResults = []
-            root.replyTargetGuid = ""
-            root.replyTargetSender = ""
-            root.replyTargetText = ""
-            root.pendingSendEffectId = ""
-            root.pendingSendEffectName = ""
+            var sentOk = false
             if (paths.length > 1) {
-                backend.sendAttachments(targetChatGuid, paths, caption)
+                sentOk = backend.sendAttachments(targetChatGuid, paths, caption)
             } else if (paths.length === 1) {
-                backend.sendAttachment(targetChatGuid, paths[0], caption)
+                sentOk = backend.sendAttachment(targetChatGuid, paths[0], caption)
             }
-            messageListView.scrollToBottom()
+            if (sentOk) {
+                root.clearStagedAttachment()
+                composerInput.text = ""
+                root.showEmojiPicker = false
+                root.emojiAutocompleteResults = []
+                root.replyTargetGuid = ""
+                root.replyTargetSender = ""
+                root.replyTargetText = ""
+                root.pendingSendEffectId = ""
+                root.pendingSendEffectName = ""
+                messageListView.scrollToBottom()
+            }
         } else if (composerInput.text.trim().length > 0) {
             if (root.pendingSendEffectId.length > 0) {
                 var effId = root.pendingSendEffectId
@@ -321,7 +323,7 @@ ApplicationWindow {
                 var txtToSend = composerInput.text
                 root.pendingSendEffectId = ""
                 root.pendingSendEffectName = ""
-                backend.sendMessageWithEffect(txtToSend, effId)
+                backend.sendMessageWithEffect(txtToSend, effId, root.replyTargetGuid)
                 root.triggerExpressiveEffect(effName)
             } else {
                 backend.sendMessage(backend.selectedChatGuid, composerInput.text, root.replyTargetGuid)
@@ -792,6 +794,11 @@ ApplicationWindow {
         if (root.settingsActiveTab !== "server" && root.settingsActiveTab !== "appearance" && root.settingsActiveTab !== "notifications") {
             root.settingsActiveTab = "server"
         }
+        serverSyncSection.icloudModulesExpanded = false
+        serverSyncSection.updatesExpanded = false
+        serverSyncSection.advancedServerExpanded = false
+        uiAppearanceSection.interfaceLayoutExpanded = false
+        notificationsSettingsCol.advancedAlertsExpanded = false
         root.showServerPassword = false
         root.showServerConfigModal = true
         serverUrlInput.forceActiveFocus()
@@ -1388,8 +1395,29 @@ ApplicationWindow {
         }
         function onIcloudPhotoStaged(chatGuid, localPath, fileName) {
             if (!localPath || localPath.length === 0) return
-            root.stageAttachment(localPath, fileName, chatGuid)
+            var activeGuid = backend.selectedChatGuid || ""
+            if (!activeGuid || !chatGuid || (chatGuid !== activeGuid && !backend.isSameConversation(chatGuid, activeGuid))) {
+                return
+            }
+            root.stageAttachment(localPath, fileName, activeGuid)
             composerInput.forceActiveFocus()
+        }
+        function onAttachmentSendRejected(chatGuid, rejectedPaths, unsentCaption) {
+            if (!unsentCaption || unsentCaption.length === 0) return
+            var activeGuid = backend.selectedChatGuid || ""
+            if (activeGuid.length > 0 && (chatGuid === activeGuid || backend.isSameConversation(chatGuid, activeGuid))) {
+                if (composerInput.text.trim().length === 0) {
+                    composerInput.text = unsentCaption
+                    composerInput.forceActiveFocus()
+                }
+            } else if (chatGuid && chatGuid.length > 0) {
+                var drafts = root.chatDrafts || ({})
+                var canon = backend.resolveCanonicalChatGuid(chatGuid) || chatGuid
+                if (!drafts[canon] || drafts[canon].trim().length === 0) {
+                    drafts[canon] = unsentCaption
+                    root.chatDrafts = drafts
+                }
+            }
         }
         function onCloudSignInCompleted(email, serverUrl) {
             root.showServerConfigModal = false
@@ -1524,6 +1552,7 @@ ApplicationWindow {
     // Keyboard shortcuts
     Shortcut {
         sequences: ["Ctrl+K", "F1"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             root.showShortcutsModal = !root.showShortcutsModal
             if (root.showShortcutsModal) {
@@ -1535,7 +1564,7 @@ ApplicationWindow {
     }
     Shortcut {
         sequences: ["Ctrl+F", "/"]
-        enabled: !root.showShortcutsModal || !shortcutsSearchField.activeFocus
+        enabled: !firstRunOnboardingModal.visible && (!root.showShortcutsModal || !shortcutsSearchField.activeFocus)
         onActivated: {
             if (root.showShortcutsModal) {
                 shortcutsSearchField.forceActiveFocus()
@@ -1546,14 +1575,17 @@ ApplicationWindow {
     }
     Shortcut {
         sequences: ["Alt+Down", "Ctrl+J", "Ctrl+Tab"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: backend.selectNextChat()
     }
     Shortcut {
         sequences: ["Alt+Up", "Ctrl+Shift+Tab"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: backend.selectPrevChat()
     }
     Shortcut {
         sequence: "Ctrl+N"
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             root.showNewChatModal = true
             newChatRecipient.forceActiveFocus()
@@ -1561,20 +1593,24 @@ ApplicationWindow {
     }
     Shortcut {
         sequences: ["Ctrl+Shift+C", "Alt+C"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             if (backend.selectedChatGuid.length > 0) root.openContactModal(backend.selectedChatAddress, "")
         }
     }
     Shortcut {
         sequence: "Ctrl+E"
+        enabled: !firstRunOnboardingModal.visible
         onActivated: root.showEmojiPicker = !root.showEmojiPicker
     }
     Shortcut {
         sequence: "Ctrl+U"
+        enabled: !firstRunOnboardingModal.visible
         onActivated: backend.setFilterMode(backend.filterMode === "unread" ? "all" : "unread")
     }
     Shortcut {
         sequences: ["Ctrl+Shift+U", "Alt+U"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             if (backend.selectedChatGuid) {
                 backend.toggleChatReadUnread(backend.selectedChatGuid)
@@ -1588,6 +1624,7 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+A"
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             backend.markAllChatsRead()
             root.showToast("✓ " + i18n.tr("Marked all chats as read in iMessage"))
@@ -1595,10 +1632,12 @@ ApplicationWindow {
     }
     Shortcut {
         sequences: ["Ctrl+R", "F5"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: backend.refreshAll()
     }
     Shortcut {
         sequence: "Ctrl+Shift+R"
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             backend.markChatRead(backend.selectedChatGuid)
             root.showToast("✓ " + i18n.tr("Marked chat as read in iMessage"))
@@ -1606,36 +1645,37 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+M"
+        enabled: !firstRunOnboardingModal.visible
         onActivated: backend.toggleChatMute(backend.selectedChatGuid)
     }
     Shortcut {
         sequences: ["PageDown", "Ctrl+PageDown"]
-        enabled: !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
         onActivated: root.scrollMessagesPageDown()
     }
     Shortcut {
         sequences: ["PageUp", "Ctrl+PageUp"]
-        enabled: !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
         onActivated: root.scrollMessagesPageUp()
     }
     Shortcut {
         sequence: "Ctrl+Home"
-        enabled: !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
         onActivated: root.scrollMessagesToTop()
     }
     Shortcut {
         sequence: "Ctrl+End"
-        enabled: !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && backend.selectedChatGuid.length > 0
         onActivated: root.scrollMessagesToBottom()
     }
     Shortcut {
         sequence: "Home"
-        enabled: !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && !searchInput.activeFocus && (!composerInput.activeFocus || composerInput.text.length === 0) && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && !searchInput.activeFocus && (!composerInput.activeFocus || composerInput.text.length === 0) && backend.selectedChatGuid.length > 0
         onActivated: root.scrollMessagesToTop()
     }
     Shortcut {
         sequence: "End"
-        enabled: !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && !searchInput.activeFocus && (!composerInput.activeFocus || composerInput.text.length === 0) && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !root.showNewChatModal && !root.showContactModal && !root.showShortcutsModal && !searchInput.activeFocus && (!composerInput.activeFocus || composerInput.text.length === 0) && backend.selectedChatGuid.length > 0
         onActivated: root.scrollMessagesToBottom()
     }
     Repeater {
@@ -1644,6 +1684,7 @@ ApplicationWindow {
             required property int modelData
             Shortcut {
                 sequences: ["Alt+" + modelData, "Ctrl+" + modelData]
+                enabled: !firstRunOnboardingModal.visible
                 onActivated: {
                     var chs = backend.chats
                     if (modelData - 1 < chs.length) {
@@ -1659,11 +1700,12 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "?"
-        enabled: !root.showServerConfigModal && !root.showContactModal && !root.showNewChatModal && (!root.showShortcutsModal || !shortcutsSearchField.activeFocus)
+        enabled: !firstRunOnboardingModal.visible && !root.showServerConfigModal && !root.showContactModal && !root.showNewChatModal && (!root.showShortcutsModal || !shortcutsSearchField.activeFocus)
         onActivated: root.showShortcutsModal = !root.showShortcutsModal
     }
     Shortcut {
         sequences: ["Ctrl+H", "Alt+Home"]
+        enabled: !firstRunOnboardingModal.visible
         onActivated: {
             root.clearActionMenu()
             root.showShortcutsModal = false
@@ -1770,12 +1812,12 @@ ApplicationWindow {
     }
     Shortcut {
         sequence: "Ctrl+Shift+Delete"
-        enabled: backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && backend.selectedChatGuid.length > 0
         onActivated: backend.deleteChat(backend.selectedChatGuid)
     }
     Shortcut {
         sequence: "Delete"
-        enabled: !composerInput.activeFocus && !searchInput.activeFocus && !root.showNewChatModal && !root.showContactModal && backend.selectedChatGuid.length > 0
+        enabled: !firstRunOnboardingModal.visible && !composerInput.activeFocus && !searchInput.activeFocus && !root.showNewChatModal && !root.showContactModal && backend.selectedChatGuid.length > 0
         onActivated: backend.deleteChat(backend.selectedChatGuid)
     }
 
@@ -4223,7 +4265,7 @@ ApplicationWindow {
                         }
 
                         onIsAnyPartHoveredChanged: {
-                            // Hover-triggered tapback bar disabled; right-click opens the context menu instead.
+                            // Right-click opens message actions; hover never opens the action popover.
                             if (!isAnyPartHovered && root.hoveredActionMessageGuid === modelData.guid) {
                                 hoverClearTimer.restart()
                             }
@@ -4424,7 +4466,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.leftMargin: 20
                             Layout.rightMargin: 20
-                            Layout.topMargin: ((modelData.reactions || []).length > 0) ? 14 : 0
+                            Layout.topMargin: ((modelData.reactions || []).length > 0) ? Math.max(14, Math.ceil(reactionPillsRow.height) - 10) : 0
                             Layout.minimumHeight: 0
                             spacing: 8
                             z: (root.activeActionMessageGuid === modelData.guid || msgDelegate.hoveredReactionEmoji.length > 0) ? 100 : 1
@@ -5604,16 +5646,36 @@ ApplicationWindow {
                                 }
 
                                 // Tapback Reaction Pills Row (macOS Messages: upper-left for sender, upper-right for receiver)
-                                RowLayout {
+                                Flow {
                                     id: reactionPillsRow
                                     visible: (modelData.reactions || []).length > 0
+                                    readonly property real maxTimelineRowWidth: Math.max(120, messageListView.width - 44)
+                                    readonly property real naturalWidth: {
+                                        var w = 0
+                                        var count = reactionPillsRepeater.count
+                                        for (var i = 0; i < count; ++i) {
+                                            var it = reactionPillsRepeater.itemAt(i)
+                                            if (it) {
+                                                if (w > 0) w += spacing
+                                                w += it.implicitWidth
+                                            }
+                                        }
+                                        return w
+                                    }
+                                    readonly property bool fitsInCorner: naturalWidth <= (bubbleRect.width + 10)
+                                    width: Math.min(naturalWidth, maxTimelineRowWidth)
                                     anchors.top: bubbleRect.top
-                                    anchors.topMargin: -12
-                                    anchors.left: modelData.isFromMe ? bubbleRect.left : undefined
-                                    anchors.leftMargin: modelData.isFromMe ? -10 : 0
-                                    anchors.right: modelData.isFromMe ? undefined : bubbleRect.right
-                                    anchors.rightMargin: modelData.isFromMe ? 0 : -10
+                                    anchors.topMargin: -Math.max(12, Math.ceil(height) - 12)
+                                    anchors.left: modelData.isFromMe
+                                                  ? (fitsInCorner ? bubbleRect.left : undefined)
+                                                  : (fitsInCorner ? undefined : bubbleRect.left)
+                                    anchors.leftMargin: (modelData.isFromMe && fitsInCorner) ? -10 : ((!modelData.isFromMe && !fitsInCorner) ? -10 : 0)
+                                    anchors.right: modelData.isFromMe
+                                                   ? (fitsInCorner ? undefined : bubbleRect.right)
+                                                   : (fitsInCorner ? bubbleRect.right : undefined)
+                                    anchors.rightMargin: (!modelData.isFromMe && fitsInCorner) ? -10 : ((modelData.isFromMe && !fitsInCorner) ? -10 : 0)
                                     spacing: 4
+                                    layoutDirection: (modelData.isFromMe && !fitsInCorner) ? Qt.RightToLeft : Qt.LeftToRight
                                     z: msgDelegate.hoveredReactionEmoji.length > 0 ? 150 : 20
 
                                     Repeater {
@@ -5631,6 +5693,7 @@ ApplicationWindow {
                                             readonly property bool isPillHovered: forceHoveredForTest || reactionPillHover.hovered || reactionPillMouse.containsMouse
                                             readonly property string tooltipText: pillTooltipText
                                             readonly property bool tooltipVisible: reactionTooltipBadge.visible
+                                            width: reactRow.implicitWidth + 14
                                             height: 24
                                             radius: 12
                                             implicitWidth: reactRow.implicitWidth + 14
@@ -6241,8 +6304,10 @@ ApplicationWindow {
 
                                             Image {
                                                 anchors.fill: parent
+                                                readonly property int thumbDecodePx: Math.ceil(56 * Math.max(1, Screen.devicePixelRatio))
                                                 fillMode: Image.PreserveAspectCrop
                                                 source: (modelData && modelData.path) ? backend.localFileUrl(modelData.path) : ""
+                                                sourceSize: Qt.size(thumbDecodePx, thumbDecodePx)
                                                 asynchronous: true
                                             }
                                         }
@@ -10533,10 +10598,12 @@ ApplicationWindow {
                 ColumnLayout {
                     id: serverSyncSection
                     objectName: "serverSyncSection"
+                    property bool icloudModulesExpanded: false
+                    property bool updatesExpanded: false
                     property bool advancedServerExpanded: false
                     visible: root.settingsActiveTab === "server"
                     Layout.fillWidth: true
-                    spacing: 12
+                    spacing: 10
 
                 // BluePill Connection & Cloud Card
                 Rectangle {
@@ -10877,7 +10944,291 @@ ApplicationWindow {
                     }
                 }
 
-                // Collapsible Advanced & Self-Hosted Toggle
+                // Collapsible iCloud Hub Modules Dropdown
+                Rectangle {
+                    id: icloudModulesToggleBtn
+                    objectName: "icloudModulesToggleBtn"
+                    Layout.fillWidth: true
+                    height: 36
+                    radius: 8
+                    color: icloudModulesToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: serverSyncSection.icloudModulesExpanded ? theme.accent : theme.muted
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 8
+                        Text {
+                            text: (serverSyncSection.icloudModulesExpanded ? "▾ " : "▸ ") + i18n.tr("iCloud Hub Modules")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            text: ((backend.icloudNotesEnabled ? 1 : 0) + (backend.icloudCalendarEnabled ? 1 : 0) + (backend.icloudPhotosEnabled ? 1 : 0)) + "/3 " + i18n.tr("enabled")
+                            font.pixelSize: theme.fontSize - 3
+                            color: theme.darkForeground
+                        }
+                    }
+                    MouseArea {
+                        id: icloudModulesToggleMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: serverSyncSection.icloudModulesExpanded = !serverSyncSection.icloudModulesExpanded
+                    }
+                }
+
+                // Optional iCloud Hub Feature Modules (Compact Single-Row Card)
+                Rectangle {
+                    id: icloudModulesSettingsCol
+                    objectName: "icloudModulesSettingsCol"
+                    visible: serverSyncSection.icloudModulesExpanded
+                    Layout.fillWidth: true
+                    implicitHeight: icloudModulesRow.implicitHeight + 16
+                    radius: 8
+                    color: theme.lighterBackground
+                    border.width: 1
+                    border.color: theme.muted
+
+                    RowLayout {
+                        id: icloudModulesRow
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 8
+
+                        Text {
+                            text: i18n.tr("iCloud Hub")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+
+                        Rectangle {
+                            id: toggleNotesModuleBtn
+                            objectName: "toggleNotesModuleBtn"
+                            Layout.fillWidth: true
+                            height: 30
+                            radius: 6
+                            color: backend.icloudNotesEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
+                            border.width: 1
+                            border.color: backend.icloudNotesEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudNotesEnabled ? "✓ " : "○ ") + "📝 " + i18n.tr("Notes")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: backend.icloudNotesEnabled
+                                color: backend.icloudNotesEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudNotesEnabled = !backend.icloudNotesEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: toggleCalendarModuleBtn
+                            objectName: "toggleCalendarModuleBtn"
+                            Layout.fillWidth: true
+                            height: 30
+                            radius: 6
+                            color: backend.icloudCalendarEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
+                            border.width: 1
+                            border.color: backend.icloudCalendarEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudCalendarEnabled ? "✓ " : "○ ") + "📅 " + i18n.tr("Calendar")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: backend.icloudCalendarEnabled
+                                color: backend.icloudCalendarEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudCalendarEnabled = !backend.icloudCalendarEnabled
+                            }
+                        }
+
+                        Rectangle {
+                            id: togglePhotosModuleBtn
+                            objectName: "togglePhotosModuleBtn"
+                            Layout.fillWidth: true
+                            height: 30
+                            radius: 6
+                            color: backend.icloudPhotosEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
+                            border.width: 1
+                            border.color: backend.icloudPhotosEnabled ? theme.accent : theme.muted
+                            Text {
+                                anchors.centerIn: parent
+                                text: (backend.icloudPhotosEnabled ? "✓ " : "○ ") + "☁️ " + i18n.tr("Photos")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: backend.icloudPhotosEnabled
+                                color: backend.icloudPhotosEnabled ? theme.brightForeground : theme.darkForeground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.icloudPhotosEnabled = !backend.icloudPhotosEnabled
+                            }
+                        }
+                    }
+                }
+
+                // Collapsible Updates Dropdown
+                Rectangle {
+                    id: updatesToggleBtn
+                    objectName: "updatesToggleBtn"
+                    Layout.fillWidth: true
+                    height: 36
+                    radius: 8
+                    color: updatesToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
+                    border.width: 1
+                    border.color: serverSyncSection.updatesExpanded ? theme.accent : theme.muted
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 12
+                        anchors.rightMargin: 12
+                        spacing: 8
+                        Text {
+                            text: (serverSyncSection.updatesExpanded ? "▾ " : "▸ ") + i18n.tr("Updates")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.brightForeground
+                            Layout.fillWidth: true
+                            elide: Text.ElideRight
+                        }
+                        Text {
+                            text: backend.anyUpdateAvailable ? i18n.tr("Update available") : (backend.cloudLoggedIn ? i18n.tr("Cloud Active") : i18n.tr("Cloud Only"))
+                            font.pixelSize: theme.fontSize - 3
+                            color: backend.anyUpdateAvailable ? theme.accent : theme.darkForeground
+                        }
+                    }
+                    MouseArea {
+                        id: updatesToggleMouse
+                        anchors.fill: parent
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: serverSyncSection.updatesExpanded = !serverSyncSection.updatesExpanded
+                    }
+                }
+
+                // Updates (Compact Single-Card Controls)
+                Rectangle {
+                    id: cloudUpdatesSettingsBox
+                    objectName: "cloudUpdatesSettingsBox"
+                    visible: serverSyncSection.updatesExpanded
+                    Layout.fillWidth: true
+                    implicitHeight: cloudUpdatesCol.implicitHeight + 16
+                    radius: 8
+                    color: theme.lighterBackground
+                    border.width: 1
+                    border.color: backend.cloudLoggedIn ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45) : theme.muted
+
+                    ColumnLayout {
+                        id: cloudUpdatesCol
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 6
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: "🔄 " + i18n.tr("Updates")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.brightForeground
+                            }
+                            Text {
+                                text: backend.cloudLoggedIn ? i18n.tr("Cloud Active") : i18n.tr("Cloud Login Only")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: backend.cloudLoggedIn ? theme.green : theme.darkForeground
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Rectangle {
+                                id: toggleAutoUpdateCheckBtn
+                                objectName: "toggleAutoUpdateCheckBtn"
+                                Layout.fillWidth: true
+                                height: 30
+                                radius: 6
+                                enabled: backend.cloudLoggedIn
+                                opacity: backend.cloudLoggedIn ? 1.0 : 0.5
+                                color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled)
+                                       ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22)
+                                       : theme.background
+                                border.width: 1
+                                border.color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled) ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (backend.autoUpdateCheckEnabled ? "✓ " : "○ ") + i18n.tr("Auto-Check Updates")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: backend.autoUpdateCheckEnabled
+                                    color: backend.autoUpdateCheckEnabled ? theme.brightForeground : theme.darkForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: backend.cloudLoggedIn
+                                    onClicked: backend.autoUpdateCheckEnabled = !backend.autoUpdateCheckEnabled
+                                }
+                            }
+                            Rectangle {
+                                id: checkUpdatesNowBtn
+                                objectName: "checkUpdatesNowBtn"
+                                height: 30
+                                implicitWidth: checkUpdLbl.implicitWidth + 20
+                                radius: 6
+                                enabled: backend.cloudLoggedIn && !backend.updateChecking
+                                opacity: backend.cloudLoggedIn ? 1.0 : 0.5
+                                color: theme.background
+                                border.width: 1
+                                border.color: theme.accent
+                                Text {
+                                    id: checkUpdLbl
+                                    anchors.centerIn: parent
+                                    text: backend.updateChecking ? i18n.tr("Checking…") : i18n.tr("Check Now")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.accent
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    enabled: backend.cloudLoggedIn && !backend.updateChecking
+                                    onClicked: {
+                                        backend.checkForUpdatesNow()
+                                        if (backend.anyUpdateAvailable) {
+                                            root.showUpdateModal = true
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            visible: backend.updateStatusText.length > 0
+                            text: backend.updateStatusText
+                            font.pixelSize: theme.fontSize - 3
+                            color: backend.anyUpdateAvailable ? theme.accent : theme.darkForeground
+                            wrapMode: Text.WordWrap
+                        }
+                    }
+                }
+
+                // Collapsible Self-Hosted & Advanced Toggle
                 Rectangle {
                     id: advancedServerToggleBtn
                     objectName: "advancedServerToggleBtn"
@@ -10894,7 +11245,7 @@ ApplicationWindow {
                         anchors.rightMargin: 12
                         spacing: 8
                         Text {
-                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Advanced & Self-Hosted")
+                            text: (serverSyncSection.advancedServerExpanded ? "▾ " : "▸ ") + i18n.tr("Self-Hosted & Advanced (URL, Tailscale, History, Setup Guide)")
                             font.pixelSize: theme.fontSize - 2
                             font.bold: true
                             color: theme.brightForeground
@@ -11358,102 +11709,7 @@ ApplicationWindow {
                     }
                 }
 
-                // Optional iCloud Hub Feature Modules (Compact Single-Row Card)
-                Rectangle {
-                    id: icloudModulesSettingsCol
-                    objectName: "icloudModulesSettingsCol"
-                    Layout.fillWidth: true
-                    implicitHeight: icloudModulesRow.implicitHeight + 16
-                    radius: 8
-                    color: theme.lighterBackground
-                    border.width: 1
-                    border.color: theme.muted
-
-                    RowLayout {
-                        id: icloudModulesRow
-                        anchors.fill: parent
-                        anchors.margins: 8
-                        spacing: 8
-
-                        Text {
-                            text: i18n.tr("iCloud Hub")
-                            font.pixelSize: theme.fontSize - 2
-                            font.bold: true
-                            color: theme.brightForeground
-                        }
-
-                        Rectangle {
-                            id: toggleNotesModuleBtn
-                            objectName: "toggleNotesModuleBtn"
-                            Layout.fillWidth: true
-                            height: 30
-                            radius: 6
-                            color: backend.icloudNotesEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
-                            border.width: 1
-                            border.color: backend.icloudNotesEnabled ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.icloudNotesEnabled ? "✓ " : "○ ") + "📝 " + i18n.tr("Notes")
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: backend.icloudNotesEnabled
-                                color: backend.icloudNotesEnabled ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.icloudNotesEnabled = !backend.icloudNotesEnabled
-                            }
-                        }
-
-                        Rectangle {
-                            id: toggleCalendarModuleBtn
-                            objectName: "toggleCalendarModuleBtn"
-                            Layout.fillWidth: true
-                            height: 30
-                            radius: 6
-                            color: backend.icloudCalendarEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
-                            border.width: 1
-                            border.color: backend.icloudCalendarEnabled ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.icloudCalendarEnabled ? "✓ " : "○ ") + "📅 " + i18n.tr("Calendar")
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: backend.icloudCalendarEnabled
-                                color: backend.icloudCalendarEnabled ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.icloudCalendarEnabled = !backend.icloudCalendarEnabled
-                            }
-                        }
-
-                        Rectangle {
-                            id: togglePhotosModuleBtn
-                            objectName: "togglePhotosModuleBtn"
-                            Layout.fillWidth: true
-                            height: 30
-                            radius: 6
-                            color: backend.icloudPhotosEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.background
-                            border.width: 1
-                            border.color: backend.icloudPhotosEnabled ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.icloudPhotosEnabled ? "✓ " : "○ ") + "☁️ " + i18n.tr("Photos")
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: backend.icloudPhotosEnabled
-                                color: backend.icloudPhotosEnabled ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.icloudPhotosEnabled = !backend.icloudPhotosEnabled
-                            }
-                        }
-                    }
-                }
-
-                // Message history retention and relay tools (under Advanced Options)
+                // Message history retention and relay tools (under Self-Hosted & Advanced)
                 ColumnLayout {
                     id: historySettingsCol
                     objectName: "historySettingsCol"
@@ -11523,7 +11779,6 @@ ApplicationWindow {
                             return presets.indexOf(cur) >= 0 || cur <= 0 ? presets
                                  : presets.concat([cur]).sort(function(a, b) { return a - b })
                         }
-                        // Presets, plus the current value if it was set to something else
                         model: dayChoices.map(function(d) {
                             return { days: d, label: d === 365 ? i18n.tr("1 year") : i18n.tr("%1 days").arg(d) }
                         })
@@ -11590,133 +11845,16 @@ ApplicationWindow {
                         }
                     }
                 }
-
-                // Updates (Compact Single-Card Controls)
-                Rectangle {
-                    id: cloudUpdatesSettingsBox
-                    objectName: "cloudUpdatesSettingsBox"
-                    Layout.fillWidth: true
-                    implicitHeight: cloudUpdatesCol.implicitHeight + 16
-                    radius: 8
-                    color: theme.lighterBackground
-                    border.width: 1
-                    border.color: backend.cloudLoggedIn ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45) : theme.muted
-
-                    ColumnLayout {
-                        id: cloudUpdatesCol
-                        anchors.fill: parent
-                        anchors.margins: 8
-                        spacing: 6
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Text {
-                                Layout.fillWidth: true
-                                text: "🔄 " + i18n.tr("Updates")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: true
-                                color: theme.brightForeground
-                            }
-                            Text {
-                                text: backend.cloudLoggedIn ? i18n.tr("Cloud Active") : i18n.tr("Cloud Login Only")
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: true
-                                color: backend.cloudLoggedIn ? theme.green : theme.darkForeground
-                            }
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 8
-                            Rectangle {
-                                id: toggleAutoUpdateCheckBtn
-                                objectName: "toggleAutoUpdateCheckBtn"
-                                Layout.fillWidth: true
-                                height: 30
-                                radius: 6
-                                enabled: backend.cloudLoggedIn
-                                opacity: backend.cloudLoggedIn ? 1.0 : 0.5
-                                color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled)
-                                       ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22)
-                                       : theme.background
-                                border.width: 1
-                                border.color: (backend.cloudLoggedIn && backend.autoUpdateCheckEnabled) ? theme.accent : theme.muted
-                                Text {
-                                    anchors.centerIn: parent
-                                    text: (backend.autoUpdateCheckEnabled ? "✓ " : "○ ") + i18n.tr("Auto-Check Updates")
-                                    font.pixelSize: theme.fontSize - 3
-                                    font.bold: backend.autoUpdateCheckEnabled
-                                    color: backend.autoUpdateCheckEnabled ? theme.brightForeground : theme.darkForeground
-                                }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    enabled: backend.cloudLoggedIn
-                                    onClicked: backend.autoUpdateCheckEnabled = !backend.autoUpdateCheckEnabled
-                                }
-                            }
-                            Rectangle {
-                                id: checkUpdatesNowBtn
-                                objectName: "checkUpdatesNowBtn"
-                                height: 30
-                                implicitWidth: checkUpdLbl.implicitWidth + 20
-                                radius: 6
-                                enabled: backend.cloudLoggedIn && !backend.updateChecking
-                                opacity: backend.cloudLoggedIn ? 1.0 : 0.5
-                                color: theme.background
-                                border.width: 1
-                                border.color: theme.accent
-                                Text {
-                                    id: checkUpdLbl
-                                    anchors.centerIn: parent
-                                    text: backend.updateChecking ? i18n.tr("Checking…") : i18n.tr("Check Now")
-                                    font.pixelSize: theme.fontSize - 3
-                                    font.bold: true
-                                    color: theme.accent
-                                }
-                                MouseArea {
-                                    anchors.fill: parent
-                                    cursorShape: Qt.PointingHandCursor
-                                    enabled: backend.cloudLoggedIn && !backend.updateChecking
-                                    onClicked: {
-                                        backend.checkForUpdatesNow()
-                                        if (backend.anyUpdateAvailable) {
-                                            root.showUpdateModal = true
-                                        }
-                                    }
-                                }
-                            }
-                        }
-
-                        Text {
-                            Layout.fillWidth: true
-                            visible: backend.updateStatusText.length > 0
-                            text: backend.updateStatusText
-                            font.pixelSize: theme.fontSize - 3
-                            color: backend.anyUpdateAvailable ? theme.accent : theme.darkForeground
-                            wrapMode: Text.WordWrap
-                        }
-                    }
-                }
                 } // end serverSyncSection
 
                 // UI & Appearance Settings Section
                 ColumnLayout {
                     id: uiAppearanceSection
                     objectName: "uiAppearanceSection"
+                    property bool interfaceLayoutExpanded: false
                     visible: root.settingsActiveTab === "appearance"
                     Layout.fillWidth: true
-                    spacing: 8
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: "🎨 " + i18n.tr("UI & Appearance")
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.foreground
-                        elide: Text.ElideRight
-                    }
+                    spacing: 10
 
                     // Appearance Theme Mode Selector (System / Dark / Light)
                     ColumnLayout {
@@ -11730,8 +11868,9 @@ ApplicationWindow {
                             spacing: 8
                             Text {
                                 Layout.fillWidth: true
-                                text: i18n.tr("Appearance")
+                                text: "🎨 " + i18n.tr("Theme")
                                 font.pixelSize: theme.fontSize - 2
+                                font.bold: true
                                 color: theme.foreground
                             }
                             Text {
@@ -11789,7 +11928,47 @@ ApplicationWindow {
                         }
                     }
 
+                    // Collapsible Interface & Layout Dropdown
+                    Rectangle {
+                        id: interfaceLayoutToggleBtn
+                        objectName: "interfaceLayoutToggleBtn"
+                        Layout.fillWidth: true
+                        height: 36
+                        radius: 8
+                        color: interfaceLayoutToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
+                        border.width: 1
+                        border.color: uiAppearanceSection.interfaceLayoutExpanded ? theme.accent : theme.muted
+
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 8
+                            Text {
+                                text: (uiAppearanceSection.interfaceLayoutExpanded ? "▾ " : "▸ ") + i18n.tr("Interface & Layout")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.brightForeground
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                            }
+                            Text {
+                                text: i18n.tr("Status Pill, Pinned Row")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.darkForeground
+                            }
+                        }
+                        MouseArea {
+                            id: interfaceLayoutToggleMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: uiAppearanceSection.interfaceLayoutExpanded = !uiAppearanceSection.interfaceLayoutExpanded
+                        }
+                    }
+
                     GridLayout {
+                        visible: uiAppearanceSection.interfaceLayoutExpanded
                         Layout.fillWidth: true
                         columns: 2
                         rowSpacing: 6
@@ -11850,34 +12029,6 @@ ApplicationWindow {
                                 onClicked: backend.showPinnedRow = !backend.showPinnedRow
                             }
                         }
-
-                        Rectangle {
-                            id: toggleHoverMessageActionsBtn
-                            objectName: "toggleHoverMessageActionsBtn"
-                            Layout.fillWidth: true
-                            height: 34
-                            radius: 6
-                            color: backend.hoverMessageActions ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.hoverMessageActions ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.hoverMessageActions ? "✓ 💬 " : "○ 💬 ") + i18n.tr("Tapback Actions on Hover")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.hoverMessageActions
-                                color: backend.hoverMessageActions ? theme.brightForeground : theme.darkForeground
-                            }
-                            ToolTip.visible: hoverActionsToggleMouse.containsMouse
-                            ToolTip.text: i18n.tr("Show Tapback & message actions on hover (in addition to right-click)")
-                            ToolTip.delay: 300
-                            MouseArea {
-                                id: hoverActionsToggleMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.hoverMessageActions = !backend.hoverMessageActions
-                            }
-                        }
                     }
                 }
 
@@ -11885,82 +12036,21 @@ ApplicationWindow {
                 ColumnLayout {
                     id: notificationsSettingsCol
                     objectName: "notificationsSettingsCol"
+                    property bool advancedAlertsExpanded: false
                     visible: root.settingsActiveTab === "notifications"
                     Layout.fillWidth: true
-                    spacing: 8
+                    spacing: 10
 
                     RowLayout {
                         Layout.fillWidth: true
                         spacing: 8
-                        Text {
-                            Layout.fillWidth: true
-                            text: "🔔 " + i18n.tr("Notifications & Audio Alerts")
-                            font.pixelSize: theme.fontSize - 2
-                            font.bold: true
-                            color: theme.foreground
-                            elide: Text.ElideRight
-                        }
-                        Rectangle {
-                            id: previewSoundBtn
-                            objectName: "previewSoundBtn"
-                            height: 26
-                            radius: 6
-                            implicitWidth: previewSoundLbl.implicitWidth + 16
-                            color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
-                            border.width: 1
-                            border.color: theme.accent
-                            Text {
-                                id: previewSoundLbl
-                                anchors.centerIn: parent
-                                text: "🔊 " + i18n.tr("Preview Ding")
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: true
-                                color: theme.accent
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.previewNotificationSound(backend.notificationSoundPreset)
-                            }
-                        }
-                        Rectangle {
-                            id: testNotificationBtn
-                            objectName: "testNotificationBtn"
-                            height: 26
-                            radius: 6
-                            implicitWidth: testNotifLbl.implicitWidth + 16
-                            color: theme.lighterBackground
-                            border.width: 1
-                            border.color: theme.muted
-                            Text {
-                                id: testNotifLbl
-                                anchors.centerIn: parent
-                                text: "🔔 " + i18n.tr("Test Alert")
-                                font.pixelSize: theme.fontSize - 3
-                                font.bold: true
-                                color: theme.foreground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.sendTestNotification()
-                            }
-                        }
-                    }
-
-                    // Notification Behavior Toggles (2x2 Grid)
-                    GridLayout {
-                        Layout.fillWidth: true
-                        columns: 2
-                        rowSpacing: 6
-                        columnSpacing: 8
 
                         Rectangle {
                             id: toggleMasterNotificationsBtn
                             objectName: "toggleMasterNotificationsBtn"
                             Layout.fillWidth: true
-                            height: 32
-                            radius: 6
+                            height: 36
+                            radius: 8
                             color: backend.notificationsEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
                             border.width: 1
                             border.color: backend.notificationsEnabled ? theme.accent : theme.muted
@@ -11978,228 +12068,361 @@ ApplicationWindow {
                             }
                         }
 
-                        Rectangle {
-                            id: toggleBannerNotificationsBtn
-                            objectName: "toggleBannerNotificationsBtn"
+                        ThemedComboBox {
+                            id: notificationSoundPresetCombo
+                            objectName: "notificationSoundPresetCombo"
                             Layout.fillWidth: true
-                            height: 32
-                            radius: 6
-                            color: backend.notificationBannerEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.notificationBannerEnabled ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.notificationBannerEnabled ? "✓ 💬 " : "○ 💬 ") + i18n.tr("Desktop Banner")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.notificationBannerEnabled
-                                color: backend.notificationBannerEnabled ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.notificationBannerEnabled = !backend.notificationBannerEnabled
-                            }
-                        }
-
-                        Rectangle {
-                            id: toggleAudioDingBtn
-                            objectName: "toggleAudioDingBtn"
-                            Layout.fillWidth: true
-                            height: 32
-                            radius: 6
-                            color: backend.notificationSoundEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.notificationSoundEnabled ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.notificationSoundEnabled ? "✓ 🔊 " : "○ 🔇 ") + i18n.tr("Audio Ding")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.notificationSoundEnabled
-                                color: backend.notificationSoundEnabled ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.notificationSoundEnabled = !backend.notificationSoundEnabled
-                            }
-                        }
-
-                        Rectangle {
-                            id: toggleMuteActiveChatBtn
-                            objectName: "toggleMuteActiveChatBtn"
-                            Layout.fillWidth: true
-                            height: 32
-                            radius: 6
-                            color: backend.notificationMuteWhenActive ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.notificationMuteWhenActive ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.notificationMuteWhenActive ? "✓ 👀 " : "○ 👀 ") + i18n.tr("Mute Focused Chat")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.notificationMuteWhenActive
-                                color: backend.notificationMuteWhenActive ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.notificationMuteWhenActive = !backend.notificationMuteWhenActive
-                            }
-                        }
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: i18n.tr("Audio Ding Sound Preset (click any preset to select & preview):")
-                        font.pixelSize: theme.fontSize - 3
-                        color: theme.darkForeground
-                        elide: Text.ElideRight
-                    }
-
-                    // Audio Ding Presets (3x2 Grid with instant preview)
-                    GridLayout {
-                        id: soundPresetGrid
-                        objectName: "soundPresetGrid"
-                        Layout.fillWidth: true
-                        columns: 3
-                        rowSpacing: 6
-                        columnSpacing: 8
-
-                        Repeater {
+                            Accessible.name: i18n.tr("Alert Sound Preset")
                             model: backend.notificationSoundPresets
-                            delegate: Rectangle {
-                                required property var modelData
-                                objectName: "soundPresetBtn_" + modelData.id
-                                Layout.fillWidth: true
-                                height: 34
-                                radius: 6
-                                readonly property bool isSelected: backend.notificationSoundPreset === modelData.id
-                                color: isSelected ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.24) : theme.lighterBackground
-                                border.width: 1
-                                border.color: isSelected ? theme.accent : theme.muted
-
-                                RowLayout {
-                                    anchors.centerIn: parent
-                                    spacing: 4
-                                    Text {
-                                        text: isSelected ? "🔊" : "♪"
-                                        font.pixelSize: theme.fontSize - 2
-                                        color: isSelected ? theme.accent : theme.darkForeground
-                                    }
-                                    Text {
-                                        text: modelData.label
-                                        font.pixelSize: theme.fontSize - 3
-                                        font.bold: isSelected
-                                        color: isSelected ? theme.brightForeground : theme.foreground
-                                        elide: Text.ElideRight
+                            textRole: "label"
+                            valueRole: "id"
+                            currentIndex: {
+                                var list = backend.notificationSoundPresets || []
+                                for (var i = 0; i < list.length; ++i) {
+                                    if (list[i] && list[i].id === backend.notificationSoundPreset) return i
+                                }
+                                return 0
+                            }
+                            Connections {
+                                target: backend
+                                function onNotificationsChanged() {
+                                    var list = backend.notificationSoundPresets || []
+                                    for (var i = 0; i < list.length; ++i) {
+                                        if (list[i] && list[i].id === backend.notificationSoundPreset) {
+                                            notificationSoundPresetCombo.currentIndex = i
+                                            break
+                                        }
                                     }
                                 }
+                            }
+                            onActivated: function(index) {
+                                var list = backend.notificationSoundPresets || []
+                                if (index >= 0 && index < list.length && list[index]) {
+                                    backend.notificationSoundPreset = list[index].id
+                                    backend.previewNotificationSound(list[index].id)
+                                }
+                            }
+                        }
+                    }
 
-                                ToolTip.visible: presetMouse.containsMouse
-                                ToolTip.text: i18n.tr(modelData.desc) + " — " + i18n.tr("Click to select & preview")
-                                ToolTip.delay: 300
+                    // Collapsible Audio Devices & Advanced Alerts Dropdown
+                    Rectangle {
+                        id: advancedAlertsToggleBtn
+                        objectName: "advancedAlertsToggleBtn"
+                        Layout.fillWidth: true
+                        height: 36
+                        radius: 8
+                        color: advancedAlertsToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
+                        border.width: 1
+                        border.color: notificationsSettingsCol.advancedAlertsExpanded ? theme.accent : theme.muted
 
+                        RowLayout {
+                            anchors.fill: parent
+                            anchors.leftMargin: 12
+                            anchors.rightMargin: 12
+                            spacing: 8
+                            Text {
+                                text: (notificationsSettingsCol.advancedAlertsExpanded ? "▾ " : "▸ ") + i18n.tr("Audio Devices & Advanced Alerts")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.brightForeground
+                                Layout.fillWidth: true
+                                elide: Text.ElideRight
+                            }
+                        }
+                        MouseArea {
+                            id: advancedAlertsToggleMouse
+                            anchors.fill: parent
+                            hoverEnabled: true
+                            cursorShape: Qt.PointingHandCursor
+                            onClicked: notificationsSettingsCol.advancedAlertsExpanded = !notificationsSettingsCol.advancedAlertsExpanded
+                        }
+                    }
+
+                    ColumnLayout {
+                        visible: notificationsSettingsCol.advancedAlertsExpanded
+                        Layout.fillWidth: true
+                        spacing: 8
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+                            Text {
+                                Layout.fillWidth: true
+                                text: "🔔 " + i18n.tr("Alert Testing & Behavior")
+                                font.pixelSize: theme.fontSize - 2
+                                font.bold: true
+                                color: theme.foreground
+                                elide: Text.ElideRight
+                            }
+                            Rectangle {
+                                id: previewSoundBtn
+                                objectName: "previewSoundBtn"
+                                height: 26
+                                radius: 6
+                                implicitWidth: previewSoundLbl.implicitWidth + 16
+                                color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
+                                border.width: 1
+                                border.color: theme.accent
+                                Text {
+                                    id: previewSoundLbl
+                                    anchors.centerIn: parent
+                                    text: "🔊 " + i18n.tr("Preview Ding")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.accent
+                                }
                                 MouseArea {
-                                    id: presetMouse
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.previewNotificationSound(backend.notificationSoundPreset)
+                                }
+                            }
+                            Rectangle {
+                                id: testNotificationBtn
+                                objectName: "testNotificationBtn"
+                                height: 26
+                                radius: 6
+                                implicitWidth: testNotifLbl.implicitWidth + 16
+                                color: theme.lighterBackground
+                                border.width: 1
+                                border.color: theme.muted
+                                Text {
+                                    id: testNotifLbl
+                                    anchors.centerIn: parent
+                                    text: "🔔 " + i18n.tr("Test Alert")
+                                    font.pixelSize: theme.fontSize - 3
+                                    font.bold: true
+                                    color: theme.foreground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.sendTestNotification()
+                                }
+                            }
+                        }
+
+                        // Secondary Notification Behavior Toggles
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Rectangle {
+                                id: toggleBannerNotificationsBtn
+                                objectName: "toggleBannerNotificationsBtn"
+                                Layout.fillWidth: true
+                                height: 32
+                                radius: 6
+                                color: backend.notificationBannerEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                                border.width: 1
+                                border.color: backend.notificationBannerEnabled ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (backend.notificationBannerEnabled ? "✓ 💬 " : "○ 💬 ") + i18n.tr("Desktop Banner")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: backend.notificationBannerEnabled
+                                    color: backend.notificationBannerEnabled ? theme.brightForeground : theme.darkForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.notificationBannerEnabled = !backend.notificationBannerEnabled
+                                }
+                            }
+
+                            Rectangle {
+                                id: toggleAudioDingBtn
+                                objectName: "toggleAudioDingBtn"
+                                Layout.fillWidth: true
+                                height: 32
+                                radius: 6
+                                color: backend.notificationSoundEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                                border.width: 1
+                                border.color: backend.notificationSoundEnabled ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (backend.notificationSoundEnabled ? "✓ 🔊 " : "○ 🔇 ") + i18n.tr("Audio Ding")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: backend.notificationSoundEnabled
+                                    color: backend.notificationSoundEnabled ? theme.brightForeground : theme.darkForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.notificationSoundEnabled = !backend.notificationSoundEnabled
+                                }
+                            }
+
+                            Rectangle {
+                                id: toggleMuteActiveChatBtn
+                                objectName: "toggleMuteActiveChatBtn"
+                                Layout.fillWidth: true
+                                height: 32
+                                radius: 6
+                                color: backend.notificationMuteWhenActive ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
+                                border.width: 1
+                                border.color: backend.notificationMuteWhenActive ? theme.accent : theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: (backend.notificationMuteWhenActive ? "✓ 👀 " : "○ 👀 ") + i18n.tr("Mute Focused")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: backend.notificationMuteWhenActive
+                                    color: backend.notificationMuteWhenActive ? theme.brightForeground : theme.darkForeground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: backend.notificationMuteWhenActive = !backend.notificationMuteWhenActive
+                                }
+                            }
+                        }
+
+                        // Audio Ding Presets (3x2 Grid with instant preview)
+                        GridLayout {
+                            id: soundPresetGrid
+                            objectName: "soundPresetGrid"
+                            Layout.fillWidth: true
+                            columns: 3
+                            rowSpacing: 6
+                            columnSpacing: 8
+
+                            Repeater {
+                                model: backend.notificationSoundPresets
+                                delegate: Rectangle {
+                                    required property var modelData
+                                    objectName: "soundPresetBtn_" + modelData.id
+                                    Layout.fillWidth: true
+                                    height: 34
+                                    radius: 6
+                                    readonly property bool isSelected: backend.notificationSoundPreset === modelData.id
+                                    color: isSelected ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.24) : theme.lighterBackground
+                                    border.width: 1
+                                    border.color: isSelected ? theme.accent : theme.muted
+
+                                    RowLayout {
+                                        anchors.centerIn: parent
+                                        spacing: 4
+                                        Text {
+                                            text: isSelected ? "🔊" : "♪"
+                                            font.pixelSize: theme.fontSize - 2
+                                            color: isSelected ? theme.accent : theme.darkForeground
+                                        }
+                                        Text {
+                                            text: modelData.label
+                                            font.pixelSize: theme.fontSize - 3
+                                            font.bold: isSelected
+                                            color: isSelected ? theme.brightForeground : theme.foreground
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    ToolTip.visible: presetMouse.containsMouse
+                                    ToolTip.text: i18n.tr(modelData.desc) + " — " + i18n.tr("Click to select & preview")
+                                    ToolTip.delay: 300
+
+                                    MouseArea {
+                                        id: presetMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: {
+                                            backend.notificationSoundPreset = modelData.id
+                                            backend.previewNotificationSound(modelData.id)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        Text {
+                            text: i18n.tr("Audio Devices (Voice Memos & Alerts)")
+                            font.pixelSize: theme.fontSize - 2
+                            font.bold: true
+                            color: theme.darkForeground
+                            Layout.topMargin: 4
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 3
+                                Text {
+                                    text: i18n.tr("Microphone Input")
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                }
+                                ThemedComboBox {
+                                    id: audioInputDeviceCombo
+                                    objectName: "audioInputDeviceCombo"
+                                    Layout.fillWidth: true
+                                    model: backend.audioInputDevices
+                                    textRole: "label"
+                                    valueRole: "id"
+                                    currentIndex: root.findAudioDeviceIndex(backend.audioInputDevices, backend.selectedAudioInputDevice)
+                                    onActivated: {
+                                        if (currentIndex >= 0 && currentIndex < backend.audioInputDevices.length) {
+                                            backend.selectedAudioInputDevice = backend.audioInputDevices[currentIndex].id || ""
+                                        }
+                                    }
+                                }
+                            }
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 3
+                                Text {
+                                    text: i18n.tr("Speaker / Output")
+                                    font.pixelSize: theme.fontSize - 3
+                                    color: theme.darkForeground
+                                }
+                                ThemedComboBox {
+                                    id: audioOutputDeviceCombo
+                                    objectName: "audioOutputDeviceCombo"
+                                    Layout.fillWidth: true
+                                    model: backend.audioOutputDevices
+                                    textRole: "label"
+                                    valueRole: "id"
+                                    currentIndex: root.findAudioDeviceIndex(backend.audioOutputDevices, backend.selectedAudioOutputDevice)
+                                    onActivated: {
+                                        if (currentIndex >= 0 && currentIndex < backend.audioOutputDevices.length) {
+                                            backend.selectedAudioOutputDevice = backend.audioOutputDevices[currentIndex].id || ""
+                                        }
+                                    }
+                                }
+                            }
+
+                            Rectangle {
+                                objectName: "refreshAudioDevicesBtn"
+                                Layout.preferredWidth: 34
+                                Layout.preferredHeight: 34
+                                Layout.alignment: Qt.AlignBottom
+                                radius: 6
+                                color: refreshAudioMouse.containsMouse ? theme.selection : theme.lighterBackground
+                                border.width: 1
+                                border.color: theme.muted
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "↻"
+                                    font.pixelSize: theme.fontSize + 1
+                                    color: theme.brightForeground
+                                }
+                                ToolTip.visible: refreshAudioMouse.containsMouse
+                                ToolTip.text: i18n.tr("Refresh Audio Devices")
+                                ToolTip.delay: 300
+                                MouseArea {
+                                    id: refreshAudioMouse
                                     anchors.fill: parent
                                     hoverEnabled: true
                                     cursorShape: Qt.PointingHandCursor
                                     onClicked: {
-                                        backend.notificationSoundPreset = modelData.id
-                                        backend.previewNotificationSound(modelData.id)
+                                        backend.refreshAudioDevices()
+                                        root.reconcileAudioDeviceSelections()
+                                        root.showToast("↻ " + i18n.tr("Audio devices refreshed"))
                                     }
-                                }
-                            }
-                        }
-                    }
-
-                    Text {
-                        text: i18n.tr("Audio Devices (Voice Memos & Alerts)")
-                        font.pixelSize: theme.fontSize - 2
-                        font.bold: true
-                        color: theme.darkForeground
-                        Layout.topMargin: 4
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        spacing: 8
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 3
-                            Text {
-                                text: i18n.tr("Microphone Input")
-                                font.pixelSize: theme.fontSize - 3
-                                color: theme.darkForeground
-                            }
-                            ThemedComboBox {
-                                id: audioInputDeviceCombo
-                                objectName: "audioInputDeviceCombo"
-                                Layout.fillWidth: true
-                                model: backend.audioInputDevices
-                                textRole: "label"
-                                valueRole: "id"
-                                currentIndex: root.findAudioDeviceIndex(backend.audioInputDevices, backend.selectedAudioInputDevice)
-                                onActivated: {
-                                    if (currentIndex >= 0 && currentIndex < backend.audioInputDevices.length) {
-                                        backend.selectedAudioInputDevice = backend.audioInputDevices[currentIndex].id || ""
-                                    }
-                                }
-                            }
-                        }
-
-                        ColumnLayout {
-                            Layout.fillWidth: true
-                            spacing: 3
-                            Text {
-                                text: i18n.tr("Speaker / Output")
-                                font.pixelSize: theme.fontSize - 3
-                                color: theme.darkForeground
-                            }
-                            ThemedComboBox {
-                                id: audioOutputDeviceCombo
-                                objectName: "audioOutputDeviceCombo"
-                                Layout.fillWidth: true
-                                model: backend.audioOutputDevices
-                                textRole: "label"
-                                valueRole: "id"
-                                currentIndex: root.findAudioDeviceIndex(backend.audioOutputDevices, backend.selectedAudioOutputDevice)
-                                onActivated: {
-                                    if (currentIndex >= 0 && currentIndex < backend.audioOutputDevices.length) {
-                                        backend.selectedAudioOutputDevice = backend.audioOutputDevices[currentIndex].id || ""
-                                    }
-                                }
-                            }
-                        }
-
-                        Rectangle {
-                            objectName: "refreshAudioDevicesBtn"
-                            Layout.preferredWidth: 34
-                            Layout.preferredHeight: 34
-                            Layout.alignment: Qt.AlignBottom
-                            radius: 6
-                            color: refreshAudioMouse.containsMouse ? theme.selection : theme.lighterBackground
-                            border.width: 1
-                            border.color: theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: "↻"
-                                font.pixelSize: theme.fontSize + 1
-                                color: theme.brightForeground
-                            }
-                            ToolTip.visible: refreshAudioMouse.containsMouse
-                            ToolTip.text: i18n.tr("Refresh Audio Devices")
-                            ToolTip.delay: 300
-                            MouseArea {
-                                id: refreshAudioMouse
-                                anchors.fill: parent
-                                hoverEnabled: true
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    backend.refreshAudioDevices()
-                                    root.reconcileAudioDeviceSelections()
-                                    root.showToast("↻ " + i18n.tr("Audio devices refreshed"))
                                 }
                             }
                         }
@@ -14222,7 +14445,7 @@ ApplicationWindow {
                             }
                             root.pendingSendEffectId = "";
                             root.pendingSendEffectName = "";
-                            backend.sendMessageWithEffect(txt, modelData.id);
+                            backend.sendMessageWithEffect(txt, modelData.id, root.replyTargetGuid);
                             root.triggerExpressiveEffect(modelData.name);
                             composerInput.text = "";
                             root.showEmojiPicker = false;
@@ -14242,560 +14465,686 @@ ApplicationWindow {
     Rectangle {
         id: firstRunOnboardingModal
         objectName: "firstRunOnboardingModal"
-        visible: root.forceShowOnboarding || (!backend.onboardingCompleted && backend.needsSetup && !root.showServerConfigModal)
+        visible: !root.showServerConfigModal && (root.forceShowOnboarding || (!backend.onboardingCompleted && backend.needsSetup))
         anchors.fill: parent
         color: "#b80e0e14"
         z: 1005
+
+        function focusActiveOnboardingControl() {
+            if (!firstRunOnboardingModal.visible) return
+            if (root.onboardingStep === 0) {
+                onboardingGetStartedBtn.forceActiveFocus()
+            } else if (root.onboardingStep === 1) {
+                onboardingGoogleBtn.forceActiveFocus()
+            } else {
+                onboardingStartMessagingBtn.forceActiveFocus()
+            }
+        }
+
+        onVisibleChanged: {
+            if (visible) {
+                if (root.activeFocusItem) {
+                    root.previousFocusBeforeOnboarding = root.activeFocusItem
+                }
+                onboardingFocusScope.forceActiveFocus()
+                Qt.callLater(firstRunOnboardingModal.focusActiveOnboardingControl)
+            } else if (root.previousFocusBeforeOnboarding) {
+                var prev = root.previousFocusBeforeOnboarding
+                root.previousFocusBeforeOnboarding = null
+                Qt.callLater(function() {
+                    if (prev && prev.visible && !root.showServerConfigModal) {
+                        prev.forceActiveFocus()
+                    }
+                })
+            }
+        }
+
+        Connections {
+            target: root
+            function onOnboardingStepChanged() {
+                if (firstRunOnboardingModal.visible) {
+                    Qt.callLater(firstRunOnboardingModal.focusActiveOnboardingControl)
+                }
+            }
+        }
 
         MouseArea {
             anchors.fill: parent
             onClicked: {} // keep user inside guided modal until Skip or Start Messaging
         }
 
-        Rectangle {
-            id: firstRunOnboardingCard
-            objectName: "firstRunOnboardingCard"
-            anchors.centerIn: parent
-            width: Math.min(540, root.width - 36)
-            height: Math.min(root.height - 36, onboardingCol.implicitHeight + 44)
-            radius: 14
-            clip: true
-            color: theme.darkBackground
-            border.width: 1
-            border.color: theme.accent
-
-            ColumnLayout {
-                id: onboardingCol
-                anchors.fill: parent
-                anchors.margins: 22
-                spacing: 14
-
-                // Step Indicator Dots
-                RowLayout {
-                    Layout.fillWidth: true
-                    spacing: 6
-                    Text {
-                        text: "💊 BluePill"
-                        font.pixelSize: theme.fontSize
-                        font.bold: true
-                        color: theme.accent
-                    }
-                    Item { Layout.fillWidth: true }
-                    Repeater {
-                        model: 3
-                        delegate: Rectangle {
-                            required property int index
-                            width: root.onboardingStep === index ? 20 : 8
-                            height: 8
-                            radius: 4
-                            color: root.onboardingStep === index ? theme.accent : theme.muted
-                        }
-                    }
+        FocusScope {
+            id: onboardingFocusScope
+            anchors.fill: parent
+            focus: firstRunOnboardingModal.visible
+            Keys.onPressed: function(event) {
+                // Keep unhandled key events trapped within the visible onboarding guide
+                if (event.key !== Qt.Key_Escape) {
+                    event.accepted = true
                 }
+            }
 
-                // Step 0: Welcome
+            Rectangle {
+                id: firstRunOnboardingCard
+                objectName: "firstRunOnboardingCard"
+                anchors.centerIn: parent
+                width: Math.min(540, root.width - 36)
+                height: Math.min(root.height - 36, onboardingCol.implicitHeight + 44)
+                radius: 14
+                clip: true
+                color: theme.darkBackground
+                border.width: 1
+                border.color: theme.accent
+
                 ColumnLayout {
-                    visible: root.onboardingStep === 0
-                    Layout.fillWidth: true
+                    id: onboardingCol
+                    anchors.fill: parent
+                    anchors.margins: 22
                     spacing: 14
 
-                    Rectangle {
-                        Layout.alignment: Qt.AlignHCenter
-                        width: 64
-                        height: 64
-                        radius: 32
-                        color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.16)
-                        border.width: 1
-                        border.color: theme.accent
+                    // Step Indicator Dots
+                    RowLayout {
+                        Layout.fillWidth: true
+                        spacing: 6
                         Text {
-                            anchors.centerIn: parent
-                            text: "💬"
-                            font.pixelSize: 30
+                            text: "💊 BluePill"
+                            font.pixelSize: theme.fontSize
+                            font.bold: true
+                            color: theme.accent
+                        }
+                        Item { Layout.fillWidth: true }
+                        Repeater {
+                            model: 3
+                            delegate: Rectangle {
+                                required property int index
+                                width: root.onboardingStep === index ? 20 : 8
+                                height: 8
+                                radius: 4
+                                color: root.onboardingStep === index ? theme.accent : theme.muted
+                            }
                         }
                     }
 
-                    Text {
+                    // Step 0: Welcome
+                    ColumnLayout {
+                        visible: root.onboardingStep === 0
                         Layout.fillWidth: true
-                        horizontalAlignment: Text.AlignHCenter
-                        text: i18n.tr("Welcome to BluePill")
-                        font.pixelSize: theme.fontSize + 6
-                        font.bold: true
-                        color: theme.brightForeground
-                    }
-
-                    Text {
-                        Layout.fillWidth: true
-                        horizontalAlignment: Text.AlignHCenter
-                        text: i18n.tr("Connect BluePill to a Mac running the BluePill Relay or sign in with BluePill Cloud")
-                        font.pixelSize: theme.fontSize
-                        color: theme.foreground
-                        wrapMode: Text.WordWrap
-                    }
-
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Layout.topMargin: 6
-                        spacing: 10
+                        spacing: 14
 
                         Rectangle {
-                            objectName: "onboardingSkipBtn"
-                            height: 36
-                            implicitWidth: skipLbl.implicitWidth + 24
-                            radius: 8
-                            color: theme.lighterBackground
+                            Layout.alignment: Qt.AlignHCenter
+                            width: 64
+                            height: 64
+                            radius: 32
+                            color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.16)
                             border.width: 1
-                            border.color: theme.muted
+                            border.color: theme.accent
                             Text {
-                                id: skipLbl
                                 anchors.centerIn: parent
-                                text: i18n.tr("Skip")
-                                font.pixelSize: theme.fontSize - 1
-                                color: theme.foreground
+                                text: "💬"
+                                font.pixelSize: 30
                             }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: i18n.tr("Welcome to BluePill")
+                            font.pixelSize: theme.fontSize + 6
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: i18n.tr("Connect BluePill to a Mac running the BluePill Relay or sign in with BluePill Cloud")
+                            font.pixelSize: theme.fontSize
+                            color: theme.foreground
+                            wrapMode: Text.WordWrap
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 6
+                            spacing: 10
+
+                            Rectangle {
+                                id: onboardingSkipBtn
+                                objectName: "onboardingSkipBtn"
+                                height: 36
+                                implicitWidth: skipLbl.implicitWidth + 24
+                                radius: 8
+                                color: theme.lighterBackground
+                                border.width: activeFocus ? 2 : 1
+                                border.color: activeFocus ? theme.accent : theme.muted
+                                activeFocusOnTab: true
+                                function triggerAction() {
                                     root.forceShowOnboarding = false
                                     backend.completeOnboarding()
                                 }
-                            }
-                        }
-
-                        Item { Layout.fillWidth: true }
-
-                        Rectangle {
-                            objectName: "onboardingGetStartedBtn"
-                            height: 36
-                            implicitWidth: getStartedLbl.implicitWidth + 28
-                            radius: 8
-                            color: theme.accent
-                            Text {
-                                id: getStartedLbl
-                                anchors.centerIn: parent
-                                text: i18n.tr("Get Started →")
-                                font.pixelSize: theme.fontSize - 1
-                                font.bold: true
-                                color: theme.onAccent
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
-                                    root.onboardingStep = 1
-                                    backend.discoverTailscaleRelays()
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Step 1: Connect Your Relay (3 crisp option cards)
-                ColumnLayout {
-                    visible: root.onboardingStep === 1
-                    Layout.fillWidth: true
-                    spacing: 10
-
-                    Text {
-                        Layout.fillWidth: true
-                        text: i18n.tr("Connect Your Relay")
-                        font.pixelSize: theme.fontSize + 3
-                        font.bold: true
-                        color: theme.brightForeground
-                    }
-
-                    // Card (a): BluePill Cloud
-                    Rectangle {
-                        Layout.fillWidth: true
-                        implicitHeight: obCloudCol.implicitHeight + 18
-                        radius: 10
-                        color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
-                        border.width: 1
-                        border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45)
-
-                        ColumnLayout {
-                            id: obCloudCol
-                            anchors.fill: parent
-                            anchors.margins: 9
-                            spacing: 6
-
-                            Text {
-                                text: "☁️ " + i18n.tr("BluePill Cloud")
-                                font.pixelSize: theme.fontSize
-                                font.bold: true
-                                color: theme.brightForeground
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 30
-                                    radius: 6
-                                    color: theme.lighterBackground
-                                    border.width: 1
-                                    border.color: theme.muted
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: "G  " + i18n.tr("Google")
-                                        font.pixelSize: theme.fontSize - 2
-                                        font.bold: true
-                                        color: theme.brightForeground
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.forceShowOnboarding = true
-                                            backend.startCloudSignIn("google")
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 30
-                                    radius: 6
-                                    color: theme.lighterBackground
-                                    border.width: 1
-                                    border.color: theme.muted
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: "🐙  " + i18n.tr("GitHub")
-                                        font.pixelSize: theme.fontSize - 2
-                                        font.bold: true
-                                        color: theme.brightForeground
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.forceShowOnboarding = true
-                                            backend.startCloudSignIn("github")
-                                        }
-                                    }
-                                }
-
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 30
-                                    radius: 6
-                                    color: theme.accent
-                                    Text {
-                                        anchors.centerIn: parent
-                                        text: i18n.tr("Email")
-                                        font.pixelSize: theme.fontSize - 2
-                                        font.bold: true
-                                        color: theme.onAccent
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: {
-                                            root.forceShowOnboarding = true
-                                            backend.startCloudSignIn("")
-                                        }
-                                    }
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: backend.cloudSignInPending
-                                spacing: 8
+                                Keys.onReturnPressed: triggerAction()
+                                Keys.onEnterPressed: triggerAction()
+                                Keys.onSpacePressed: triggerAction()
                                 Text {
-                                    Layout.fillWidth: true
-                                    text: i18n.tr("Finish sign-in in your browser…")
-                                    font.pixelSize: theme.fontSize - 2
-                                    color: theme.brightForeground
-                                }
-                                Button {
-                                    text: i18n.tr("Cancel")
-                                    onClicked: backend.cancelCloudSignIn()
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length > 0
-                                spacing: 8
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: "✓ " + backend.cloudAccountEmail
-                                    font.pixelSize: theme.fontSize - 2
-                                    font.bold: true
-                                    color: theme.green
-                                }
-                                Button {
-                                    text: i18n.tr("Continue →")
-                                    onClicked: root.onboardingStep = 2
-                                }
-                            }
-                        }
-                    }
-
-                    // Card (b): Self-Hosted Mac Relay
-                    Rectangle {
-                        Layout.fillWidth: true
-                        implicitHeight: obRelayCol.implicitHeight + 18
-                        radius: 10
-                        color: theme.lighterBackground
-                        border.width: 1
-                        border.color: theme.muted
-
-                        ColumnLayout {
-                            id: obRelayCol
-                            anchors.fill: parent
-                            anchors.margins: 9
-                            spacing: 6
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                Text {
-                                    Layout.fillWidth: true
-                                    text: "🖥 " + i18n.tr("Self-Hosted Mac Relay")
-                                    font.pixelSize: theme.fontSize
-                                    font.bold: true
-                                    color: theme.brightForeground
-                                }
-                                Text {
-                                    visible: backend.tailscaleRelays.length > 0
-                                    text: backend.tailscaleRelays.length + " " + i18n.tr("Tailscale peer(s)")
-                                    font.pixelSize: theme.fontSize - 3
-                                    color: theme.green
-                                }
-                            }
-
-                            RowLayout {
-                                Layout.fillWidth: true
-                                spacing: 6
-                                Rectangle {
-                                    Layout.fillWidth: true
-                                    height: 28
-                                    radius: 6
-                                    color: theme.background
-                                    border.width: 1
-                                    border.color: theme.muted
-                                    Text {
-                                        anchors.fill: parent
-                                        anchors.leftMargin: 8
-                                        anchors.rightMargin: 8
-                                        verticalAlignment: Text.AlignVCenter
-                                        text: "brew install nertwork/tap/bluepill"
-                                        font.pixelSize: theme.fontSize - 3
-                                        color: theme.foreground
-                                        elide: Text.ElideRight
-                                    }
-                                }
-                                Rectangle {
-                                    height: 28
-                                    implicitWidth: copyBrewTxt.implicitWidth + 16
-                                    radius: 6
-                                    color: theme.background
-                                    border.width: 1
-                                    border.color: theme.accent
-                                    Text {
-                                        id: copyBrewTxt
-                                        anchors.centerIn: parent
-                                        text: "📋 " + i18n.tr("Copy")
-                                        font.pixelSize: theme.fontSize - 3
-                                        font.bold: true
-                                        color: theme.accent
-                                    }
-                                    MouseArea {
-                                        anchors.fill: parent
-                                        cursorShape: Qt.PointingHandCursor
-                                        onClicked: backend.copyToClipboard("brew install nertwork/tap/bluepill", "brew install command")
-                                    }
-                                }
-                            }
-
-                            Rectangle {
-                                Layout.fillWidth: true
-                                height: 30
-                                radius: 6
-                                color: theme.background
-                                border.width: 1
-                                border.color: theme.muted
-                                Text {
+                                    id: skipLbl
                                     anchors.centerIn: parent
-                                    text: i18n.tr("Enter Relay URL & Password (or pick Tailscale Mac) →")
-                                    font.pixelSize: theme.fontSize - 2
-                                    font.bold: true
-                                    color: theme.brightForeground
+                                    text: i18n.tr("Skip")
+                                    font.pixelSize: theme.fontSize - 1
+                                    color: theme.foreground
                                 }
                                 MouseArea {
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
-                                    onClicked: {
+                                    onClicked: parent.triggerAction()
+                                }
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Rectangle {
+                                id: onboardingGetStartedBtn
+                                objectName: "onboardingGetStartedBtn"
+                                height: 36
+                                implicitWidth: getStartedLbl.implicitWidth + 28
+                                radius: 8
+                                color: theme.accent
+                                border.width: activeFocus ? 2 : 0
+                                border.color: theme.brightForeground
+                                activeFocusOnTab: true
+                                function triggerAction() {
+                                    root.onboardingStep = 1
+                                    backend.discoverTailscaleRelays()
+                                }
+                                Keys.onReturnPressed: triggerAction()
+                                Keys.onEnterPressed: triggerAction()
+                                Keys.onSpacePressed: triggerAction()
+                                Text {
+                                    id: getStartedLbl
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Get Started →")
+                                    font.pixelSize: theme.fontSize - 1
+                                    font.bold: true
+                                    color: theme.onAccent
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: parent.triggerAction()
+                                }
+                            }
+                        }
+                    }
+
+                    // Step 1: Connect Your Relay (3 crisp option cards)
+                    ColumnLayout {
+                        visible: root.onboardingStep === 1
+                        Layout.fillWidth: true
+                        spacing: 10
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: i18n.tr("Connect Your Relay")
+                            font.pixelSize: theme.fontSize + 3
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+
+                        // Card (a): BluePill Cloud
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: obCloudCol.implicitHeight + 18
+                            radius: 10
+                            color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.10)
+                            border.width: 1
+                            border.color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.45)
+
+                            ColumnLayout {
+                                id: obCloudCol
+                                anchors.fill: parent
+                                anchors.margins: 9
+                                spacing: 6
+
+                                Text {
+                                    text: "☁️ " + i18n.tr("BluePill Cloud")
+                                    font.pixelSize: theme.fontSize
+                                    font.bold: true
+                                    color: theme.brightForeground
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length === 0
+
+                                    Rectangle {
+                                        id: onboardingGoogleBtn
+                                        Layout.fillWidth: true
+                                        height: 30
+                                        radius: 6
+                                        color: theme.lighterBackground
+                                        border.width: activeFocus ? 2 : 1
+                                        border.color: activeFocus ? theme.accent : theme.muted
+                                        activeFocusOnTab: true
+                                        function triggerAction() {
+                                            root.forceShowOnboarding = true
+                                            backend.startCloudSignIn("google")
+                                        }
+                                        Keys.onReturnPressed: triggerAction()
+                                        Keys.onEnterPressed: triggerAction()
+                                        Keys.onSpacePressed: triggerAction()
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "G  " + i18n.tr("Google")
+                                            font.pixelSize: theme.fontSize - 2
+                                            font.bold: true
+                                            color: theme.brightForeground
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: parent.triggerAction()
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        id: onboardingGithubBtn
+                                        Layout.fillWidth: true
+                                        height: 30
+                                        radius: 6
+                                        color: theme.lighterBackground
+                                        border.width: activeFocus ? 2 : 1
+                                        border.color: activeFocus ? theme.accent : theme.muted
+                                        activeFocusOnTab: true
+                                        function triggerAction() {
+                                            root.forceShowOnboarding = true
+                                            backend.startCloudSignIn("github")
+                                        }
+                                        Keys.onReturnPressed: triggerAction()
+                                        Keys.onEnterPressed: triggerAction()
+                                        Keys.onSpacePressed: triggerAction()
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: "🐙  " + i18n.tr("GitHub")
+                                            font.pixelSize: theme.fontSize - 2
+                                            font.bold: true
+                                            color: theme.brightForeground
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: parent.triggerAction()
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        id: onboardingEmailBtn
+                                        Layout.fillWidth: true
+                                        height: 30
+                                        radius: 6
+                                        color: theme.accent
+                                        border.width: activeFocus ? 2 : 0
+                                        border.color: theme.brightForeground
+                                        activeFocusOnTab: true
+                                        function triggerAction() {
+                                            root.forceShowOnboarding = true
+                                            backend.startCloudSignIn("")
+                                        }
+                                        Keys.onReturnPressed: triggerAction()
+                                        Keys.onEnterPressed: triggerAction()
+                                        Keys.onSpacePressed: triggerAction()
+                                        Text {
+                                            anchors.centerIn: parent
+                                            text: i18n.tr("Email")
+                                            font.pixelSize: theme.fontSize - 2
+                                            font.bold: true
+                                            color: theme.onAccent
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: parent.triggerAction()
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    visible: backend.cloudSignInPending
+                                    spacing: 8
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: i18n.tr("Finish sign-in in your browser…")
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: theme.brightForeground
+                                    }
+                                    Button {
+                                        text: i18n.tr("Cancel")
+                                        onClicked: backend.cancelCloudSignIn()
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    visible: !backend.cloudSignInPending && backend.cloudAccountEmail.length > 0
+                                    spacing: 8
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "✓ " + backend.cloudAccountEmail
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.green
+                                    }
+                                    Button {
+                                        text: i18n.tr("Continue →")
+                                        onClicked: root.onboardingStep = 2
+                                    }
+                                }
+                            }
+                        }
+
+                        // Card (b): Self-Hosted Mac Relay
+                        Rectangle {
+                            Layout.fillWidth: true
+                            implicitHeight: obRelayCol.implicitHeight + 18
+                            radius: 10
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+
+                            ColumnLayout {
+                                id: obRelayCol
+                                anchors.fill: parent
+                                anchors.margins: 9
+                                spacing: 6
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "🖥 " + i18n.tr("Self-Hosted Mac Relay")
+                                        font.pixelSize: theme.fontSize
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    Text {
+                                        visible: backend.tailscaleRelays.length > 0
+                                        text: backend.tailscaleRelays.length + " " + i18n.tr("Tailscale peer(s)")
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: theme.green
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 6
+                                    Rectangle {
+                                        Layout.fillWidth: true
+                                        height: 28
+                                        radius: 6
+                                        color: theme.background
+                                        border.width: 1
+                                        border.color: theme.muted
+                                        Text {
+                                            anchors.fill: parent
+                                            anchors.leftMargin: 8
+                                            anchors.rightMargin: 8
+                                            verticalAlignment: Text.AlignVCenter
+                                            text: "brew install nertwork/tap/bluepill"
+                                            font.pixelSize: theme.fontSize - 3
+                                            color: theme.foreground
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+                                    Rectangle {
+                                        id: onboardingCopyBrewBtn
+                                        height: 28
+                                        implicitWidth: copyBrewTxt.implicitWidth + 16
+                                        radius: 6
+                                        color: theme.background
+                                        border.width: activeFocus ? 2 : 1
+                                        border.color: theme.accent
+                                        activeFocusOnTab: true
+                                        function triggerAction() {
+                                            backend.copyToClipboard("brew install nertwork/tap/bluepill", "brew install command")
+                                        }
+                                        Keys.onReturnPressed: triggerAction()
+                                        Keys.onEnterPressed: triggerAction()
+                                        Keys.onSpacePressed: triggerAction()
+                                        Text {
+                                            id: copyBrewTxt
+                                            anchors.centerIn: parent
+                                            text: "📋 " + i18n.tr("Copy")
+                                            font.pixelSize: theme.fontSize - 3
+                                            font.bold: true
+                                            color: theme.accent
+                                        }
+                                        MouseArea {
+                                            anchors.fill: parent
+                                            cursorShape: Qt.PointingHandCursor
+                                            onClicked: parent.triggerAction()
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    id: onboardingManualRelayBtn
+                                    Layout.fillWidth: true
+                                    height: 30
+                                    radius: 6
+                                    color: theme.background
+                                    border.width: activeFocus ? 2 : 1
+                                    border.color: activeFocus ? theme.accent : theme.muted
+                                    activeFocusOnTab: true
+                                    function triggerAction() {
                                         root.forceShowOnboarding = false
                                         backend.completeOnboarding()
                                         root.settingsActiveTab = "server"
                                         root.openServerConfigModal()
                                         serverSyncSection.advancedServerExpanded = true
                                     }
+                                    Keys.onReturnPressed: triggerAction()
+                                    Keys.onEnterPressed: triggerAction()
+                                    Keys.onSpacePressed: triggerAction()
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: i18n.tr("Enter Relay URL & Password (or pick Tailscale Mac) →")
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: parent.triggerAction()
+                                    }
                                 }
                             }
                         }
-                    }
 
-                    // Card (c): Try Live Demo
-                    Rectangle {
-                        Layout.fillWidth: true
-                        height: 44
-                        radius: 10
-                        color: Qt.rgba(48/255, 209/255, 88/255, 0.14)
-                        border.width: 1
-                        border.color: theme.green
-
-                        RowLayout {
-                            anchors.fill: parent
-                            anchors.leftMargin: 12
-                            anchors.rightMargin: 12
-                            Text {
-                                Layout.fillWidth: true
-                                text: "✨ " + i18n.tr("Try Live Demo")
-                                font.pixelSize: theme.fontSize
-                                font.bold: true
-                                color: theme.green
-                            }
-                            Text {
-                                text: i18n.tr("Explore sample chats →")
-                                font.pixelSize: theme.fontSize - 2
-                                color: theme.green
-                            }
-                        }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
+                        // Card (c): Try Live Demo
+                        Rectangle {
+                            id: onboardingDemoBtn
+                            Layout.fillWidth: true
+                            height: 44
+                            radius: 10
+                            color: Qt.rgba(48/255, 209/255, 88/255, 0.14)
+                            border.width: activeFocus ? 2 : 1
+                            border.color: theme.green
+                            activeFocusOnTab: true
+                            function triggerAction() {
                                 root.forceShowOnboarding = true
                                 root.connectToLiveDemo()
                                 root.onboardingStep = 2
                             }
-                        }
-                    }
+                            Keys.onReturnPressed: triggerAction()
+                            Keys.onEnterPressed: triggerAction()
+                            Keys.onSpacePressed: triggerAction()
 
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Layout.topMargin: 4
-                        spacing: 10
-                        Rectangle {
-                            height: 32
-                            implicitWidth: obBackLbl.implicitWidth + 20
-                            radius: 6
-                            color: theme.lighterBackground
-                            border.width: 1
-                            border.color: theme.muted
-                            Text {
-                                id: obBackLbl
-                                anchors.centerIn: parent
-                                text: i18n.tr("← Back")
-                                font.pixelSize: theme.fontSize - 2
-                                color: theme.foreground
+                            RowLayout {
+                                anchors.fill: parent
+                                anchors.leftMargin: 12
+                                anchors.rightMargin: 12
+                                Text {
+                                    Layout.fillWidth: true
+                                    text: "✨ " + i18n.tr("Try Live Demo")
+                                    font.pixelSize: theme.fontSize
+                                    font.bold: true
+                                    color: theme.green
+                                }
+                                Text {
+                                    text: i18n.tr("Explore sample chats →")
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.green
+                                }
                             }
                             MouseArea {
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
-                                onClicked: root.onboardingStep = 0
+                                onClicked: parent.triggerAction()
                             }
                         }
-                        Item { Layout.fillWidth: true }
-                        Rectangle {
-                            height: 32
-                            implicitWidth: obSkip2Lbl.implicitWidth + 20
-                            radius: 6
-                            color: theme.lighterBackground
-                            border.width: 1
-                            border.color: theme.muted
-                            Text {
-                                id: obSkip2Lbl
-                                anchors.centerIn: parent
-                                text: i18n.tr("Skip")
-                                font.pixelSize: theme.fontSize - 2
-                                color: theme.foreground
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Layout.topMargin: 4
+                            spacing: 10
+                            Rectangle {
+                                id: onboardingBackBtn
+                                height: 32
+                                implicitWidth: obBackLbl.implicitWidth + 20
+                                radius: 6
+                                color: theme.lighterBackground
+                                border.width: activeFocus ? 2 : 1
+                                border.color: activeFocus ? theme.accent : theme.muted
+                                activeFocusOnTab: true
+                                function triggerAction() {
+                                    root.onboardingStep = 0
+                                }
+                                Keys.onReturnPressed: triggerAction()
+                                Keys.onEnterPressed: triggerAction()
+                                Keys.onSpacePressed: triggerAction()
+                                Text {
+                                    id: obBackLbl
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("← Back")
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.foreground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: parent.triggerAction()
+                                }
                             }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: {
+                            Item { Layout.fillWidth: true }
+                            Rectangle {
+                                id: onboardingSkip2Btn
+                                height: 32
+                                implicitWidth: obSkip2Lbl.implicitWidth + 20
+                                radius: 6
+                                color: theme.lighterBackground
+                                border.width: activeFocus ? 2 : 1
+                                border.color: activeFocus ? theme.accent : theme.muted
+                                activeFocusOnTab: true
+                                function triggerAction() {
                                     root.forceShowOnboarding = false
                                     backend.completeOnboarding()
+                                }
+                                Keys.onReturnPressed: triggerAction()
+                                Keys.onEnterPressed: triggerAction()
+                                Keys.onSpacePressed: triggerAction()
+                                Text {
+                                    id: obSkip2Lbl
+                                    anchors.centerIn: parent
+                                    text: i18n.tr("Skip")
+                                    font.pixelSize: theme.fontSize - 2
+                                    color: theme.foreground
+                                }
+                                MouseArea {
+                                    anchors.fill: parent
+                                    cursorShape: Qt.PointingHandCursor
+                                    onClicked: parent.triggerAction()
                                 }
                             }
                         }
                     }
-                }
 
-                // Step 2: You're All Set
-                ColumnLayout {
-                    visible: root.onboardingStep === 2
-                    Layout.fillWidth: true
-                    spacing: 14
-
-                    Rectangle {
-                        Layout.alignment: Qt.AlignHCenter
-                        width: 60
-                        height: 60
-                        radius: 30
-                        color: Qt.rgba(48/255, 209/255, 88/255, 0.18)
-                        border.width: 1
-                        border.color: theme.green
-                        Text {
-                            anchors.centerIn: parent
-                            text: "✓"
-                            font.pixelSize: 28
-                            font.bold: true
-                            color: theme.green
-                        }
-                    }
-
-                    Text {
+                    // Step 2: You're All Set
+                    ColumnLayout {
+                        visible: root.onboardingStep === 2
                         Layout.fillWidth: true
-                        horizontalAlignment: Text.AlignHCenter
-                        text: i18n.tr("You're All Set")
-                        font.pixelSize: theme.fontSize + 5
-                        font.bold: true
-                        color: theme.brightForeground
-                    }
+                        spacing: 14
 
-                    Text {
-                        Layout.fillWidth: true
-                        horizontalAlignment: Text.AlignHCenter
-                        text: backend.cloudAccountEmail.length > 0
-                              ? (i18n.tr("Signed in as ") + backend.cloudAccountEmail)
-                              : (backend.serverUrl && backend.serverUrl.length > 0
-                                 ? (i18n.tr("Connected to ") + backend.serverUrl)
-                                 : i18n.tr("BluePill is ready for messaging."))
-                        font.pixelSize: theme.fontSize - 1
-                        color: theme.foreground
-                        wrapMode: Text.WordWrap
-                    }
-
-                    Rectangle {
-                        objectName: "onboardingStartMessagingBtn"
-                        Layout.alignment: Qt.AlignHCenter
-                        height: 38
-                        implicitWidth: startMsgLbl.implicitWidth + 32
-                        radius: 8
-                        color: theme.accent
-                        Text {
-                            id: startMsgLbl
-                            anchors.centerIn: parent
-                            text: i18n.tr("Start Messaging")
-                            font.pixelSize: theme.fontSize
-                            font.bold: true
-                            color: theme.onAccent
+                        Rectangle {
+                            Layout.alignment: Qt.AlignHCenter
+                            width: 60
+                            height: 60
+                            radius: 30
+                            color: Qt.rgba(48/255, 209/255, 88/255, 0.18)
+                            border.width: 1
+                            border.color: theme.green
+                            Text {
+                                anchors.centerIn: parent
+                                text: "✓"
+                                font.pixelSize: 28
+                                font.bold: true
+                                color: theme.green
+                            }
                         }
-                        MouseArea {
-                            anchors.fill: parent
-                            cursorShape: Qt.PointingHandCursor
-                            onClicked: {
+
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: i18n.tr("You're All Set")
+                            font.pixelSize: theme.fontSize + 5
+                            font.bold: true
+                            color: theme.brightForeground
+                        }
+
+                        Text {
+                            Layout.fillWidth: true
+                            horizontalAlignment: Text.AlignHCenter
+                            text: backend.cloudAccountEmail.length > 0
+                                  ? (i18n.tr("Signed in as ") + backend.cloudAccountEmail)
+                                  : (backend.serverUrl && backend.serverUrl.length > 0
+                                     ? (i18n.tr("Connected to ") + backend.serverUrl)
+                                     : i18n.tr("BluePill is ready for messaging."))
+                            font.pixelSize: theme.fontSize - 1
+                            color: theme.foreground
+                            wrapMode: Text.WordWrap
+                        }
+
+                        Rectangle {
+                            id: onboardingStartMessagingBtn
+                            objectName: "onboardingStartMessagingBtn"
+                            Layout.alignment: Qt.AlignHCenter
+                            height: 38
+                            implicitWidth: startMsgLbl.implicitWidth + 32
+                            radius: 8
+                            color: theme.accent
+                            border.width: activeFocus ? 2 : 0
+                            border.color: theme.brightForeground
+                            activeFocusOnTab: true
+                            function triggerAction() {
                                 root.forceShowOnboarding = false
                                 backend.completeOnboarding()
+                            }
+                            Keys.onReturnPressed: triggerAction()
+                            Keys.onEnterPressed: triggerAction()
+                            Keys.onSpacePressed: triggerAction()
+                            Text {
+                                id: startMsgLbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("Start Messaging")
+                                font.pixelSize: theme.fontSize
+                                font.bold: true
+                                color: theme.onAccent
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: parent.triggerAction()
                             }
                         }
                     }

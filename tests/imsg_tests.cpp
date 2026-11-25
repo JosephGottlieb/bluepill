@@ -10647,7 +10647,12 @@ private slots:
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleTopBarStatusPillBtn")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleShowPinnedRowBtn")) != nullptr);
         QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("togglePinnedRowFillRecentBtn")) == nullptr);
-        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleHoverMessageActionsBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("toggleHoverMessageActionsBtn")) == nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("icloudModulesToggleBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("updatesToggleBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("interfaceLayoutToggleBtn")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("notificationSoundPresetCombo")) != nullptr);
+        QVERIFY(win->findChild<QQuickItem *>(QStringLiteral("advancedAlertsToggleBtn")) != nullptr);
 
         // Verify topBarStatusPill is hidden when showTopBarStatusPill == false and visible when true
         QQuickItem *topPill = win->findChild<QQuickItem *>(QStringLiteral("topBarStatusPill"));
@@ -10688,9 +10693,12 @@ private slots:
         QVERIFY(!b.messages().isEmpty());
         const QString targetMsgGuid = b.messages().first().toMap().value(QStringLiteral("guid")).toString();
 
-        // Right-clicking (pinnedActionMessageGuid) shows the action bar; hovering does not
+        // Right-clicking (pinnedActionMessageGuid) shows the action bar; hovering never does (even if legacy flag is set)
         win->setProperty("hoveredActionMessageGuid", targetMsgGuid);
         QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        b.setHoverMessageActions(true);
+        QCOMPARE(win->property("activeActionMessageGuid").toString(), QString());
+        b.setHoverMessageActions(false);
         win->setProperty("pinnedActionMessageGuid", targetMsgGuid);
         QCOMPARE(win->property("activeActionMessageGuid").toString(), targetMsgGuid);
         QQuickItem *customReactBtn = findVisual(win->contentItem(), QStringLiteral("customReactionAddBtn"));
@@ -12501,14 +12509,30 @@ private slots:
         QTemporaryDir tempDir;
         QVERIFY(tempDir.isValid());
         ScopedTestHome testHome(tempDir.path());
+        const char *credVars[] = {"BLUEPILL_SERVER_URL", "IMSG_SERVER_URL", "BLUEBUBBLES_URL",
+                                  "BLUEPILL_PASSWORD", "IMSG_PASSWORD", "BLUEBUBBLES_PASSWORD"};
+        QMap<QByteArray, QByteArray> savedEnv;
+        for (const char *k : credVars) {
+            if (qEnvironmentVariableIsSet(k)) savedEnv.insert(QByteArray(k), qgetenv(k));
+            qunsetenv(k);
+        }
+        auto restoreCredEnv = qScopeGuard([&]() {
+            for (const char *k : credVars) {
+                if (savedEnv.contains(QByteArray(k))) qputenv(k, savedEnv.value(QByteArray(k)));
+                else qunsetenv(k);
+            }
+        });
 
         // 1. Mock relay server capturing /api/v1/message/text, /api/v1/attachment/<guid>/download, /api/v1/message/attachment
         QTcpServer mockServer;
         QVERIFY(mockServer.listen(QHostAddress::LocalHost, 0));
 
         QList<QJsonObject> textPayloads;
+        QStringList uploadedAttachmentTempGuids;
+        QStringList uploadedAttachmentCaptions;
         int attachmentUploadCount = 0;
         int attachmentDownloadCount = 0;
+        bool failNextMessageText = false;
 
         // Minimal 1x1 PNG
         const QByteArray tinyPng = QByteArray::fromBase64(
@@ -12517,7 +12541,7 @@ private slots:
         QObject::connect(&mockServer, &QTcpServer::newConnection, &mockServer, [&]() {
             while (QTcpSocket *s = mockServer.nextPendingConnection()) {
                 auto buf = std::make_shared<QByteArray>();
-                QObject::connect(s, &QTcpSocket::readyRead, s, [s, buf, &textPayloads, &attachmentUploadCount, &attachmentDownloadCount, tinyPng]() {
+                QObject::connect(s, &QTcpSocket::readyRead, s, [s, buf, &textPayloads, &uploadedAttachmentTempGuids, &uploadedAttachmentCaptions, &attachmentUploadCount, &attachmentDownloadCount, &failNextMessageText, tinyPng]() {
                     buf->append(s->readAll());
                     const int hdrEnd = buf->indexOf("\r\n\r\n");
                     if (hdrEnd < 0) return;
@@ -12536,26 +12560,69 @@ private slots:
                     const QString fullPath = firstParts.size() >= 2 ? QString::fromUtf8(firstParts[1]) : QString();
                     const QString path = fullPath.section(QLatin1Char('?'), 0, 0);
 
+                    QByteArray statusLine = "HTTP/1.1 200 OK";
                     QByteArray contentType = "application/json";
                     QByteArray respBody = R"({"status":200,"data":{}})";
+
+                    auto extractMultipartField = [&bodyPart](const QByteArray &fieldName) -> QString {
+                        const QByteArray needle = "name=\"" + fieldName + "\"";
+                        const int idx = bodyPart.indexOf(needle);
+                        if (idx < 0) return QString();
+                        const int valStart = bodyPart.indexOf("\r\n\r\n", idx);
+                        if (valStart < 0) return QString();
+                        const int valEnd = bodyPart.indexOf("\r\n--", valStart + 4);
+                        if (valEnd < 0) return QString();
+                        return QString::fromUtf8(bodyPart.mid(valStart + 4, valEnd - (valStart + 4))).trimmed();
+                    };
 
                     if (method == QStringLiteral("POST") && path == QStringLiteral("/api/v1/message/text")) {
                         const QJsonDocument doc = QJsonDocument::fromJson(bodyPart);
                         if (doc.isObject()) textPayloads.append(doc.object());
-                        respBody = R"({"status":200,"data":{"guid":"srv-eff-1","text":"Boom!"}})";
+                        if (failNextMessageText) {
+                            failNextMessageText = false;
+                            statusLine = "HTTP/1.1 500 Internal Server Error";
+                            respBody = R"({"status":500,"error":"Simulated Private API failure"})";
+                        } else {
+                            const QString guid = QStringLiteral("srv-eff-%1").arg(textPayloads.size());
+                            respBody = QJsonDocument(QJsonObject{
+                                {QStringLiteral("status"), 200},
+                                {QStringLiteral("data"), QJsonObject{
+                                    {QStringLiteral("guid"), guid},
+                                    {QStringLiteral("text"), doc.object().value(QStringLiteral("message")).toString()},
+                                    {QStringLiteral("isFromMe"), true},
+                                    {QStringLiteral("isSent"), true},
+                                    {QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch()}
+                                }}
+                            }).toJson(QJsonDocument::Compact);
+                        }
                     } else if (method == QStringLiteral("GET") && path.contains(QStringLiteral("/api/v1/attachment/")) && path.endsWith(QStringLiteral("/download"))) {
                         ++attachmentDownloadCount;
                         contentType = "image/png";
                         respBody = tinyPng;
                     } else if (method == QStringLiteral("POST") && path == QStringLiteral("/api/v1/message/attachment")) {
                         ++attachmentUploadCount;
-                        respBody = R"({"status":200,"data":{"guid":"srv-att-1"}})";
+                        const QString reqTempGuid = extractMultipartField("tempGuid");
+                        const QString reqCaption = extractMultipartField("message");
+                        uploadedAttachmentTempGuids.append(reqTempGuid);
+                        uploadedAttachmentCaptions.append(reqCaption);
+                        const QString srvGuid = QStringLiteral("srv-att-%1").arg(attachmentUploadCount);
+                        respBody = QJsonDocument(QJsonObject{
+                            {QStringLiteral("status"), 200},
+                            {QStringLiteral("data"), QJsonObject{
+                                {QStringLiteral("guid"), srvGuid},
+                                {QStringLiteral("tempGuid"), reqTempGuid},
+                                {QStringLiteral("isFromMe"), true},
+                                {QStringLiteral("isSent"), true},
+                                {QStringLiteral("isDelivered"), false},
+                                {QStringLiteral("dateCreated"), QDateTime::currentMSecsSinceEpoch()}
+                            }}
+                        }).toJson(QJsonDocument::Compact);
                     } else if (path == QStringLiteral("/api/v1/ping")) {
                         respBody = R"({"status":200,"message":"pong"})";
                     }
 
                     const QByteArray resp =
-                        "HTTP/1.1 200 OK\r\nContent-Type: " + contentType +
+                        statusLine + "\r\nContent-Type: " + contentType +
                         "\r\nContent-Length: " + QByteArray::number(respBody.size()) +
                         "\r\nConnection: close\r\n\r\n" + respBody;
                     s->write(resp);
@@ -12586,7 +12653,8 @@ private slots:
             QCOMPARE(bReloaded.hoverMessageActions(), false);
             QCOMPARE(bReloaded.onboardingCompleted(), true);
         }
-        // Existing configured serverUrl without explicit onboardingCompleted key auto-completes onboarding
+        // Existing configured serverUrl without explicit onboardingCompleted key auto-completes onboarding,
+        // even when state.json is absent and credentials come from env/config; explicit false stays false.
         {
             const QString stateAuto = tempDir.filePath(QStringLiteral("state_auto.json"));
             QFile sf(stateAuto);
@@ -12599,6 +12667,25 @@ private slots:
             bAuto.saveServerConfig(QStringLiteral("http://127.0.0.1:%1").arg(mockServer.serverPort()), QString(), QStringLiteral("pw"));
             bAuto.setStateFilePath(stateAuto);
             QCOMPARE(bAuto.onboardingCompleted(), true);
+
+            const QByteArray prevEnvUrl = qgetenv("BLUEPILL_SERVER_URL");
+            qputenv("BLUEPILL_SERVER_URL", QStringLiteral("http://127.0.0.1:%1").arg(mockServer.serverPort()).toUtf8());
+            auto restoreEnvUrl = qScopeGuard([&prevEnvUrl]() {
+                if (prevEnvUrl.isEmpty()) qunsetenv("BLUEPILL_SERVER_URL");
+                else qputenv("BLUEPILL_SERVER_URL", prevEnvUrl);
+            });
+            Backend bEnvNoState(false);
+            bEnvNoState.setStateFilePath(tempDir.filePath(QStringLiteral("state_missing.json")));
+            QCOMPARE(bEnvNoState.onboardingCompleted(), true);
+
+            const QString stateExplicitFalse = tempDir.filePath(QStringLiteral("state_explicit_false.json"));
+            QFile sfFalse(stateExplicitFalse);
+            QVERIFY(sfFalse.open(QIODevice::WriteOnly));
+            sfFalse.write(R"({"onboardingCompleted":false})");
+            sfFalse.close();
+            Backend bExplicitFalse(false);
+            bExplicitFalse.setStateFilePath(stateExplicitFalse);
+            QCOMPARE(bExplicitFalse.onboardingCompleted(), false);
         }
 
         // 3. sendMessageWithEffect routes through sendMessage with effectId & optimistic expressiveSendStyleId
@@ -12618,14 +12705,24 @@ private slots:
         b.selectChat(chatGuid);
 
         const QString slamEffect = QStringLiteral("com.apple.MobileSMS.expressivesend.impact");
-        b.sendMessageWithEffect(QStringLiteral("Boom!"), slamEffect);
+        b.sendMessageWithEffect(QStringLiteral("Boom!"), slamEffect, QStringLiteral("reply-target-1"));
         QVERIFY(!b.messages().isEmpty());
         const QVariantMap optMsg = b.messages().last().toMap();
         QCOMPARE(optMsg.value(QStringLiteral("expressiveSendStyleId")).toString(), slamEffect);
         QCOMPARE(optMsg.value(QStringLiteral("expressiveEffect")).toString(), QStringLiteral("💥 Slam"));
+        QCOMPARE(optMsg.value(QStringLiteral("replyToGuid")).toString(), QStringLiteral("reply-target-1"));
         QTRY_COMPARE_WITH_TIMEOUT(textPayloads.size(), 1, 3000);
         QCOMPARE(textPayloads.first().value(QStringLiteral("effectId")).toString(), slamEffect);
         QCOMPARE(textPayloads.first().value(QStringLiteral("message")).toString(), QStringLiteral("Boom!"));
+        QCOMPARE(textPayloads.first().value(QStringLiteral("selectedMessageGuid")).toString(), QStringLiteral("reply-target-1"));
+
+        // Effect send must NOT fall back to apple-script plain-message send on failure
+        failNextMessageText = true;
+        b.sendMessageWithEffect(QStringLiteral("Failed Boom!"), slamEffect);
+        QTRY_COMPARE_WITH_TIMEOUT(textPayloads.size(), 2, 3000);
+        QTest::qWait(150);
+        QCOMPARE(textPayloads.size(), 2); // no second apple-script request
+        QTRY_COMPARE_WITH_TIMEOUT(b.messages().last().toMap().value(QStringLiteral("isFailed")).toBool(), true, 3000);
 
         // 4. stageIcloudPhotoForChat emits icloudPhotoStaged & sendAttachments sends multiple images
         QSignalSpy stagedSpy(&b, &Backend::icloudPhotoStaged);
@@ -12646,8 +12743,33 @@ private slots:
             f2.write(tinyPng);
             f2.close();
         }
-        b.sendAttachments(chatGuid, QStringList{stagedPath1, stagedPath2}, QStringLiteral("Two photos"));
+        QVERIFY(b.sendAttachments(chatGuid, QStringList{stagedPath1, stagedPath2}, QStringLiteral("Two photos")));
         QTRY_COMPARE_WITH_TIMEOUT(attachmentUploadCount, 2, 4000);
+        QCOMPARE(uploadedAttachmentTempGuids.size(), 2);
+        QVERIFY(uploadedAttachmentTempGuids.at(0) != uploadedAttachmentTempGuids.at(1));
+        QCOMPARE(uploadedAttachmentCaptions.at(0), QString());
+        QCOMPARE(uploadedAttachmentCaptions.at(1), QStringLiteral("Two photos"));
+        auto bothAttachmentsSucceeded = [&]() {
+            bool saw1 = false, saw2 = false;
+            for (const QVariant &v : b.messages()) {
+                const QVariantMap m = v.toMap();
+                const QString g = m.value(QStringLiteral("guid")).toString();
+                if (g == QStringLiteral("srv-att-1") && !m.value(QStringLiteral("isFailed")).toBool()) saw1 = true;
+                if (g == QStringLiteral("srv-att-2") && !m.value(QStringLiteral("isFailed")).toBool()) saw2 = true;
+            }
+            return saw1 && saw2;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(bothAttachmentsSucceeded(), 4000);
+
+        // Missing final attachment must not swallow caption; missing-only batch emits attachmentSendRejected
+        const QString missingPath = tempDir.filePath(QStringLiteral("does_not_exist.png"));
+        QVERIFY(b.sendAttachments(chatGuid, QStringList{stagedPath1, missingPath}, QStringLiteral("Caption preserved")));
+        QTRY_COMPARE_WITH_TIMEOUT(attachmentUploadCount, 3, 4000);
+        QCOMPARE(uploadedAttachmentCaptions.at(2), QStringLiteral("Caption preserved"));
+        QSignalSpy rejectedSpy(&b, &Backend::attachmentSendRejected);
+        QVERIFY(!b.sendAttachments(chatGuid, QStringList{missingPath}, QStringLiteral("Keep me")));
+        QCOMPARE(rejectedSpy.count(), 1);
+        QCOMPARE(rejectedSpy.first().at(2).toString(), QStringLiteral("Keep me"));
 
         // 5. QML checks for firstRunOnboardingModal, chatServiceSymbolBadge, upper-corner reactionPillItem, right-click actionBar, and multi-image stagedAttachmentBar
         Backend bQml(false);
@@ -12713,6 +12835,34 @@ private slots:
         QCOMPARE(stagedBar->property("visible").toBool(), true);
         QMetaObject::invokeMethod(win, "clearStagedAttachment");
         QCOMPARE(win->property("stagedAttachments").toList().size(), 0);
+
+        // 5f. Late icloudPhotoStaged for a different chat does not wipe active staged attachments
+        QMetaObject::invokeMethod(win, "stageAttachment",
+                                  Q_ARG(QVariant, stagedPath1),
+                                  Q_ARG(QVariant, QStringLiteral("sunset.png")),
+                                  Q_ARG(QVariant, bQml.selectedChatGuid()));
+        QCOMPARE(win->property("stagedAttachments").toList().size(), 1);
+        emit bQml.icloudPhotoStaged(QStringLiteral("iMessage;-;+14155550199"), stagedPath2, QStringLiteral("stale.png"));
+        QTest::qWait(50);
+        QCOMPARE(win->property("stagedAttachments").toList().size(), 1);
+        QCOMPARE(win->property("stagedAttachmentPath").toString(), stagedPath1);
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
+
+        // 5g. Settings hides forced onboarding and re-shows it when closed; Ctrl+N does not open new chat during onboarding
+        win->setProperty("forceShowOnboarding", true);
+        QTest::qWait(50);
+        QCOMPARE(onboardingModal->property("visible").toBool(), true);
+        QTest::keyClick(win, Qt::Key_N, Qt::ControlModifier);
+        QTest::qWait(50);
+        QCOMPARE(win->property("showNewChatModal").toBool(), false);
+        win->setProperty("showServerConfigModal", true);
+        QTest::qWait(50);
+        QCOMPARE(onboardingModal->property("visible").toBool(), false);
+        win->setProperty("showServerConfigModal", false);
+        QTest::qWait(50);
+        QCOMPARE(onboardingModal->property("visible").toBool(), true);
+        win->setProperty("forceShowOnboarding", false);
+        bQml.completeOnboarding();
 
         // 5e. Upper-corner reactionPillItem positioning check (source + visual)
         QFile qmlFile(QStringLiteral(":/Main.qml"));

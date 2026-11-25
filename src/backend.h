@@ -637,8 +637,8 @@ public:
     Q_INVOKABLE static QString extractVerificationCode(const QString &text);
     Q_INVOKABLE static QString extractOtpCode(const QString &text) { return extractVerificationCode(text); }
     Q_INVOKABLE QString pasteClipboardImageToTempFile();
-    Q_INVOKABLE void sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption = QString());
-    Q_INVOKABLE void sendAttachments(const QString &chatGuid, const QStringList &filePaths, const QString &caption = QString());
+    Q_INVOKABLE bool sendAttachment(const QString &chatGuid, const QString &filePath, const QString &caption = QString());
+    Q_INVOKABLE bool sendAttachments(const QString &chatGuid, const QStringList &filePaths, const QString &caption = QString());
     // Audio, Voice, Effects & Scheduling
     Q_INVOKABLE static bool isAudioAttachment(const QString &mimeType, const QString &fileName);
     // GIF / WebP attachments play inline with AnimatedImage.
@@ -656,7 +656,7 @@ public:
     Q_INVOKABLE void cancelVoiceRecording();
     Q_INVOKABLE bool canSendRecordedVoiceMemoToSelectedChat() const;
     Q_INVOKABLE void refreshAudioDevices();
-    Q_INVOKABLE void sendMessageWithEffect(const QString &text, const QString &effectId);
+    Q_INVOKABLE void sendMessageWithEffect(const QString &text, const QString &effectId, const QString &replyToGuid = QString());
     Q_INVOKABLE void scheduleMessage(const QString &text, qint64 sendAtMs);
     Q_INVOKABLE void cancelScheduledMessage(const QString &scheduleId);
     Q_INVOKABLE void addParticipantToActiveChat(const QString &address);
@@ -775,6 +775,7 @@ public:
     void loadCredentials();
     void loadConfig() { loadCredentials(); }
     void loadAppState();
+    void reconcileOnboardingForConfiguredInstall();
     bool saveAppState() const;
     QString messagesCacheFilePath() const;
     void loadMessagesCache();
@@ -890,6 +891,7 @@ signals:
     void cloudSignInCompleted(const QString &email, const QString &serverUrl);
 
     void toastMessage(const QString &text);
+    void attachmentSendRejected(const QString &chatGuid, const QStringList &rejectedPaths, const QString &unsentCaption);
     void attachmentReady(const QString &attachmentGuid, const QString &localUrl);
     void linkPreviewUpdated(const QString &messageGuid, const QVariantMap &previewData);
     void pendingDeliveryCheckFinishedForTest();
@@ -952,7 +954,7 @@ private:
     void rebuildSelectedChatMessages();
     void downloadAttachment(const QString &attachmentGuid, const QString &transferName, bool highPriority = false);
     void pumpAttachmentDownloadQueue();
-    void sendAttachmentInternal(const QString &chatGuid, const QString &filePath, const QString &caption, bool ownedVoiceRecording);
+    bool sendAttachmentInternal(const QString &chatGuid, const QString &filePath, const QString &caption, bool ownedVoiceRecording);
     QString resolveMergedOutgoingReceiptAndPending(const QString &canonicalGuid, const QString &realGuid, const QJsonObject &fallbackObj, int *outErrCode = nullptr);
     void fetchLinkPreview(const QString &msgGuid, const QString &url);
     void processIncomingMessages(const QJsonArray &messagesArray, bool isInitialLoad);
@@ -1130,6 +1132,7 @@ private:
     bool m_showPinnedRow = true;
     bool m_hoverMessageActions = false;
     bool m_onboardingCompleted = false;
+    bool m_hasExplicitOnboardingCompleted = false;
     bool m_syncingHistory = false;
     int m_historySyncGeneration = 0;
     bool m_stayOnHomePage = false;
