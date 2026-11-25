@@ -487,6 +487,10 @@ ApplicationWindow {
             root.activeScreenEffect = "hearts"
             screenEffectTimer.restart()
             effectAnim.restart()
+        } else if (eff.indexOf("echo") !== -1) {
+            root.activeScreenEffect = "echo"
+            screenEffectTimer.restart()
+            effectAnim.restart()
         }
     }
 
@@ -10631,9 +10635,44 @@ ApplicationWindow {
                             elide: Text.ElideRight
                         }
                         Rectangle {
+                            id: settingsHeaderVersionBadge
+                            objectName: "settingsHeaderVersionBadge"
                             height: 22
+                            implicitHeight: 22
+                            Layout.preferredHeight: 22
+                            radius: 6
+                            implicitWidth: headerVerTxt.implicitWidth + 14
+                            Layout.preferredWidth: headerVerTxt.implicitWidth + 14
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: headerVerTxt
+                                objectName: "settingsHeaderVersionText"
+                                anchors.centerIn: parent
+                                text: "v" + (Qt.application.version || "1.2.14")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.accent
+                            }
+                            MouseArea {
+                                id: headerVerMouse
+                                anchors.fill: parent
+                                hoverEnabled: true
+                            }
+                            ToolTip.visible: headerVerMouse.containsMouse
+                            ToolTip.text: backend.serverCurrentVersion && backend.serverCurrentVersion.length > 0
+                                          ? ("BluePill v" + (Qt.application.version || "1.2.14") + " · Relay v" + backend.serverCurrentVersion)
+                                          : ("BluePill v" + (Qt.application.version || "1.2.14"))
+                            ToolTip.delay: 250
+                        }
+                        Rectangle {
+                            height: 22
+                            implicitHeight: 22
+                            Layout.preferredHeight: 22
                             radius: 6
                             implicitWidth: cfgStatusBadge.implicitWidth + 14
+                            Layout.preferredWidth: cfgStatusBadge.implicitWidth + 14
                             color: backend.connected
                                        ? Qt.rgba(48/255, 209/255, 88/255, 0.16)
                                        : Qt.rgba(theme.red.r, theme.red.g, theme.red.b, 0.16)
@@ -11121,6 +11160,8 @@ ApplicationWindow {
                     id: icloudModulesToggleBtn
                     objectName: "icloudModulesToggleBtn"
                     Layout.fillWidth: true
+                    implicitHeight: 36
+                    Layout.preferredHeight: 36
                     height: 36
                     radius: 8
                     color: icloudModulesToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
@@ -11265,6 +11306,8 @@ ApplicationWindow {
                     id: updatesToggleBtn
                     objectName: "updatesToggleBtn"
                     Layout.fillWidth: true
+                    implicitHeight: 36
+                    Layout.preferredHeight: 36
                     height: 36
                     radius: 8
                     color: updatesToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
@@ -11423,6 +11466,8 @@ ApplicationWindow {
                     id: advancedServerToggleBtn
                     objectName: "advancedServerToggleBtn"
                     Layout.fillWidth: true
+                    implicitHeight: 36
+                    Layout.preferredHeight: 36
                     height: 36
                     radius: 8
                     color: advancedToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
@@ -12132,6 +12177,8 @@ ApplicationWindow {
                         id: interfaceLayoutToggleBtn
                         objectName: "interfaceLayoutToggleBtn"
                         Layout.fillWidth: true
+                        implicitHeight: 36
+                        Layout.preferredHeight: 36
                         height: 36
                         radius: 8
                         color: interfaceLayoutToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
@@ -12249,65 +12296,164 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     spacing: 10
 
-                    RowLayout {
+                    Rectangle {
+                        id: notificationsPrimaryCard
                         Layout.fillWidth: true
-                        spacing: 8
+                        implicitHeight: notificationsPrimaryCol.implicitHeight + 22
+                        Layout.preferredHeight: notificationsPrimaryCol.implicitHeight + 22
+                        radius: 10
+                        color: theme.lighterBackground
+                        border.width: 1
+                        border.color: theme.muted
 
-                        Rectangle {
-                            id: toggleMasterNotificationsBtn
-                            objectName: "toggleMasterNotificationsBtn"
-                            Layout.fillWidth: true
-                            height: 36
-                            radius: 8
-                            color: backend.notificationsEnabled ? Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.22) : theme.lighterBackground
-                            border.width: 1
-                            border.color: backend.notificationsEnabled ? theme.accent : theme.muted
-                            Text {
-                                anchors.centerIn: parent
-                                text: (backend.notificationsEnabled ? "✓ 🔔 " : "○ 🔕 ") + i18n.tr("Enable Alerts")
-                                font.pixelSize: theme.fontSize - 2
-                                font.bold: backend.notificationsEnabled
-                                color: backend.notificationsEnabled ? theme.brightForeground : theme.darkForeground
-                            }
-                            MouseArea {
-                                anchors.fill: parent
-                                cursorShape: Qt.PointingHandCursor
-                                onClicked: backend.notificationsEnabled = !backend.notificationsEnabled
-                            }
-                        }
+                        ColumnLayout {
+                            id: notificationsPrimaryCol
+                            anchors.fill: parent
+                            anchors.margins: 11
+                            spacing: 10
 
-                        ThemedComboBox {
-                            id: notificationSoundPresetCombo
-                            objectName: "notificationSoundPresetCombo"
-                            Layout.fillWidth: true
-                            Accessible.name: i18n.tr("Alert Sound Preset")
-                            model: backend.notificationSoundPresets
-                            textRole: "label"
-                            valueRole: "id"
-                            currentIndex: {
-                                var list = backend.notificationSoundPresets || []
-                                for (var i = 0; i < list.length; ++i) {
-                                    if (list[i] && list[i].id === backend.notificationSoundPreset) return i
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+
+                                ColumnLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 2
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: "🔔 " + i18n.tr("Desktop & Sound Alerts")
+                                        font.pixelSize: theme.fontSize - 1
+                                        font.bold: true
+                                        color: theme.brightForeground
+                                        elide: Text.ElideRight
+                                    }
+                                    Text {
+                                        Layout.fillWidth: true
+                                        text: backend.notificationsEnabled
+                                              ? i18n.tr("Notifications are active for incoming messages")
+                                              : i18n.tr("All BluePill alerts are currently muted")
+                                        font.pixelSize: theme.fontSize - 3
+                                        color: theme.darkForeground
+                                        elide: Text.ElideRight
+                                    }
                                 }
-                                return 0
-                            }
-                            Connections {
-                                target: backend
-                                function onNotificationsChanged() {
-                                    var list = backend.notificationSoundPresets || []
-                                    for (var i = 0; i < list.length; ++i) {
-                                        if (list[i] && list[i].id === backend.notificationSoundPreset) {
-                                            notificationSoundPresetCombo.currentIndex = i
-                                            break
-                                        }
+
+                                Rectangle {
+                                    id: toggleMasterNotificationsBtn
+                                    objectName: "toggleMasterNotificationsBtn"
+                                    implicitWidth: Math.max(104, masterNotifTxt.implicitWidth + 24)
+                                    Layout.preferredWidth: Math.max(104, masterNotifTxt.implicitWidth + 24)
+                                    implicitHeight: 32
+                                    Layout.preferredHeight: 32
+                                    height: 32
+                                    radius: 16
+                                    color: backend.notificationsEnabled ? theme.accent : theme.background
+                                    border.width: 1
+                                    border.color: backend.notificationsEnabled ? theme.accent : theme.muted
+                                    Text {
+                                        id: masterNotifTxt
+                                        anchors.centerIn: parent
+                                        text: backend.notificationsEnabled ? ("✓ " + i18n.tr("Enabled")) : ("○ " + i18n.tr("Muted"))
+                                        font.pixelSize: theme.fontSize - 2
+                                        font.bold: true
+                                        color: backend.notificationsEnabled ? theme.onAccent : theme.darkForeground
+                                    }
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.notificationsEnabled = !backend.notificationsEnabled
                                     }
                                 }
                             }
-                            onActivated: function(index) {
-                                var list = backend.notificationSoundPresets || []
-                                if (index >= 0 && index < list.length && list[index]) {
-                                    backend.notificationSoundPreset = list[index].id
-                                    backend.previewNotificationSound(list[index].id)
+
+                            Rectangle {
+                                Layout.fillWidth: true
+                                implicitHeight: 1
+                                Layout.preferredHeight: 1
+                                color: theme.subtleBorder
+                            }
+
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: 10
+                                opacity: backend.notificationsEnabled ? 1.0 : 0.55
+
+                                Text {
+                                    text: "🔊 " + i18n.tr("Alert Sound")
+                                    font.pixelSize: theme.fontSize - 2
+                                    font.bold: true
+                                    color: theme.foreground
+                                    Layout.preferredWidth: 112
+                                }
+
+                                ThemedComboBox {
+                                    id: notificationSoundPresetCombo
+                                    objectName: "notificationSoundPresetCombo"
+                                    Layout.fillWidth: true
+                                    implicitHeight: 34
+                                    Layout.preferredHeight: 34
+                                    enabled: backend.notificationsEnabled
+                                    Accessible.name: i18n.tr("Alert Sound Preset")
+                                    model: backend.notificationSoundPresets
+                                    textRole: "label"
+                                    valueRole: "id"
+                                    currentIndex: {
+                                        var list = backend.notificationSoundPresets || []
+                                        for (var i = 0; i < list.length; ++i) {
+                                            if (list[i] && list[i].id === backend.notificationSoundPreset) return i
+                                        }
+                                        return 0
+                                    }
+                                    Connections {
+                                        target: backend
+                                        function onNotificationsChanged() {
+                                            var list = backend.notificationSoundPresets || []
+                                            for (var i = 0; i < list.length; ++i) {
+                                                if (list[i] && list[i].id === backend.notificationSoundPreset) {
+                                                    notificationSoundPresetCombo.currentIndex = i
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    }
+                                    onActivated: function(index) {
+                                        var list = backend.notificationSoundPresets || []
+                                        if (index >= 0 && index < list.length && list[index]) {
+                                            backend.notificationSoundPreset = list[index].id
+                                            backend.previewNotificationSound(list[index].id)
+                                        }
+                                    }
+                                }
+
+                                Rectangle {
+                                    id: quickPreviewSoundBtn
+                                    objectName: "quickPreviewSoundBtn"
+                                    implicitWidth: 34
+                                    Layout.preferredWidth: 34
+                                    implicitHeight: 34
+                                    Layout.preferredHeight: 34
+                                    height: 34
+                                    radius: 6
+                                    enabled: backend.notificationsEnabled
+                                    color: quickPrevMouse.containsMouse ? theme.selection : theme.background
+                                    border.width: 1
+                                    border.color: quickPrevMouse.containsMouse ? theme.accent : theme.muted
+                                    Text {
+                                        anchors.centerIn: parent
+                                        text: "▶"
+                                        font.pixelSize: theme.fontSize - 2
+                                        color: theme.accent
+                                    }
+                                    MouseArea {
+                                        id: quickPrevMouse
+                                        anchors.fill: parent
+                                        hoverEnabled: true
+                                        cursorShape: Qt.PointingHandCursor
+                                        onClicked: backend.previewNotificationSound(backend.notificationSoundPreset)
+                                    }
+                                    ToolTip.visible: quickPrevMouse.containsMouse
+                                    ToolTip.text: i18n.tr("Preview selected sound")
+                                    ToolTip.delay: 300
                                 }
                             }
                         }
@@ -12318,6 +12464,8 @@ ApplicationWindow {
                         id: advancedAlertsToggleBtn
                         objectName: "advancedAlertsToggleBtn"
                         Layout.fillWidth: true
+                        implicitHeight: 36
+                        Layout.preferredHeight: 36
                         height: 36
                         radius: 8
                         color: advancedAlertsToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
@@ -14627,7 +14775,8 @@ ApplicationWindow {
                     { name: "🕵️ " + i18n.tr("Invisible Ink"), id: "com.apple.MobileSMS.expressivesend.invisibleink" },
                     { name: "🎉 " + i18n.tr("Confetti"), id: "com.apple.messages.effect.CKConfettiEffect" },
                     { name: "✨ " + i18n.tr("Lasers"), id: "com.apple.messages.effect.CKLasersEffect" },
-                    { name: "🎆 " + i18n.tr("Fireworks"), id: "com.apple.messages.effect.CKFireworksEffect" }
+                    { name: "🎆 " + i18n.tr("Fireworks"), id: "com.apple.messages.effect.CKFireworksEffect" },
+                    { name: "🗣️ " + i18n.tr("Echo"), id: "com.apple.messages.effect.CKEchoEffect" }
                 ]
                 delegate: Rectangle {
                     required property var modelData
@@ -15670,6 +15819,9 @@ ApplicationWindow {
                     } else if (root.activeScreenEffect === "hearts") {
                         var heartChars = ["❤️", "💖", "💕", "💓", "✨"]
                         return heartChars[index % heartChars.length]
+                    } else if (root.activeScreenEffect === "echo") {
+                        var echoChars = ["💬", "🗣️", "🫧", "✨"]
+                        return echoChars[index % echoChars.length]
                     }
                     return "✨"
                 }

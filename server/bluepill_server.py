@@ -9481,6 +9481,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           <option value="com.apple.messages.effect.CKConfettiEffect">🎉 Confetti</option>
           <option value="com.apple.messages.effect.CKFireworksEffect">🎆 Fireworks</option>
           <option value="com.apple.messages.effect.CKLasersEffect">✨ Lasers</option>
+          <option value="com.apple.messages.effect.CKEchoEffect">🗣️ Echo</option>
           <option value="com.apple.MobileSMS.expressivesend.impact">💥 Slam</option>
           <option value="com.apple.MobileSMS.expressivesend.loud">📢 Loud</option>
           <option value="com.apple.MobileSMS.expressivesend.gentle">🪶 Gentle</option>
@@ -10587,6 +10588,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (id.indexOf('CKConfettiEffect') !== -1) return 'Confetti';
       if (id.indexOf('CKLasersEffect') !== -1) return 'Lasers';
       if (id.indexOf('CKFireworksEffect') !== -1) return 'Fireworks';
+      if (id.indexOf('CKEchoEffect') !== -1) return 'Echo';
       return id.split('.').pop() || id;
     }
 

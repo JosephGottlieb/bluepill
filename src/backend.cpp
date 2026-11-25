@@ -9135,6 +9135,7 @@ QVariantList Backend::buildMessageListFromApi(
         else if (rawEffect.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎉 Confetti");
         else if (rawEffect.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("✨ Lasers");
         else if (rawEffect.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎆 Fireworks");
+        else if (rawEffect.contains(QStringLiteral("CKEchoEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🗣️ Echo");
         else expressiveEffectName = sendEffectLabel;
         const int errorCode = m.value(QStringLiteral("error")).toInt(0);
         const bool isFailed = isFromMe && (errorCode != 0);
@@ -10908,6 +10909,7 @@ void Backend::sendMessage(const QString &chatGuid, const QString &text, const QS
         else if (cleanEffectId.contains(QStringLiteral("CKConfettiEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎉 Confetti");
         else if (cleanEffectId.contains(QStringLiteral("CKLasersEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("✨ Lasers");
         else if (cleanEffectId.contains(QStringLiteral("CKFireworksEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🎆 Fireworks");
+        else if (cleanEffectId.contains(QStringLiteral("CKEchoEffect"), Qt::CaseInsensitive)) expressiveEffectName = QStringLiteral("🗣️ Echo");
         else expressiveEffectName = formatExpressiveEffectLabel(cleanEffectId);
         optimistic.insert(QStringLiteral("expressiveEffect"), expressiveEffectName);
         optimistic.insert(QStringLiteral("sendEffectLabel"), formatExpressiveEffectLabel(cleanEffectId));
