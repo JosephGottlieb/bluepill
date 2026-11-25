@@ -10,7 +10,12 @@ Rectangle {
     property int fontPixelSize: 14
     readonly property bool hasPhoto: photo.status === Image.Ready
     readonly property bool canMask: GraphicsInfo.api !== GraphicsInfo.Software
-    property bool hasEffectMask: false
+    readonly property Component maskComponent: {
+        if (!canMask) return null
+        var c = Qt.createComponent("RoundedCornerMask.qml")
+        return c.status === Component.Ready ? c : null
+    }
+    readonly property bool hasEffectMask: maskComponent !== null
 
     radius: width / 2
     clip: !canMask || !hasEffectMask
@@ -28,57 +33,15 @@ Rectangle {
         id: photo
         objectName: "avatarPhoto"
         anchors.fill: parent
+        property real radius: Math.min(width, height) / 2
         source: avatar.source
         sourceSize.width: Math.ceil(avatar.width * 2)
         sourceSize.height: Math.ceil(avatar.height * 2)
         asynchronous: true
         autoTransform: true
         fillMode: Image.PreserveAspectCrop
-        visible: avatar.hasPhoto && (!avatar.canMask || !avatar.hasEffectMask)
-    }
-
-    Item {
-        id: effectHost
-        anchors.fill: photo
-        visible: avatar.hasPhoto && avatar.canMask && avatar.hasEffectMask
-        property var fxItem: null
-        function ensureEffect() {
-            if (fxItem || !avatar.hasPhoto || !avatar.canMask) return
-            try {
-                var fx = Qt.createQmlObject(
-                    'import QtQuick; import QtQuick.Effects; MultiEffect { anchors.fill: parent; maskEnabled: true }',
-                    effectHost,
-                    "RoundAvatarEffect"
-                )
-                if (fx) {
-                    fx.source = photo
-                    fx.maskSource = circleMask
-                    fxItem = fx
-                    avatar.hasEffectMask = true
-                }
-            } catch (e) {
-                avatar.hasEffectMask = false
-            }
-        }
-        Component.onCompleted: ensureEffect()
-        Connections {
-            target: avatar
-            function onHasPhotoChanged() {
-                if (avatar.hasPhoto) {
-                    effectHost.ensureEffect()
-                }
-            }
-        }
-    }
-
-    Item {
-        id: circleMask
-        anchors.fill: parent
+        visible: avatar.hasPhoto
         layer.enabled: avatar.hasPhoto && avatar.canMask && avatar.hasEffectMask
-        visible: false
-        Rectangle {
-            anchors.fill: parent
-            radius: width / 2
-        }
+        layer.effect: avatar.maskComponent
     }
 }

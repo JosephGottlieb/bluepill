@@ -770,6 +770,11 @@ Backend::Backend(bool autoStart, QObject *parent) : QObject(parent), m_autoStart
         m_contactsRefreshTimer.start();
         if (cloudLoggedIn() && m_autoUpdateCheckEnabled) {
             m_cloudUpdateTimer.start();
+            QTimer::singleShot(6000, this, [this]() {
+                if (m_autoStart && cloudLoggedIn() && m_autoUpdateCheckEnabled && !m_updateChecking) {
+                    checkForCloudUpdates(false);
+                }
+            });
         }
     } else if (autoStart) {
         m_connected = false;
