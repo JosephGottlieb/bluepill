@@ -12771,6 +12771,26 @@ private slots:
         QCOMPARE(rejectedSpy.count(), 1);
         QCOMPARE(rejectedSpy.first().at(2).toString(), QStringLiteral("Keep me"));
 
+        // Outside demo mode with empty serverUrl, sendAttachment/sendAttachments must return false without optimistic row
+        {
+            Backend bNoRelay(false);
+            bNoRelay.setConfigFilePath(tempDir.filePath(QStringLiteral("config_no_relay.json")));
+            bNoRelay.setStateFilePath(tempDir.filePath(QStringLiteral("state_no_relay.json")));
+            bNoRelay.ingestChatsMetadataForTest(QJsonArray{
+                QJsonObject{
+                    {QStringLiteral("guid"), chatGuid},
+                    {QStringLiteral("chatIdentifier"), QStringLiteral("+15552223333")},
+                    {QStringLiteral("displayName"), QStringLiteral("Alex")}
+                }
+            });
+            bNoRelay.selectChat(chatGuid);
+            QSignalSpy noRelayRejSpy(&bNoRelay, &Backend::attachmentSendRejected);
+            QVERIFY(!bNoRelay.sendAttachment(chatGuid, stagedPath1, QStringLiteral("Keep draft")));
+            QCOMPARE(bNoRelay.messages().size(), 0);
+            QCOMPARE(noRelayRejSpy.count(), 1);
+            QCOMPARE(noRelayRejSpy.first().at(2).toString(), QStringLiteral("Keep draft"));
+        }
+
         // 5. QML checks for firstRunOnboardingModal, chatServiceSymbolBadge, upper-corner reactionPillItem, right-click actionBar, and multi-image stagedAttachmentBar
         Backend bQml(false);
         bQml.setConfigFilePath(tempDir.filePath(QStringLiteral("config_qml.json")));
@@ -12836,22 +12856,56 @@ private slots:
         QMetaObject::invokeMethod(win, "clearStagedAttachment");
         QCOMPARE(win->property("stagedAttachments").toList().size(), 0);
 
-        // 5f. Late icloudPhotoStaged for a different chat does not wipe active staged attachments
+        // 5f. Late icloudPhotoStaged for a different chat saves to that chat's draft without touching active staged attachments
         QMetaObject::invokeMethod(win, "stageAttachment",
                                   Q_ARG(QVariant, stagedPath1),
                                   Q_ARG(QVariant, QStringLiteral("sunset.png")),
                                   Q_ARG(QVariant, bQml.selectedChatGuid()));
         QCOMPARE(win->property("stagedAttachments").toList().size(), 1);
-        emit bQml.icloudPhotoStaged(QStringLiteral("iMessage;-;+14155550199"), stagedPath2, QStringLiteral("stale.png"));
+        const QString otherChatGuid = QStringLiteral("iMessage;-;+14155550199");
+        bQml.ingestChatsMetadataForTest(QJsonArray{
+            QJsonObject{{QStringLiteral("guid"), otherChatGuid}, {QStringLiteral("chatIdentifier"), QStringLiteral("+14155550199")}, {QStringLiteral("displayName"), QStringLiteral("Elena Vance")}}
+        });
+        emit bQml.icloudPhotoStaged(otherChatGuid, stagedPath2, QStringLiteral("stale.png"));
         QTest::qWait(50);
         QCOMPARE(win->property("stagedAttachments").toList().size(), 1);
         QCOMPARE(win->property("stagedAttachmentPath").toString(), stagedPath1);
+        const QString prevSelectedGuid = bQml.selectedChatGuid();
+        bQml.selectChat(otherChatGuid);
+        QTest::qWait(50);
+        QCOMPARE(win->property("stagedAttachments").toList().size(), 1);
+        QCOMPARE(win->property("stagedAttachmentPath").toString(), stagedPath2);
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
+        bQml.selectChat(prevSelectedGuid);
+        QTest::qWait(50);
         QMetaObject::invokeMethod(win, "clearStagedAttachment");
 
-        // 5g. Settings hides forced onboarding and re-shows it when closed; Ctrl+N does not open new chat during onboarding
+        // 5g. Rejected caption never overwrites an active edit or newer draft
+        QObject *composerObj = win->findChild<QObject *>(QStringLiteral("composerInput"));
+        QVERIFY(composerObj != nullptr);
+        win->setProperty("editTargetGuid", QStringLiteral("msg-editing-1"));
+        composerObj->setProperty("text", QString());
+        emit bQml.attachmentSendRejected(prevSelectedGuid, QStringList{stagedPath1}, QStringLiteral("Unsent cap"));
+        QTest::qWait(50);
+        QCOMPARE(composerObj->property("text").toString(), QString());
+        QQuickItem *rejBar = win->findChild<QQuickItem *>(QStringLiteral("rejectedCaptionRecoveryBar"));
+        QVERIFY(rejBar != nullptr);
+        QCOMPARE(rejBar->property("visible").toBool(), true);
+        win->setProperty("editTargetGuid", QString());
+        QMetaObject::invokeMethod(win, "restoreRejectedCaptionForSelectedChat");
+        QCOMPARE(composerObj->property("text").toString(), QStringLiteral("Unsent cap"));
+        QCOMPARE(rejBar->property("visible").toBool(), false);
+        composerObj->setProperty("text", QString());
+
+        // 5h. Settings hides forced onboarding and re-shows it when closed; Ctrl+N does not open new chat during onboarding;
+        //     onIcloudPhotoStaged does not move focus to composerInput while onboarding is visible
         win->setProperty("forceShowOnboarding", true);
         QTest::qWait(50);
         QCOMPARE(onboardingModal->property("visible").toBool(), true);
+        emit bQml.icloudPhotoStaged(prevSelectedGuid, stagedPath1, QStringLiteral("sunset.png"));
+        QTest::qWait(50);
+        QCOMPARE(composerObj->property("activeFocus").toBool(), false);
+        QMetaObject::invokeMethod(win, "clearStagedAttachment");
         QTest::keyClick(win, Qt::Key_N, Qt::ControlModifier);
         QTest::qWait(50);
         QCOMPARE(win->property("showNewChatModal").toBool(), false);

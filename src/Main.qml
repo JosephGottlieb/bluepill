@@ -76,6 +76,7 @@ ApplicationWindow {
     property string pendingSendEffectName: ""
     property var chatAttachmentDrafts: ({})
     property var chatDrafts: ({})
+    property var rejectedAttachmentCaptions: ({})
     property string lastDraftChatGuid: ""
     property string hoveredActionMessageGuid: ""
     property string pinnedActionMessageGuid: ""
@@ -209,6 +210,70 @@ ApplicationWindow {
         root.chatAttachmentDrafts = attDrafts
     }
 
+    function stageAttachmentToInactiveDraft(attPath, attName, chatGuid) {
+        if (!attPath || attPath.length === 0 || !chatGuid || chatGuid.length === 0) return
+        var cleanName = (attName && attName.length > 0) ? attName : attPath.split("/").pop()
+        var canonGuid = backend.resolveCanonicalChatGuid(chatGuid) || chatGuid
+        var existing = root.resolveSavedAttachmentForChat(canonGuid)
+        var itemsList = (existing && existing.items && existing.items.length > 0)
+                        ? existing.items.slice()
+                        : ((existing && existing.path && existing.path.length > 0)
+                           ? [{ path: existing.path, name: existing.name || existing.path.split("/").pop(), chatGuid: canonGuid }]
+                           : [])
+        var duplicate = false
+        for (var i = 0; i < itemsList.length; ++i) {
+            if (itemsList[i] && itemsList[i].path === attPath) {
+                duplicate = true
+                break
+            }
+        }
+        if (!duplicate) {
+            itemsList.push({ path: attPath, name: cleanName, chatGuid: canonGuid })
+        }
+        var attDrafts = root.chatAttachmentDrafts || ({})
+        attDrafts[canonGuid] = {
+            items: itemsList,
+            path: itemsList[0].path,
+            name: itemsList[0].name,
+            chatGuid: canonGuid
+        }
+        root.chatAttachmentDrafts = attDrafts
+    }
+
+    function rejectedCaptionForSelectedChat() {
+        var cur = backend.selectedChatGuid || ""
+        if (!cur) return ""
+        var map = root.rejectedAttachmentCaptions || ({})
+        var canon = backend.resolveCanonicalChatGuid(cur) || cur
+        if (map[canon] && map[canon].length > 0) return map[canon]
+        if (map[cur] && map[cur].length > 0) return map[cur]
+        return ""
+    }
+
+    function clearRejectedCaptionForSelectedChat() {
+        var cur = backend.selectedChatGuid || ""
+        if (!cur) return
+        var map = Object.assign({}, root.rejectedAttachmentCaptions || ({}))
+        var canon = backend.resolveCanonicalChatGuid(cur) || cur
+        delete map[canon]
+        delete map[cur]
+        root.rejectedAttachmentCaptions = map
+    }
+
+    function restoreRejectedCaptionForSelectedChat() {
+        var cap = root.rejectedCaptionForSelectedChat()
+        if (!cap || root.editTargetGuid !== "") return
+        if (composerInput.text.trim().length === 0) {
+            composerInput.text = cap
+        } else {
+            composerInput.text = composerInput.text + "\n" + cap
+        }
+        root.clearRejectedCaptionForSelectedChat()
+        if (!firstRunOnboardingModal.visible) {
+            composerInput.forceActiveFocus()
+        }
+    }
+
     function removeStagedAttachmentAt(idx) {
         var list = (root.stagedAttachments || []).slice()
         if (idx < 0 || idx >= list.length) return
@@ -312,8 +377,6 @@ ApplicationWindow {
                 root.replyTargetGuid = ""
                 root.replyTargetSender = ""
                 root.replyTargetText = ""
-                root.pendingSendEffectId = ""
-                root.pendingSendEffectName = ""
                 messageListView.scrollToBottom()
             }
         } else if (composerInput.text.trim().length > 0) {
@@ -801,7 +864,7 @@ ApplicationWindow {
         notificationsSettingsCol.advancedAlertsExpanded = false
         root.showServerPassword = false
         root.showServerConfigModal = true
-        serverUrlInput.forceActiveFocus()
+        serverConfigCard.forceActiveFocus()
         backend.discoverTailscaleRelays()
     }
 
@@ -1396,27 +1459,39 @@ ApplicationWindow {
         function onIcloudPhotoStaged(chatGuid, localPath, fileName) {
             if (!localPath || localPath.length === 0) return
             var activeGuid = backend.selectedChatGuid || ""
-            if (!activeGuid || !chatGuid || (chatGuid !== activeGuid && !backend.isSameConversation(chatGuid, activeGuid))) {
-                return
+            if (activeGuid.length > 0 && chatGuid && (chatGuid === activeGuid || backend.isSameConversation(chatGuid, activeGuid))) {
+                root.stageAttachment(localPath, fileName, activeGuid)
+                if (!firstRunOnboardingModal.visible) {
+                    composerInput.forceActiveFocus()
+                }
+            } else if (chatGuid && chatGuid.length > 0) {
+                root.stageAttachmentToInactiveDraft(localPath, fileName, chatGuid)
             }
-            root.stageAttachment(localPath, fileName, activeGuid)
-            composerInput.forceActiveFocus()
         }
         function onAttachmentSendRejected(chatGuid, rejectedPaths, unsentCaption) {
             if (!unsentCaption || unsentCaption.length === 0) return
             var activeGuid = backend.selectedChatGuid || ""
-            if (activeGuid.length > 0 && (chatGuid === activeGuid || backend.isSameConversation(chatGuid, activeGuid))) {
-                if (composerInput.text.trim().length === 0) {
-                    composerInput.text = unsentCaption
+            var isCurrentChat = activeGuid.length > 0 && (chatGuid === activeGuid || backend.isSameConversation(chatGuid, activeGuid))
+            var canon = backend.resolveCanonicalChatGuid(chatGuid) || chatGuid
+            if (isCurrentChat && root.editTargetGuid === "" && composerInput.text.trim().length === 0) {
+                composerInput.text = unsentCaption
+                if (!firstRunOnboardingModal.visible) {
                     composerInput.forceActiveFocus()
                 }
-            } else if (chatGuid && chatGuid.length > 0) {
-                var drafts = root.chatDrafts || ({})
-                var canon = backend.resolveCanonicalChatGuid(chatGuid) || chatGuid
+                return
+            }
+            if (!isCurrentChat && canon && canon.length > 0) {
+                var drafts = Object.assign({}, root.chatDrafts || ({}))
                 if (!drafts[canon] || drafts[canon].trim().length === 0) {
                     drafts[canon] = unsentCaption
                     root.chatDrafts = drafts
+                    return
                 }
+            }
+            if (canon && canon.length > 0) {
+                var rejMap = Object.assign({}, root.rejectedAttachmentCaptions || ({}))
+                rejMap[canon] = unsentCaption
+                root.rejectedAttachmentCaptions = rejMap
             }
         }
         function onCloudSignInCompleted(email, serverUrl) {
@@ -5965,6 +6040,7 @@ ApplicationWindow {
                 Rectangle {
                     id: pendingEffectBar
                     objectName: "pendingEffectBar"
+                    readonly property bool hasStagedAttachment: root.editTargetGuid === "" && backend.selectedChatGuid.length > 0 && (root.stagedAttachments.length > 0 || root.stagedAttachmentPath.length > 0) && root.isStagedAttachmentForChat(backend.selectedChatGuid)
                     visible: backend.selectedChatGuid.length > 0 && root.editTargetGuid === "" && root.pendingSendEffectId.length > 0
                     Layout.fillWidth: true
                     Layout.preferredHeight: 36
@@ -5986,7 +6062,7 @@ ApplicationWindow {
                         Rectangle {
                             height: 24
                             radius: 12
-                            implicitWidth: pendingEffectPillRow.implicitWidth + 18
+                            implicitWidth: Math.min(pendingEffectBar.width - 28, pendingEffectPillRow.implicitWidth + 18)
                             color: Qt.rgba(theme.accent.r, theme.accent.g, theme.accent.b, 0.18)
                             border.width: 1
                             border.color: theme.accent
@@ -5994,9 +6070,14 @@ ApplicationWindow {
                             RowLayout {
                                 id: pendingEffectPillRow
                                 anchors.centerIn: parent
+                                width: Math.min(implicitWidth, pendingEffectBar.width - 46)
                                 spacing: 8
                                 Text {
-                                    text: "✨ " + i18n.tr("Sending with") + " " + root.pendingSendEffectName
+                                    Layout.fillWidth: true
+                                    elide: Text.ElideRight
+                                    text: pendingEffectBar.hasStagedAttachment
+                                          ? ("✨ " + root.pendingSendEffectName + " (" + i18n.tr("armed for next text — attachments send without effect") + ")")
+                                          : ("✨ " + i18n.tr("Sending with") + " " + root.pendingSendEffectName)
                                     font.pixelSize: theme.fontSize - 2
                                     font.bold: true
                                     color: theme.brightForeground
@@ -6020,6 +6101,86 @@ ApplicationWindow {
                         }
 
                         Item { Layout.fillWidth: true }
+                    }
+                }
+
+                // Rejected Attachment Caption Recovery Bar
+                Rectangle {
+                    id: rejectedCaptionRecoveryBar
+                    objectName: "rejectedCaptionRecoveryBar"
+                    readonly property string recoveredText: backend.selectedChatGuid.length > 0 ? root.rejectedCaptionForSelectedChat() : ""
+                    visible: backend.selectedChatGuid.length > 0 && recoveredText.length > 0
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 38
+                    color: theme.darkBackground
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 14
+                        anchors.rightMargin: 14
+                        spacing: 8
+
+                        Text {
+                            Layout.fillWidth: true
+                            text: "⚠ " + i18n.tr("Unsent attachment caption:") + " \"" + rejectedCaptionRecoveryBar.recoveredText + "\""
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.brightForeground
+                            elide: Text.ElideRight
+                        }
+
+                        Rectangle {
+                            visible: root.editTargetGuid === ""
+                            height: 24
+                            implicitWidth: restoreCapLbl.implicitWidth + 16
+                            radius: 6
+                            color: theme.accent
+                            Text {
+                                id: restoreCapLbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("Restore")
+                                font.pixelSize: theme.fontSize - 3
+                                font.bold: true
+                                color: theme.onAccent
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.restoreRejectedCaptionForSelectedChat()
+                            }
+                        }
+
+                        Rectangle {
+                            height: 24
+                            implicitWidth: copyCapLbl.implicitWidth + 14
+                            radius: 6
+                            color: theme.lighterBackground
+                            border.width: 1
+                            border.color: theme.muted
+                            Text {
+                                id: copyCapLbl
+                                anchors.centerIn: parent
+                                text: i18n.tr("Copy")
+                                font.pixelSize: theme.fontSize - 3
+                                color: theme.foreground
+                            }
+                            MouseArea {
+                                anchors.fill: parent
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: backend.copyToClipboard(rejectedCaptionRecoveryBar.recoveredText, "unsent caption")
+                            }
+                        }
+
+                        Text {
+                            text: "✕"
+                            font.pixelSize: theme.fontSize - 2
+                            color: theme.darkForeground
+                            MouseArea {
+                                anchors.fill: parent
+                                anchors.margins: -4
+                                cursorShape: Qt.PointingHandCursor
+                                onClicked: root.clearRejectedCaptionForSelectedChat()
+                            }
+                        }
                     }
                 }
 
@@ -10426,6 +10587,8 @@ ApplicationWindow {
         Rectangle {
             id: serverConfigCard
             objectName: "serverConfigCard"
+            focus: root.showServerConfigModal
+            activeFocusOnTab: false
             width: Math.min(580, root.width - 40)
             height: Math.min(root.height - 32, serverConfigCol.implicitHeight + 44)
             anchors.centerIn: parent
@@ -10601,6 +10764,15 @@ ApplicationWindow {
                     property bool icloudModulesExpanded: false
                     property bool updatesExpanded: false
                     property bool advancedServerExpanded: false
+                    onAdvancedServerExpandedChanged: {
+                        if (advancedServerExpanded && root.showServerConfigModal) {
+                            Qt.callLater(function() {
+                                if (root.showServerConfigModal && serverSyncSection.advancedServerExpanded && serverUrlInput.visible) {
+                                    serverUrlInput.forceActiveFocus()
+                                }
+                            })
+                        }
+                    }
                     visible: root.settingsActiveTab === "server"
                     Layout.fillWidth: true
                     spacing: 10
@@ -10952,8 +11124,17 @@ ApplicationWindow {
                     height: 36
                     radius: 8
                     color: icloudModulesToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
-                    border.width: 1
-                    border.color: serverSyncSection.icloudModulesExpanded ? theme.accent : theme.muted
+                    border.width: activeFocus ? 2 : 1
+                    border.color: (serverSyncSection.icloudModulesExpanded || activeFocus) ? theme.accent : theme.muted
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: i18n.tr("iCloud Hub Modules")
+                    Accessible.checkable: true
+                    Accessible.checked: serverSyncSection.icloudModulesExpanded
+                    Accessible.onPressAction: serverSyncSection.icloudModulesExpanded = !serverSyncSection.icloudModulesExpanded
+                    Keys.onReturnPressed: serverSyncSection.icloudModulesExpanded = !serverSyncSection.icloudModulesExpanded
+                    Keys.onEnterPressed: serverSyncSection.icloudModulesExpanded = !serverSyncSection.icloudModulesExpanded
+                    Keys.onSpacePressed: serverSyncSection.icloudModulesExpanded = !serverSyncSection.icloudModulesExpanded
 
                     RowLayout {
                         anchors.fill: parent
@@ -11087,8 +11268,17 @@ ApplicationWindow {
                     height: 36
                     radius: 8
                     color: updatesToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
-                    border.width: 1
-                    border.color: serverSyncSection.updatesExpanded ? theme.accent : theme.muted
+                    border.width: activeFocus ? 2 : 1
+                    border.color: (serverSyncSection.updatesExpanded || activeFocus) ? theme.accent : theme.muted
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: i18n.tr("Updates")
+                    Accessible.checkable: true
+                    Accessible.checked: serverSyncSection.updatesExpanded
+                    Accessible.onPressAction: serverSyncSection.updatesExpanded = !serverSyncSection.updatesExpanded
+                    Keys.onReturnPressed: serverSyncSection.updatesExpanded = !serverSyncSection.updatesExpanded
+                    Keys.onEnterPressed: serverSyncSection.updatesExpanded = !serverSyncSection.updatesExpanded
+                    Keys.onSpacePressed: serverSyncSection.updatesExpanded = !serverSyncSection.updatesExpanded
 
                     RowLayout {
                         anchors.fill: parent
@@ -11236,8 +11426,17 @@ ApplicationWindow {
                     height: 36
                     radius: 8
                     color: advancedToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
-                    border.width: 1
-                    border.color: serverSyncSection.advancedServerExpanded ? theme.accent : theme.muted
+                    border.width: activeFocus ? 2 : 1
+                    border.color: (serverSyncSection.advancedServerExpanded || activeFocus) ? theme.accent : theme.muted
+                    activeFocusOnTab: true
+                    Accessible.role: Accessible.Button
+                    Accessible.name: i18n.tr("Self-Hosted & Advanced")
+                    Accessible.checkable: true
+                    Accessible.checked: serverSyncSection.advancedServerExpanded
+                    Accessible.onPressAction: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
+                    Keys.onReturnPressed: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
+                    Keys.onEnterPressed: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
+                    Keys.onSpacePressed: serverSyncSection.advancedServerExpanded = !serverSyncSection.advancedServerExpanded
 
                     RowLayout {
                         anchors.fill: parent
@@ -11936,8 +12135,17 @@ ApplicationWindow {
                         height: 36
                         radius: 8
                         color: interfaceLayoutToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
-                        border.width: 1
-                        border.color: uiAppearanceSection.interfaceLayoutExpanded ? theme.accent : theme.muted
+                        border.width: activeFocus ? 2 : 1
+                        border.color: (uiAppearanceSection.interfaceLayoutExpanded || activeFocus) ? theme.accent : theme.muted
+                        activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
+                        Accessible.name: i18n.tr("Interface & Layout")
+                        Accessible.checkable: true
+                        Accessible.checked: uiAppearanceSection.interfaceLayoutExpanded
+                        Accessible.onPressAction: uiAppearanceSection.interfaceLayoutExpanded = !uiAppearanceSection.interfaceLayoutExpanded
+                        Keys.onReturnPressed: uiAppearanceSection.interfaceLayoutExpanded = !uiAppearanceSection.interfaceLayoutExpanded
+                        Keys.onEnterPressed: uiAppearanceSection.interfaceLayoutExpanded = !uiAppearanceSection.interfaceLayoutExpanded
+                        Keys.onSpacePressed: uiAppearanceSection.interfaceLayoutExpanded = !uiAppearanceSection.interfaceLayoutExpanded
 
                         RowLayout {
                             anchors.fill: parent
@@ -12113,8 +12321,17 @@ ApplicationWindow {
                         height: 36
                         radius: 8
                         color: advancedAlertsToggleMouse.containsMouse ? theme.selection : theme.lighterBackground
-                        border.width: 1
-                        border.color: notificationsSettingsCol.advancedAlertsExpanded ? theme.accent : theme.muted
+                        border.width: activeFocus ? 2 : 1
+                        border.color: (notificationsSettingsCol.advancedAlertsExpanded || activeFocus) ? theme.accent : theme.muted
+                        activeFocusOnTab: true
+                        Accessible.role: Accessible.Button
+                        Accessible.name: i18n.tr("Audio Devices & Advanced Alerts")
+                        Accessible.checkable: true
+                        Accessible.checked: notificationsSettingsCol.advancedAlertsExpanded
+                        Accessible.onPressAction: notificationsSettingsCol.advancedAlertsExpanded = !notificationsSettingsCol.advancedAlertsExpanded
+                        Keys.onReturnPressed: notificationsSettingsCol.advancedAlertsExpanded = !notificationsSettingsCol.advancedAlertsExpanded
+                        Keys.onEnterPressed: notificationsSettingsCol.advancedAlertsExpanded = !notificationsSettingsCol.advancedAlertsExpanded
+                        Keys.onSpacePressed: notificationsSettingsCol.advancedAlertsExpanded = !notificationsSettingsCol.advancedAlertsExpanded
 
                         RowLayout {
                             anchors.fill: parent
@@ -14414,10 +14631,12 @@ ApplicationWindow {
                 ]
                 delegate: Rectangle {
                     required property var modelData
+                    readonly property bool hasStagedAttachment: (root.stagedAttachments.length > 0 || root.stagedAttachmentPath.length > 0) && root.isStagedAttachmentForChat(backend.selectedChatGuid)
                     Layout.fillWidth: true
                     height: 28
                     radius: 6
-                    color: effMouse.containsMouse ? theme.selection : "transparent"
+                    opacity: hasStagedAttachment ? 0.45 : 1.0
+                    color: (!hasStagedAttachment && effMouse.containsMouse) ? theme.selection : "transparent"
 
                     Text {
                         anchors.verticalCenter: parent.verticalCenter
@@ -14432,10 +14651,11 @@ ApplicationWindow {
                         id: effMouse
                         anchors.fill: parent
                         hoverEnabled: true
-                        cursorShape: Qt.PointingHandCursor
+                        enabled: !parent.hasStagedAttachment
+                        cursorShape: parent.hasStagedAttachment ? Qt.ArrowCursor : Qt.PointingHandCursor
                         onClicked: {
+                            if (parent.hasStagedAttachment || root.editTargetGuid !== "") return;
                             effectMenuPopup.visible = false;
-                            if (root.editTargetGuid !== "") return;
                             var txt = composerInput.text.trim();
                             if (txt.length === 0) {
                                 root.pendingSendEffectId = modelData.id;
@@ -14517,6 +14737,14 @@ ApplicationWindow {
             id: onboardingFocusScope
             anchors.fill: parent
             focus: firstRunOnboardingModal.visible
+            Keys.onTabPressed: function(event) {
+                firstRunOnboardingModal.focusActiveOnboardingControl()
+                event.accepted = true
+            }
+            Keys.onBacktabPressed: function(event) {
+                firstRunOnboardingModal.focusActiveOnboardingControl()
+                event.accepted = true
+            }
             Keys.onPressed: function(event) {
                 // Keep unhandled key events trapped within the visible onboarding guide
                 if (event.key !== Qt.Key_Escape) {
@@ -14619,6 +14847,8 @@ ApplicationWindow {
                                 border.width: activeFocus ? 2 : 1
                                 border.color: activeFocus ? theme.accent : theme.muted
                                 activeFocusOnTab: true
+                                KeyNavigation.tab: onboardingGetStartedBtn
+                                KeyNavigation.backtab: onboardingGetStartedBtn
                                 function triggerAction() {
                                     root.forceShowOnboarding = false
                                     backend.completeOnboarding()
@@ -14652,6 +14882,8 @@ ApplicationWindow {
                                 border.width: activeFocus ? 2 : 0
                                 border.color: theme.brightForeground
                                 activeFocusOnTab: true
+                                KeyNavigation.tab: onboardingSkipBtn
+                                KeyNavigation.backtab: onboardingSkipBtn
                                 function triggerAction() {
                                     root.onboardingStep = 1
                                     backend.discoverTailscaleRelays()
@@ -14726,6 +14958,8 @@ ApplicationWindow {
                                         border.width: activeFocus ? 2 : 1
                                         border.color: activeFocus ? theme.accent : theme.muted
                                         activeFocusOnTab: true
+                                        KeyNavigation.tab: onboardingGithubBtn
+                                        KeyNavigation.backtab: onboardingSkip2Btn
                                         function triggerAction() {
                                             root.forceShowOnboarding = true
                                             backend.startCloudSignIn("google")
@@ -14756,6 +14990,8 @@ ApplicationWindow {
                                         border.width: activeFocus ? 2 : 1
                                         border.color: activeFocus ? theme.accent : theme.muted
                                         activeFocusOnTab: true
+                                        KeyNavigation.tab: onboardingEmailBtn
+                                        KeyNavigation.backtab: onboardingGoogleBtn
                                         function triggerAction() {
                                             root.forceShowOnboarding = true
                                             backend.startCloudSignIn("github")
@@ -14786,6 +15022,8 @@ ApplicationWindow {
                                         border.width: activeFocus ? 2 : 0
                                         border.color: theme.brightForeground
                                         activeFocusOnTab: true
+                                        KeyNavigation.tab: onboardingCopyBrewBtn
+                                        KeyNavigation.backtab: onboardingGithubBtn
                                         function triggerAction() {
                                             root.forceShowOnboarding = true
                                             backend.startCloudSignIn("")
@@ -14819,7 +15057,10 @@ ApplicationWindow {
                                         color: theme.brightForeground
                                     }
                                     Button {
+                                        id: onboardingCancelCloudBtn
                                         text: i18n.tr("Cancel")
+                                        KeyNavigation.tab: onboardingCopyBrewBtn
+                                        KeyNavigation.backtab: onboardingSkip2Btn
                                         onClicked: backend.cancelCloudSignIn()
                                     }
                                 }
@@ -14836,7 +15077,10 @@ ApplicationWindow {
                                         color: theme.green
                                     }
                                     Button {
+                                        id: onboardingContinueBtn
                                         text: i18n.tr("Continue →")
+                                        KeyNavigation.tab: onboardingCopyBrewBtn
+                                        KeyNavigation.backtab: onboardingSkip2Btn
                                         onClicked: root.onboardingStep = 2
                                     }
                                 }
@@ -14905,6 +15149,10 @@ ApplicationWindow {
                                         border.width: activeFocus ? 2 : 1
                                         border.color: theme.accent
                                         activeFocusOnTab: true
+                                        KeyNavigation.tab: onboardingManualRelayBtn
+                                        KeyNavigation.backtab: (!backend.cloudSignInPending && backend.cloudAccountEmail.length === 0)
+                                                               ? onboardingEmailBtn
+                                                               : (backend.cloudSignInPending ? onboardingCancelCloudBtn : onboardingContinueBtn)
                                         function triggerAction() {
                                             backend.copyToClipboard("brew install nertwork/tap/bluepill", "brew install command")
                                         }
@@ -14936,6 +15184,8 @@ ApplicationWindow {
                                     border.width: activeFocus ? 2 : 1
                                     border.color: activeFocus ? theme.accent : theme.muted
                                     activeFocusOnTab: true
+                                    KeyNavigation.tab: onboardingDemoBtn
+                                    KeyNavigation.backtab: onboardingCopyBrewBtn
                                     function triggerAction() {
                                         root.forceShowOnboarding = false
                                         backend.completeOnboarding()
@@ -14972,6 +15222,8 @@ ApplicationWindow {
                             border.width: activeFocus ? 2 : 1
                             border.color: theme.green
                             activeFocusOnTab: true
+                            KeyNavigation.tab: onboardingBackBtn
+                            KeyNavigation.backtab: onboardingManualRelayBtn
                             function triggerAction() {
                                 root.forceShowOnboarding = true
                                 root.connectToLiveDemo()
@@ -15018,6 +15270,8 @@ ApplicationWindow {
                                 border.width: activeFocus ? 2 : 1
                                 border.color: activeFocus ? theme.accent : theme.muted
                                 activeFocusOnTab: true
+                                KeyNavigation.tab: onboardingSkip2Btn
+                                KeyNavigation.backtab: onboardingDemoBtn
                                 function triggerAction() {
                                     root.onboardingStep = 0
                                 }
@@ -15047,6 +15301,10 @@ ApplicationWindow {
                                 border.width: activeFocus ? 2 : 1
                                 border.color: activeFocus ? theme.accent : theme.muted
                                 activeFocusOnTab: true
+                                KeyNavigation.tab: (!backend.cloudSignInPending && backend.cloudAccountEmail.length === 0)
+                                                   ? onboardingGoogleBtn
+                                                   : (backend.cloudSignInPending ? onboardingCancelCloudBtn : onboardingContinueBtn)
+                                KeyNavigation.backtab: onboardingBackBtn
                                 function triggerAction() {
                                     root.forceShowOnboarding = false
                                     backend.completeOnboarding()
@@ -15126,6 +15384,8 @@ ApplicationWindow {
                             border.width: activeFocus ? 2 : 0
                             border.color: theme.brightForeground
                             activeFocusOnTab: true
+                            KeyNavigation.tab: onboardingStartMessagingBtn
+                            KeyNavigation.backtab: onboardingStartMessagingBtn
                             function triggerAction() {
                                 root.forceShowOnboarding = false
                                 backend.completeOnboarding()

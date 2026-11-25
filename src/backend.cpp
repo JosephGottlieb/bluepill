@@ -12433,6 +12433,11 @@ bool Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
             return false;
         }
     }
+    if (!m_demoMode && (m_serverUrl.isEmpty() || !buildApiUrl(QStringLiteral("/api/v1/message/attachment")).isValid())) {
+        emit toastMessage(QStringLiteral("⚠ Relay server not ready; attachment kept in composer"));
+        emit attachmentSendRejected(canonicalGuid, QStringList{absLocalPath}, cleanCaption);
+        return false;
+    }
     const QString tempGuid = QStringLiteral("temp-att-") + QUuid::createUuid().toString(QUuid::WithoutBraces);
     const QString localUrl = QUrl::fromLocalFile(absLocalPath).toString();
     const bool isImg = isImageMimeOrExt(QString(), fi.fileName());
@@ -12524,8 +12529,8 @@ bool Backend::sendAttachmentInternal(const QString &chatGuid, const QString &fil
     sortChats();
     emit chatsChanged();
     emit toastMessage(isAud ? QStringLiteral("🎤 Sending voice memo...") : QStringLiteral("📎 Sending %1...").arg(fi.fileName()));
-    if (m_demoMode || m_serverUrl.isEmpty()) {
-        if (m_demoMode && m_demoChatMessages.contains(canonicalGuid)) {
+    if (m_demoMode) {
+        if (m_demoChatMessages.contains(canonicalGuid)) {
             m_demoChatMessages[canonicalGuid].append(optimistic);
         }
         return true;
