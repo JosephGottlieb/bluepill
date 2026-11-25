@@ -58,7 +58,7 @@ import math
 from http.server import BaseHTTPRequestHandler, HTTPServer, ThreadingHTTPServer
 from typing import Any, Deque, Dict, List, Optional, Tuple
 
-VERSION = "1.2.14"
+VERSION = "1.2.15"
 DEFAULT_CLOUD_RELAY_URL = "wss://api.bluepill.nertwork.com/tunnel/connect"
 DEFAULT_UPDATES_FEED_URL = "https://api.bluepill.nertwork.com/api/v1/updates/latest"
 UPDATE_CHECK_INTERVAL_SECONDS = 6 * 3600
@@ -9473,7 +9473,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
     <div class="brand">
       <span class="pill-icon">BP</span>
       <span>BluePill</span>
-      <span class="pill pill-blue">v1.2.14</span>
+      <span class="pill pill-blue">v1.2.15</span>
       <span class="status-dot" id="wcConnDot"></span>
       <span id="serverBadge" class="pill">Enter API Key to Connect</span>
     </div>
@@ -9532,6 +9532,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
           <option value="com.apple.messages.effect.CKConfettiEffect">🎉 Confetti</option>
           <option value="com.apple.messages.effect.CKFireworksEffect">🎆 Fireworks</option>
           <option value="com.apple.messages.effect.CKLasersEffect">✨ Lasers</option>
+          <option value="com.apple.messages.effect.CKEchoEffect">🗣️ Echo</option>
           <option value="com.apple.MobileSMS.expressivesend.impact">💥 Slam</option>
           <option value="com.apple.MobileSMS.expressivesend.loud">📢 Loud</option>
           <option value="com.apple.MobileSMS.expressivesend.gentle">🪶 Gentle</option>
@@ -10638,6 +10639,7 @@ WEB_UI_HTML = r"""<!DOCTYPE html>
       if (id.indexOf('CKConfettiEffect') !== -1) return 'Confetti';
       if (id.indexOf('CKLasersEffect') !== -1) return 'Lasers';
       if (id.indexOf('CKFireworksEffect') !== -1) return 'Fireworks';
+      if (id.indexOf('CKEchoEffect') !== -1) return 'Echo';
       return id.split('.').pop() || id;
     }
 

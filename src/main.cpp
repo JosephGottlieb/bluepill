@@ -66,7 +66,7 @@ int main(int argc, char *argv[]) {
 #ifdef Q_OS_WIN
         attachParentConsoleForCli();
 #endif
-        std::cout << "bluepill 1.2.14 (imsg compatible)\n"
+        std::cout << "bluepill 1.2.15 (imsg compatible)\n"
                   << "Usage: bluepill [options|command]\n\n"
                   << "Options:\n"
                   << "  -h, --help                         Show this help message and exit\n"
@@ -83,7 +83,7 @@ int main(int argc, char *argv[]) {
 #ifdef Q_OS_WIN
         attachParentConsoleForCli();
 #endif
-        std::cout << "bluepill 1.2.14 (imsg compatible)" << std::endl;
+        std::cout << "bluepill 1.2.15 (imsg compatible)" << std::endl;
         return 0;
     }
     if (rawArgs.contains(QStringLiteral("--webui")) || (!rawArgs.isEmpty() && rawArgs.first() == QStringLiteral("webui"))) {
@@ -109,7 +109,7 @@ int main(int argc, char *argv[]) {
 #endif
         QCoreApplication app(argc, argv);
         app.setApplicationName(QStringLiteral("imsg"));
-        app.setApplicationVersion(QStringLiteral("1.2.14"));
+        app.setApplicationVersion(QStringLiteral("1.2.15"));
         Backend backend(false);
         const bool asJson = rawArgs.contains(QStringLiteral("--json"));
         const QString cmd = rawArgs.first();
@@ -134,7 +134,7 @@ int main(int argc, char *argv[]) {
     QQuickStyle::setStyle(QStringLiteral("Basic"));
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("imsg"));
-    app.setApplicationVersion(QStringLiteral("1.2.14"));
+    app.setApplicationVersion(QStringLiteral("1.2.15"));
     app.setDesktopFileName(QStringLiteral("bluepill"));
     app.setWindowIcon(QIcon(QStringLiteral(":/bluepill.svg")));
     app.setOrganizationName(QStringLiteral("Omarchy"));
